@@ -2,13 +2,13 @@
 # FILE: klines_cache.py
 
 from __future__ import annotations
-import sqlite3, time, math, requests
+import sqlite3, time, math
 from typing import Iterable, List, Tuple, Optional, Dict, Any
 from dataclasses import dataclass
+import threading
 
 from contracts import EngineServices
 from common import tf_ms
-import threading
 
 @dataclass
 class KlineRow:
@@ -39,6 +39,7 @@ class KlineRow:
     v: float
     finalized: int  # 0/1
 
+
 class KlinesCache:
     """
     Single-table kline cache.
@@ -49,10 +50,11 @@ class KlinesCache:
         - Stores a 'finalized' bit so you can query "closed-only" vs "include live" quickly.
 
     Typical usage:
-        cache = KlinesCache("./rv_cache.sqlite")
+        cache = KlinesCache(eng)
         last_open = cache.latest_open_ts("ETHUSDT", "1m")
-        cache.fetch_and_cache(api, "ETHUSDT", "1m", since_open_ts=last_open, max_bars=1000)
-        rows = cache.last_n("ETHUSDT", "1m", n=500, include_live=False)
+        # fetch externally via API and then:
+        # cache.ingest_klines("ETHUSDT", "1m", klines, now_ms)
+        rows = cache.last_n("ETHUSDT", "1m", n=500, include_live=False)  # returns list[sqlite3.Row]-like
     """
 
     def __init__(self, eng: EngineServices):
@@ -60,8 +62,7 @@ class KlinesCache:
         Open/create the SQLite cache.
 
         Args:
-            cfg: AppConfig-like object containing at least KLINES_CACHE_DB_PATH.
-            api: Option1al BinanceUM-like object (used for clock sync, fetches, etc.).
+            eng: EngineServices providing cfg (with KLINES_CACHE_DB_PATH) and api.
         """
         self.eng = eng
         self.cfg = eng.cfg
@@ -75,9 +76,10 @@ class KlinesCache:
         self.con.row_factory = sqlite3.Row
         self._ensure_schema()
 
-        # Mechanism to keep "now" consistent in a batch operations. Needs to be manually reset before batch operations
+        # Mechanism to keep "now" consistent within batch normalization
         self._last_now_ms = None
 
+        # DB lock for concurrent writers (WAL allows concurrent readers)
         self._db_lock = threading.Lock()
 
     # ---------- schema ----------
@@ -108,10 +110,20 @@ class KlinesCache:
           ON klines(finalized, close_ts);
         """)
         self.con.commit()
+
+    def _ensure_api(self):
+        """
+        Ensure the cache has access to an exchange API when required.
+        """
+        if self.api is None:
+            raise RuntimeError("This operation requires an API instance (eng.api is None).")
+
     def close(self):
         """Close the underlying SQLite connection (best-effort)."""
-        try: self.con.close()
-        except: pass
+        try:
+            self.con.close()
+        except:
+            pass
 
     # ---------- writes ----------
     def upsert(self, row: KlineRow):
@@ -131,7 +143,8 @@ class KlinesCache:
                  close=excluded.close, volume=excluded.volume,
                  finalized=excluded.finalized"""
         with self._db_lock:
-            self.con.execute(q, (row.symbol,row.timeframe,row.open_ts,row.close_ts,row.o,row.h,row.l,row.c,row.v,row.finalized))
+            self.con.execute(q, (row.symbol,row.timeframe,row.open_ts,row.close_ts,
+                                 row.o,row.h,row.l,row.c,row.v,row.finalized))
             self.con.commit()
 
     def bulk_upsert(self, rows: Iterable[KlineRow]):
@@ -152,10 +165,14 @@ class KlinesCache:
                  open=excluded.open, high=excluded.high, low=excluded.low,
                  close=excluded.close, volume=excluded.volume,
                  finalized=excluded.finalized"""
+        payload = [
+            (r.symbol,r.timeframe,r.open_ts,r.close_ts,r.o,r.h,r.l,r.c,r.v,r.finalized)
+            for r in rows
+        ]
+        if not payload:
+            return
         with self._db_lock:
-            self.con.executemany(q, [
-                (r.symbol,r.timeframe,r.open_ts,r.close_ts,r.o,r.h,r.l,r.c,r.v,r.finalized) for r in rows
-            ])
+            self.con.executemany(q, payload)
             self.con.commit()
 
     def finalize_due(self, now_ms: Optional[int] = None) -> int:
@@ -172,7 +189,7 @@ class KlinesCache:
             - You fetched live bars minutes ago; call this to mark anything that is now definitively closed.
         """
         if now_ms is None:
-            now_ms = int(time.time()*1000)
+            now_ms = int(time.time() * 1000)
         with self._db_lock:
             cur = self.con.cursor()
             cur.execute("""UPDATE klines
@@ -181,7 +198,9 @@ class KlinesCache:
             self.con.commit()
             return cur.rowcount
 
-    def prune_keep_last_n(self, keep_n: int, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> int:
+    def prune_keep_last_n(self, keep_n: int,
+                          symbol: Optional[str] = None,
+                          timeframe: Optional[str] = None) -> int:
         """
         Keep only the newest N candles per group.
 
@@ -202,7 +221,7 @@ class KlinesCache:
         with self._db_lock:
             cur = self.con.cursor()
             if symbol and timeframe:
-                cur.execute(f"""
+                cur.execute("""
                 WITH ranked AS (
                   SELECT open_ts
                   FROM klines
@@ -226,7 +245,7 @@ class KlinesCache:
             self.con.commit()
             return cur.rowcount
 
-    # ---------- reads ----------
+    # ---------- reads (now returning sqlite3.Row dict-like) ----------
     def count(self, symbol: str | None = None, timeframe: str | None = None) -> int:
         """
         Count cached klines.
@@ -245,8 +264,8 @@ class KlinesCache:
         """
         cur = self.con.cursor()
         sql = "SELECT COUNT(*) FROM klines"
-        args = []
-        where = []
+        args: List[Any] = []
+        where: List[str] = []
         if symbol:
             where.append("symbol = ?")
             args.append(symbol.upper())
@@ -256,7 +275,7 @@ class KlinesCache:
         if where:
             sql += " WHERE " + " AND ".join(where)
         cur.execute(sql, args)
-        return cur.fetchone()[0]
+        return int(cur.fetchone()[0])
 
     def latest_open_ts(self, symbol: str, timeframe: str) -> Optional[int]:
         """
@@ -266,15 +285,18 @@ class KlinesCache:
             open_ts in ms, or None if no rows yet.
 
         Use cases:
-            - Incremental fetch: pass this to `fetch_and_cache(..., since_open_ts=...)`.
+            - Incremental fetch: pass this to your fetcher.
         """
-        r = self.con.execute("""SELECT open_ts FROM klines
-                                WHERE symbol=? AND timeframe=?
-                                ORDER BY open_ts DESC LIMIT 1""", (symbol,timeframe)).fetchone()
+        r = self.con.execute(
+            """SELECT open_ts FROM klines
+               WHERE symbol=? AND timeframe=?
+               ORDER BY open_ts DESC LIMIT 1""",
+            (symbol, timeframe)
+        ).fetchone()
         return int(r["open_ts"]) if r else None
 
     def last_n(self, symbol: str, timeframe: str, n: int,
-               include_live: bool = True, asc: bool = True) -> List[KlineRow]:
+               include_live: bool = True, asc: bool = True) -> List[sqlite3.Row]:
         """
         Fetch the last N klines for (symbol,timeframe).
 
@@ -286,22 +308,26 @@ class KlinesCache:
             asc: If True, results are ordered oldest→newest; if False, newest→oldest.
 
         Returns:
-            List[KlineRow] of length ≤ n, correctly representing the last N bars.
+            List[sqlite3.Row] (dict-like) of length ≤ n.
+            Keys: symbol, timeframe, open_ts, close_ts, open, high, low, close, volume, finalized
         """
         live_clause = "" if include_live else "AND finalized=1"
-
-        # fetch newest first, then reverse if ascending requested
         q = f"""
-            SELECT * FROM klines
+            SELECT symbol, timeframe, open_ts, close_ts,
+                   open, high, low, close, volume, finalized
+            FROM klines
             WHERE symbol=? AND timeframe=? {live_clause}
             ORDER BY open_ts DESC
             LIMIT ?
         """
         rows = self.con.execute(q, (symbol, timeframe, n)).fetchall()
-        out = [self._row_to_dataclass(r) for r in rows]
-        return list(reversed(out)) if asc else out
+        if asc:
+            rows = list(reversed(rows))
+        return rows
 
-    def range_by_open(self, symbol: str, timeframe: str, start_open_ts: int, end_open_ts: int, include_live: bool = True) -> List[KlineRow]:
+    def range_by_open(self, symbol: str, timeframe: str,
+                      start_open_ts: int, end_open_ts: int,
+                      include_live: bool = True) -> List[sqlite3.Row]:
         """
         Get klines in [start_open_ts, end_open_ts) by open timestamp.
 
@@ -313,20 +339,21 @@ class KlinesCache:
             include_live: If False, returns closed candles only.
 
         Returns:
-            List[KlineRow] ordered by open_ts ASC.
-
-        Notes:
-            - Good for live-trading logic that keys off candle starts.
+            List[sqlite3.Row] ordered by open_ts ASC.
         """
-        q = """SELECT * FROM klines
-               WHERE symbol=? AND timeframe=? AND open_ts>=? AND open_ts<? {live}
-               ORDER BY open_ts ASC"""
         live_clause = "" if include_live else "AND finalized=1"
-        rows = self.con.execute(q.format(live=live_clause),
-                                (symbol,timeframe,start_open_ts,end_open_ts)).fetchall()
-        return [self._row_to_dataclass(r) for r in rows]
+        q = f"""SELECT symbol, timeframe, open_ts, close_ts,
+                       open, high, low, close, volume, finalized
+                FROM klines
+                WHERE symbol=? AND timeframe=?
+                  AND open_ts>=? AND open_ts<? {live_clause}
+                ORDER BY open_ts ASC"""
+        rows = self.con.execute(q, (symbol, timeframe, start_open_ts, end_open_ts)).fetchall()
+        return rows
 
-    def range_by_close(self, symbol: str, timeframe: str, start_close_ts: int, end_close_ts: int, include_live: bool = True) -> List[KlineRow]:
+    def range_by_close(self, symbol: str, timeframe: str,
+                       start_close_ts: int, end_close_ts: int,
+                       include_live: bool = True) -> List[sqlite3.Row]:
         """
         Get klines whose close_ts falls in (start_close_ts, end_close_ts].
 
@@ -338,32 +365,37 @@ class KlinesCache:
             include_live: If False, returns closed candles only.
 
         Returns:
-            List[KlineRow] ordered by open_ts ASC.
-
-        Notes:
-            - Ideal for “signal at close” logic and backtesting windows.
+            List[sqlite3.Row] ordered by open_ts ASC.
         """
-        q = """SELECT * FROM klines
-               WHERE symbol=? AND timeframe=? AND close_ts> ? AND close_ts<=? {live}
-               ORDER BY open_ts ASC"""
         live_clause = "" if include_live else "AND finalized=1"
-        rows = self.con.execute(q.format(live=live_clause),
-                                (symbol,timeframe,start_close_ts,end_close_ts)).fetchall()
-        return [self._row_to_dataclass(r) for r in rows]
+        q = f"""SELECT symbol, timeframe, open_ts, close_ts,
+                       open, high, low, close, volume, finalized
+                FROM klines
+                WHERE symbol=? AND timeframe=?
+                  AND close_ts>? AND close_ts<=? {live_clause}
+                ORDER BY open_ts ASC"""
+        rows = self.con.execute(q, (symbol, timeframe, start_close_ts, end_close_ts)).fetchall()
+        return rows
 
-    def last_row(self, symbol: str, timeframe: str) -> Optional[KlineRow]:
+    def last_row(self, symbol: str, timeframe: str) -> Optional[sqlite3.Row]:
         """
         Get the newest single row for (symbol,timeframe).
 
         Returns:
-            KlineRow or None.
+            sqlite3.Row (dict-like) or None.
         """
-        r = self.con.execute("""SELECT * FROM klines
-                                WHERE symbol=? AND timeframe=?
-                                ORDER BY open_ts DESC LIMIT 1""", (symbol,timeframe)).fetchone()
-        return self._row_to_dataclass(r) if r else None
+        r = self.con.execute(
+            """SELECT symbol, timeframe, open_ts, close_ts,
+                      open, high, low, close, volume, finalized
+               FROM klines
+               WHERE symbol=? AND timeframe=?
+               ORDER BY open_ts DESC LIMIT 1""",
+            (symbol, timeframe)
+        ).fetchone()
+        return r
 
-    def ingest_klines(self, symbol: str, timeframe: str, klines: list, now_ms) -> int:
+    def ingest_klines(self, symbol: str, timeframe: str,
+                      klines: list, now_ms) -> int:
         """
         Normalize and persist klines already fetched externally (e.g. via BinanceUM).
 
@@ -405,9 +437,7 @@ class KlinesCache:
                 finalized=1,
             ))
 
-        # rows.sort(key=lambda r: r.open_ts)  -- unnecessary sorting
-
-        # un-finalize live candle
+        # Un-finalize live candle if still open
         if rows:
             last = rows[-1]
             if last.close_ts > now_ms:
@@ -421,6 +451,7 @@ class KlinesCache:
     def _row_to_dataclass(r: sqlite3.Row) -> KlineRow:
         """
         Convert sqlite3.Row to KlineRow.
+        (Kept for compatibility; not used by current read methods.)
         """
         return KlineRow(
             symbol=r["symbol"], timeframe=r["timeframe"],
@@ -458,9 +489,8 @@ class KlinesCache:
             tf = x.get("timeframe")
             if tf is None:
                 if timeframe is None:
-                    raise ValueError(f"If record's timeframe is not defined, timeframe argument must be set")
-                else:
-                    tf = timeframe
+                    raise ValueError("If record's timeframe is not defined, timeframe argument must be set")
+                tf = timeframe
             open_ts = int(x["open_ts"])
             close_ts = int(x.get("close_ts") or 0)
             o = float(x["open"])
@@ -482,7 +512,6 @@ class KlinesCache:
                 close_ts, o, h, l, c, v, fin = rest
             else:
                 raise ValueError("Tuple shape not recognized for _norm_one()")
-
             o, h, l, c, v = float(o), float(h), float(l), float(c), float(v)
             fin = None if fin is None else (1 if bool(fin) else 0)
 
@@ -495,16 +524,14 @@ class KlinesCache:
 
         # -- derive finalized if missing --
         if fin is None:
-            # -- determine 'now' using exchange-synced time --
             if self._last_now_ms is None:
                 self._ensure_api()
                 self._last_now_ms = self.api.now_ms()
-
             fin = 0 if close_ts > self._last_now_ms else 1
         else:
             fin = 1 if bool(fin) else 0
 
-        # -- basic sanity check --
+        # -- sanity --
         if close_ts <= open_ts:
             raise ValueError(f"close_ts({close_ts}) <= open_ts({open_ts}) for {symbol} {tf}")
 
@@ -524,7 +551,7 @@ class KlinesCache:
                  open:float, high:float, low:float, close:float,
                  volume:float, finalized:int|bool)
 
-            Required dict keys:
+            Dict keys:
                 {
                   "symbol", "timeframe", "open_ts", "close_ts",
                   "open", "high", "low", "close", "volume", "finalized"
@@ -537,27 +564,11 @@ class KlinesCache:
 
         timeframe : str, optional
             If provided, this value overrides the `timeframe` field in every row.
-            This is useful when all klines belong to the same timeframe and the source
-            data (e.g., Binance API) doesn’t include it explicitly.
 
         Returns
         -------
         int
             Number of rows inserted or updated (SQLite's `changes()` across the transaction).
-
-        Behavior
-        --------
-        - Uses a single transaction for the whole batch.
-        - Employs UPSERT on UNIQUE(symbol, timeframe, open_ts).
-        - Ignores empty input (returns 0).
-        - Minimal validation: checks tuple length and timeframe validity.
-        - If `timeframe` argument is provided, overwrites any per-row value.
-
-        Raises
-        ------
-        ValueError
-            If a tuple has wrong arity, required dict keys are missing,
-            or timeframe is unknown.
         """
         rows = list(rows)
         if not rows:
@@ -593,3 +604,75 @@ class KlinesCache:
             except Exception:
                 self.con.rollback()
                 raise
+
+
+# ---------- standalone helper (rows -> pandas.DataFrame) ----------
+def rows_to_dataframe(rows):
+    """
+    Zero-copy-ish path from iterable[sqlite3.Row|dict] -> DataFrame.
+
+    - Uses pandas.from_records to vectorize ingestion.
+    - Keeps only open,high,low,close,volume.
+    - Renames to ['Open','High','Low','Close','Volume'].
+    - Index = Date (from open_ts, ms). No sorting.
+    - Sets df.attrs['symbol'] / ['timeframe'] when unique.
+    """
+    import pandas as pd
+
+    rows = list(rows)
+    if not rows:
+        df = pd.DataFrame(columns=["Open","High","Low","Close","Volume"])
+        df.index.name = "Date"
+        df.attrs["symbol"] = None
+        df.attrs["timeframe"] = None
+        return df
+
+    # Let pandas ingest mapping/rows in C
+    # Derive columns from first row if possible (sqlite3.Row supports .keys())
+    try:
+        cols = list(rows[0].keys())
+    except Exception:
+        cols = None  # let pandas infer
+
+    df = pd.DataFrame.from_records(rows, columns=cols)
+
+    # Minimal columns present check
+    needed = ["open_ts", "open", "high", "low", "close", "volume"]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise ValueError(f"rows_to_dataframe: missing columns {missing}")
+
+    # Build target view without extra copies
+    # Pop open_ts to avoid an extra column copy later
+    open_ts = df.pop("open_ts").to_numpy(dtype="int64", copy=False)
+
+    # Keep only required price/vol columns in one pass
+    df = df.loc[:, ["open", "high", "low", "close", "volume"]]
+
+    # Rename in-place (O(1))
+    df.columns = ["Open", "High", "Low", "Close", "Volume"]
+
+    # Set Date index (vectorized)
+    df.index = pd.to_datetime(open_ts, unit="ms", utc=False)
+    df.index.name = "Date"
+
+    # Attach metadata only if unique (cheap nunique on small columns)
+    for meta in ("symbol", "timeframe"):
+        if meta in (cols or df.columns):
+            s = df.get(meta)
+            # if meta was popped earlier, it won't exist; fallback to building from rows
+            if s is None:
+                try:
+                    series = pd.Series([r[meta] if isinstance(r, dict) else r[meta] for r in rows])
+                except Exception:
+                    series = None
+            else:
+                series = s
+            if series is not None and series.nunique(dropna=True) == 1:
+                df.attrs[meta] = series.iloc[0]
+            else:
+                df.attrs[meta] = None
+        else:
+            df.attrs[meta] = None
+
+    return df

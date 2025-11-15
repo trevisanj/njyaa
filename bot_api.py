@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from binance_um import BinanceUM
 import threading, time
 from typing import Callable, Dict
-from klines_cache import KlinesCache
+from klines_cache import KlinesCache, rows_to_dataframe
 # inside bot_api.py (or a separate charts.py helper imported there)
 import tempfile, os, io
 import matplotlib.pyplot as plt
@@ -845,14 +845,16 @@ def render_chart(eng: BotEngine, symbol: str, timeframe: str, outdir: str = "/tm
     if not rows:
         raise ValueError(f"No cached klines for {symbol} {timeframe}")
 
-    df = pd.DataFrame([{
-        "Date": pd.to_datetime(r["open_ts"], unit="ms"),
-        "Open": float(r["o"]),
-        "High": float(r["h"]),
-        "Low":  float(r["l"]),
-        "Close":float(r["c"]),
-        "Volume":float(r["v"]),
-    } for r in rows]).set_index("Date")
+    df = rows_to_dataframe(rows)
+
+
+    #     "Date": pd.to_datetime(r["open_ts"], unit="ms"),
+    #     "Open": float(r["o"]),
+    #     "High": float(r["h"]),
+    #     "Low":  float(r["l"]),
+    #     "Close":float(r["c"]),
+    #     "Volume":float(r["v"]),
+    # } for r in rows]).set_index("Date")
 
     # Simple indicator (20-period MA)
     df["MA20"] = df["Close"].rolling(window=20).mean()
