@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from contracts import EngineServices
 from common import tf_ms
+import threading
 
 @dataclass
 class KlineRow:
@@ -77,26 +78,10 @@ class KlinesCache:
         # Mechanism to keep "now" consistent in a batch operations. Needs to be manually reset before batch operations
         self._last_now_ms = None
 
-    def _ensure_api(self):
-        """
-        Ensure the cache has access to a BinanceUM-like API when required.
-
-        Raises
-        ------
-        RuntimeError
-            If no API object is set.
-        """
-        if self.api is None:
-            raise RuntimeError("This operation requires an API instance. "
-                               "Initialize KlinesCache with api=BinanceUM(...) first.")
+        self._db_lock = threading.Lock()
 
     # ---------- schema ----------
     def _ensure_schema(self):
-        """
-        Create tables and indexes if they don't exist.
-        - WAL enabled for concurrency/perf.
-        - Secondary index on close_ts for at-close scans.
-        """
         c = self.con.cursor()
         c.executescript("""
         PRAGMA journal_mode=WAL;
@@ -117,12 +102,12 @@ class KlinesCache:
         );
         CREATE INDEX IF NOT EXISTS idx_klines_close
           ON klines(symbol, timeframe, close_ts);
-          
         CREATE INDEX IF NOT EXISTS ix_klines_sym_tf_ts
           ON klines(symbol, timeframe, open_ts DESC);
+        CREATE INDEX IF NOT EXISTS ix_klines_final_close
+          ON klines(finalized, close_ts);
         """)
         self.con.commit()
-
     def close(self):
         """Close the underlying SQLite connection (best-effort)."""
         try: self.con.close()
@@ -145,8 +130,9 @@ class KlinesCache:
                  open=excluded.open, high=excluded.high, low=excluded.low,
                  close=excluded.close, volume=excluded.volume,
                  finalized=excluded.finalized"""
-        self.con.execute(q, (row.symbol,row.timeframe,row.open_ts,row.close_ts,row.o,row.h,row.l,row.c,row.v,row.finalized))
-        self.con.commit()
+        with self._db_lock:
+            self.con.execute(q, (row.symbol,row.timeframe,row.open_ts,row.close_ts,row.o,row.h,row.l,row.c,row.v,row.finalized))
+            self.con.commit()
 
     def bulk_upsert(self, rows: Iterable[KlineRow]):
         """
@@ -166,10 +152,11 @@ class KlinesCache:
                  open=excluded.open, high=excluded.high, low=excluded.low,
                  close=excluded.close, volume=excluded.volume,
                  finalized=excluded.finalized"""
-        self.con.executemany(q, [
-            (r.symbol,r.timeframe,r.open_ts,r.close_ts,r.o,r.h,r.l,r.c,r.v,r.finalized) for r in rows
-        ])
-        self.con.commit()
+        with self._db_lock:
+            self.con.executemany(q, [
+                (r.symbol,r.timeframe,r.open_ts,r.close_ts,r.o,r.h,r.l,r.c,r.v,r.finalized) for r in rows
+            ])
+            self.con.commit()
 
     def finalize_due(self, now_ms: Optional[int] = None) -> int:
         """
@@ -186,12 +173,13 @@ class KlinesCache:
         """
         if now_ms is None:
             now_ms = int(time.time()*1000)
-        cur = self.con.cursor()
-        cur.execute("""UPDATE klines
-                       SET finalized=1
-                       WHERE finalized=0 AND close_ts <= ?""", (now_ms,))
-        self.con.commit()
-        return cur.rowcount
+        with self._db_lock:
+            cur = self.con.cursor()
+            cur.execute("""UPDATE klines
+                           SET finalized=1
+                           WHERE finalized=0 AND close_ts <= ?""", (now_ms,))
+            self.con.commit()
+            return cur.rowcount
 
     def prune_keep_last_n(self, keep_n: int, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> int:
         """
@@ -211,45 +199,32 @@ class KlinesCache:
         """
         assert (symbol and timeframe) or (not symbol and not timeframe), \
             "Either both symbol and timeframe must be provided, or neither."
-        cur = self.con.cursor()
-        if symbol and timeframe:
-            cur.execute(f"""
-            WITH ranked AS (
-              SELECT open_ts
-              FROM klines
-              WHERE symbol=? AND timeframe=?
-              ORDER BY open_ts DESC
-              LIMIT -1 OFFSET ?
-            )
-            DELETE FROM klines
-            WHERE symbol=? AND timeframe=? AND open_ts IN (SELECT open_ts FROM ranked)
-            """, (symbol, timeframe, keep_n, symbol, timeframe))
-        else:
-            cur.execute("""
-            DELETE FROM klines
-            WHERE (symbol,timeframe,open_ts) NOT IN (
-              SELECT symbol,timeframe,open_ts FROM (
-                SELECT symbol,timeframe,open_ts,
-                       ROW_NUMBER() OVER (PARTITION BY symbol,timeframe ORDER BY open_ts DESC) AS rn
-                FROM klines
-              ) WHERE rn <= ?
-            )""", (keep_n,))
-        self.con.commit()
-        return cur.rowcount
-
-    # def bulk_prune(self, symbol: str, timeframe: str, keep: int):
-    #     """Delete oldest rows beyond `keep` most recent ones."""
-    #     if keep <= 0: return
-    #     self.con.execute("""
-    #         DELETE FROM klines
-    #          WHERE rowid NOT IN (
-    #              SELECT rowid FROM klines
-    #               WHERE symbol=? AND timeframe=?
-    #               ORDER BY open_ts DESC LIMIT ?
-    #          ) AND symbol=? AND timeframe=?;
-    #     """, (symbol, timeframe, keep, symbol, timeframe))
-    #     self.con.commit()
-
+        with self._db_lock:
+            cur = self.con.cursor()
+            if symbol and timeframe:
+                cur.execute(f"""
+                WITH ranked AS (
+                  SELECT open_ts
+                  FROM klines
+                  WHERE symbol=? AND timeframe=?
+                  ORDER BY open_ts DESC
+                  LIMIT -1 OFFSET ?
+                )
+                DELETE FROM klines
+                WHERE symbol=? AND timeframe=? AND open_ts IN (SELECT open_ts FROM ranked)
+                """, (symbol, timeframe, keep_n, symbol, timeframe))
+            else:
+                cur.execute("""
+                DELETE FROM klines
+                WHERE (symbol,timeframe,open_ts) NOT IN (
+                  SELECT symbol,timeframe,open_ts FROM (
+                    SELECT symbol,timeframe,open_ts,
+                           ROW_NUMBER() OVER (PARTITION BY symbol,timeframe ORDER BY open_ts DESC) AS rn
+                    FROM klines
+                  ) WHERE rn <= ?
+                )""", (keep_n,))
+            self.con.commit()
+            return cur.rowcount
 
     # ---------- reads ----------
     def count(self, symbol: str | None = None, timeframe: str | None = None) -> int:
@@ -606,269 +581,15 @@ class KlinesCache:
            finalized= excluded.finalized
         """
 
-        cur = self.con.cursor()
-        try:
-            cur.execute("BEGIN")
-            cur.executemany(sql, batch)
-            cur.execute("SELECT changes()")
-            changed = cur.fetchone()[0] or 0
-            self.con.commit()
-            return int(changed)
-        except Exception:
-            self.con.rollback()
-            raise
-
-
-# ---------------------------
-# __main__: offline-first smoke test for KLinesCache (NO argparse)
-# ---------------------------
-if __name__ == "__main__":
-    """
-    What this does:
-      1) Opens/creates the cache DB (DB_PATH).
-      2) Synthesizes a batch of 1m candles for SYMBOL (or fetches live if LIVE_MODE=True).
-      3) Upserts them; then upserts an overlapping tail to test idempotency + live-bar overwrite.
-      4) Reads back last N, a small time-window, and latest bar.
-      5) Prunes to keep only KEEP newest bars.
-
-    Tweak the GLOBALS below. No CLI, no surprises.
-    """
-    
-    import os
-    import time as _time
-    from bot_api import AppConfig
-    from zoneinfo import ZoneInfo
-    from common import _TF_MS
-
-
-    def ascii_chart(bars, symbol: str = "", timeframe: str = "", height: int = 20):
-        """
-        Render an ASCII multi-line candlestick-style chart in the terminal.
-
-        Parameters
-        ----------
-        bars : list[KlineRow]
-            Sequence of KlineRow objects (must have .o, .h, .l, .c, .finalized).
-        symbol : str, optional
-            Symbol label for the chart title.
-        timeframe : str, optional
-            Timeframe label for the chart title.
-        height : int, default 20
-            Vertical resolution in rows (more = smoother).
-
-        Behavior
-        --------
-        - Uses O/H/L/C to draw vertical wicks and candle bodies.
-        - Filled blocks (`█`) represent closed candles.
-        - Thin glyphs (`┆`) mark live (unfinalized) candles.
-        - Scales automatically to visible price range.
-        - Prints numeric scale on the left.
-        """
-        if not bars:
-            print("[ascii_chart] No data.")
-            return
-
-        highs = [r.h for r in bars]
-        lows = [r.l for r in bars]
-        hi, lo = max(highs), min(lows)
-        rng = max(hi - lo, 1e-12)
-        step = rng / (height - 1)
-
-        width = len(bars)
-        grid = [[" " for _ in range(width)] for _ in range(height)]
-
-        for i, r in enumerate(bars):
-            hi_row = int((r.h - lo) / step)
-            lo_row = int((r.l - lo) / step)
-            op_row = int((r.o - lo) / step)
-            cl_row = int((r.c - lo) / step)
-            top = max(op_row, cl_row)
-            bot = min(op_row, cl_row)
-            for y in range(lo_row, hi_row + 1):
-                if bot <= y <= top:
-                    grid[y][i] = "█" if r.finalized else "┆"
-                elif grid[y][i] == " ":
-                    grid[y][i] = "│"
-
-        print(f"\nASCII Chart ({symbol} {timeframe}) — {len(bars)} bars")
-        for y in reversed(range(height)):
-            level = lo + y * step
-            if y % (height // 5) == 0 or y == 0:
-                label = f"{level:>10.4f} ┤"
-            else:
-                label = " " * 12
-            print(label + "".join(grid[y]))
-        print(" " * 12 + "─" * width)
-        print(" " * 12 + "0" + " " * (width - 2) + f"{width:>3d}")
-        print(f"range: {lo:.4f} – {hi:.4f}")
-
-
-    # --------- GLOBALS (tune here) ---------
-    TZ_LOCAL = ZoneInfo("America/Fortaleza")
-    DB_PATH   = os.environ.get("RV_KCACHE", "./rv_klines_cache.sqlite")
-    SYMBOL    = "ETHUSDT"
-    TF        = "1m"       # "1m","5m","15m","1h","4h","1d"
-    N_BARS    = 300        # initial synthetic (or live) bars
-    OVERLAP   = 5          # how many bars to overlap in the 2nd upsert
-    KEEP      = 200        # prune to keep last KEEP bars
-    LIVE_MODE = True      # set True to use Binance; see LiveFetcher notes
-    LIVE_MINUTES = 180     # if LIVE_MODE=True and you prefer minutes span instead of N_BARS
-
-    CHANGE = False         # If False, changes to database will be skipped
-
-    # --------- interval mapping ----------
-    if TF not in _TF_MS:
-        raise SystemExit(f"Unsupported timeframe '{TF}'. Supported: {', '.join(sorted(_TF_MS))}")
-    TF_MS = _TF_MS[TF]
-
-
-    # ---------- Offline fake fetcher ----------
-    class FakeFetcher:
-        def __init__(self, seed_price=1800.0, drift=0.00015, wobble=0.002):
-            self.seed = float(seed_price)
-            self.drift = float(drift)
-            self.wobble = float(wobble)
-
-        def klines(self, symbol: str, timeframe: str, start_ms: int, end_ms: int):
-            """Return list of Binance-like klines: [open_ts, open, high, low, close, volume, close_ts]."""
-            step = tf_ms[timeframe]
-            start = start_ms - (start_ms % step)
-            if end_ms <= start:
-                return []
-            out, p, t, i = [], self.seed, start, 0
-            while t < end_ms:
-                wig = (1 + self.wobble * ((hash((symbol, t)) % 200) / 100.0 - 1.0))
-                o = p
-                c = max(0.01, o * (1 + self.drift)) * wig
-                h = max(o, c) * 1.001
-                l = min(o, c) * 0.999
-                v = 100 + (i % 17)
-                out.append([t, f"{o:.2f}", f"{h:.2f}", f"{l:.2f}", f"{c:.2f}", f"{v:.3f}", t + step - 1])
-                p, t, i = c, t + step, i + 1
-            return out
-
-    # ---------- Optional live fetcher (uses your bot_api_02.BinanceUM) ----------
-    now_ms = int(time.time()*1000)
-    if LIVE_MODE and CHANGE:
-        from bot_api import BinanceUM  # relies on your project layout
-        import sys as _sys
-
-        _sys.path.append("/home/j/yp/saccakeys")
-        from saccakeys import keys as _keys
-
-        B = _keys.apikeys["binance"]
-        cfg_api = AppConfig(
-            RECV_WINDOW_MS=60_000,
-            BINANCE_KEY=B[0],
-            BINANCE_SEC=B[1],
-        )
-
-        api = BinanceUM(cfg_api)
-        now_ms = api.now_ms()
-
-    class LiveFetcher:
-        """
-        Minimal adapter. Requires saccakeys and your BinanceUM wrapper.
-        """
-        def __init__(self):
-            pass
-
-        def klines(self, symbol: str, interval: str, start_ms: int, end_ms: int):
-            rows = api.klines(symbol, interval, start_ms, end_ms)
-            out = []
-            for r in rows:
-                # futures kline: [open_time, open, high, low, close, volume, close_time, ...]
-                out.append([r[0], r[1], r[2], r[3], r[4], r[5], r[6]])
-            return out
-
-    # ---------- Build cache ----------
-    cfg_cache = AppConfig(TZ_LOCAL,
-                          KLINES_CACHE_DB_PATH=DB_PATH)
-
-    cache = KlinesCache(cfg_cache)
-
-    # ---------- Compose first window ----------
-    if LIVE_MODE and LIVE_MINUTES:
-        span_ms = LIVE_MINUTES * 60_000
-        n_bars  = max(2, LIVE_MINUTES)  # for logs only
-    else:
-        n_bars  = max(10, N_BARS)
-        span_ms = n_bars * TF_MS
-
-    start_ms = now_ms - span_ms
-    end_ms   = now_ms
-
-    fetcher = LiveFetcher() if LIVE_MODE else FakeFetcher()
-
-    # ---------- Fetch + upsert first batch ----------
-    if CHANGE:
-        kl = fetcher.klines(SYMBOL, TF, start_ms, end_ms)
-        batch = []
-        for k in kl:
-            open_ts = int(k[0])
-            o, h, l, c = map(float, (k[1], k[2], k[3], k[4]))
-            vol = float(k[5])
-            close_ts = open_ts + TF_MS
-            finalized = 0 if close_ts > now_ms else 1  # last bar likely live
-            batch.append({
-                "symbol": SYMBOL,
-                "open_ts": open_ts, "close_ts": close_ts,
-                "open": o, "high": h, "low": l, "close": c, "volume": vol,
-                "finalized": finalized,
-            })
-
-
-        cache.upsert_batch(batch, timeframe=TF)
-        total1 = cache.count(SYMBOL, TF)
-        print(f"[1] Upserted first batch: {len(batch)} bars -> cache count {total1}")
-
-        # ---------- Overlapping second batch (tail overwrite) ----------
-        if len(batch) >= OVERLAP + 2:
-            tail_from = batch[-(OVERLAP + 2)]["open_ts"]
-            tail_to   = now_ms + TF_MS
-            kl2 = fetcher.klines(SYMBOL, TF, tail_from, tail_to)
-            batch2 = []
-            for k in kl2:
-                open_ts = int(k[0])
-                o, h, l, c = map(float, (k[1], k[2], k[3], k[4]))
-                vol = float(k[5])
-                close_ts = open_ts + TF_MS
-                finalized = 0 if close_ts > now_ms else 1
-                batch2.append({
-                    "symbol": SYMBOL, "tf": TF,
-                    "open_ts": open_ts, "close_ts": close_ts,
-                    "open": o, "high": h, "low": l, "close": c, "volume": vol,
-                    "finalized": finalized,
-                })
-            cache.upsert_batch(batch2, timeframe=TF)
-            total2 = cache.count(SYMBOL, TF)
-            print(f"[2] Upserted overlapping tail: {len(batch2)} bars -> cache count {total2}")
-
-    # ---------- Readbacks ----------
-    last_10 = cache.last_n(SYMBOL, TF, n=10)
-    print(f"[3] last_n=10 -> {len(last_10)} rows | finalized flags:", [r.finalized for r in last_10])
-
-    win_start = now_ms - 5 * TF_MS
-    win = cache.range_by_open(SYMBOL, TF, start_open_ts=win_start, end_open_ts=now_ms + 1)
-    print(f"[4] range_by_open(last ~5 bars) -> {len(win)} rows | first_open={win[0].open_ts if win else None}")
-
-    latest = cache.last_row(SYMBOL, TF)
-    print(
-        f"[5] last_row -> open_ts={latest.open_ts if latest else None}, finalized={latest.finalized if latest else None}")
-
-    if CHANGE:
-        before = cache.count(SYMBOL, TF)
-        cache.prune_keep_last_n(SYMBOL, TF, keep_n=KEEP)
-        after = cache.count(SYMBOL, TF)
-        print(f"[6] prune_keep_last_n({KEEP}) -> {before} -> {after}")
-
-        newest = cache.last_row(SYMBOL, TF)
-        assert newest is not None, "Latest bar missing after prune"
-        print("Last row:", newest)
-
-    print("[OK] KLinesCache smoke test complete (globals mode).")
-
-
-    # ---------- ASCII CHART ----------
-    bars = cache.last_n(SYMBOL, TF, n=100)
-    ascii_chart(bars, SYMBOL, TF, height=25)
+        with self._db_lock:
+            cur = self.con.cursor()
+            try:
+                cur.execute("BEGIN")
+                cur.executemany(sql, batch)
+                cur.execute("SELECT changes()")
+                changed = cur.fetchone()[0] or 0
+                self.con.commit()
+                return int(changed)
+            except Exception:
+                self.con.rollback()
+                raise
