@@ -12,118 +12,58 @@ from storage import Storage
 import re
 from datetime import datetime, timezone, timedelta
 from binance_um import BinanceUM
+import threading, time
+from typing import Callable, Dict
+from klines_cache import KlinesCache
+# inside bot_api.py (or a separate charts.py helper imported there)
+import tempfile, os, io
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+import pandas as pd
 
-class _SchedTask:
-    __slots__ = ("fn", "interval", "next_ts")
-    def __init__(self, fn: Callable[[], None], interval: float, first_delay: float):
-        self.fn = fn
-        self.interval = float(interval)
-        self.next_ts = time.time() + float(first_delay)
 
 
 class InternalScheduler:
-    """
-    Minimal repeating scheduler:
-      - run_repeating(fn, interval, first=0)
-      - stop()
-    Runs in a single background thread. Functions are executed serially.
-    """
-    def __init__(self, name: str = "rv-scheduler"):
-        self._tasks: List[_SchedTask] = []
+    def __init__(self):
+        self._jobs: Dict[str, Dict] = {}
+        self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thr: Optional[threading.Thread] = None
-        self._name = name
-        self._lock = threading.Lock()
 
-    def run_repeating(self, fn: Callable[[], None], interval: float, first: float = 0.0):
+    def schedule_every(self, name: str, interval_sec: int, fn: Callable[[], None], run_immediately: bool = False):
+        nxt = time.time() if run_immediately else (time.time() + max(1, interval_sec))
         with self._lock:
-            self._tasks.append(_SchedTask(fn, interval, first))
+            self._jobs[name] = {"interval": max(1, int(interval_sec)), "fn": fn, "next": nxt}
 
-    def start(self):
-        if self._thr and self._thr.is_alive():
-            return
-        def _loop():
-            log.info("scheduler.start", name=self._name, tasks=len(self._tasks))
-            while not self._stop.is_set():
-                now = time.time()
-                fired = False
-                with self._lock:
-                    for t in self._tasks:
-                        if now >= t.next_ts:
-                            try:
-                                t.fn()
-                            except Exception as e:
-                                log.exc(e, where="scheduler.fn")
-                            t.next_ts = now + t.interval
-                            fired = True
-                if not fired:
-                    time.sleep(0.2)  # light idle
-            log.info("scheduler.stop", name=self._name)
-        self._thr = threading.Thread(target=_loop, name=self._name, daemon=True)
+    def cancel(self, name: str):
+        with self._lock:
+            self._jobs.pop(name, None)
+
+    def start(self, thread_name: str = "rv-scheduler"):
+        if self._thr and self._thr.is_alive(): return
+        self._stop.clear()
+        self._thr = threading.Thread(target=self._run, name=thread_name, daemon=True)
         self._thr.start()
 
-    def stop(self, timeout: float = 2.0):
+    def stop(self):
         self._stop.set()
-        if self._thr:
-            self._thr.join(timeout=timeout)
+        if self._thr: self._thr.join(timeout=3)
 
-
-def parse_when(s: str) -> int:
-    """
-    Return UTC epoch milliseconds parsed from:
-      - "now" or "now-<n>[s|min|h|d]"   (e.g., now-30min, now-5h, now-2d, now-45s)
-      - YYYYMMDD                        (local midnight)
-      - YYYYMMDDHHMM or YYYYMMDDHHMMSS  (local time)
-      - ISO 8601 (e.g., 2025-11-10T13:44:05[+TZ])
-      - epoch seconds (10 digits) or milliseconds (13 digits)
-
-    Local tz for naive dates = system local tz (so it works even without Clock.set_tz()).
-    """
-    s = (s or "").strip()
-    if not s:
-        raise ValueError("Empty timestamp")
-
-    # now / now-*
-    m = re.fullmatch(r"now(?:-(\d+)(s|min|h|d))?", s.lower())
-    if m:
-        n, unit = m.groups()
-        dt = datetime.now(timezone.utc)
-        if n:
-            n = int(n)
-            delta = {"s": "seconds", "min": "minutes", "h": "hours", "d": "days"}[unit]
-            dt = dt - timedelta(**{delta: n})
-        return int(dt.timestamp() * 1000)
-
-    # pure digits
-    if s.isdigit():
-        if len(s) == 13:
-            return int(s)  # epoch ms
-        if len(s) == 10:
-            return int(s) * 1000  # epoch sec
-        # YYYYMMDD / YYYYMMDDHHMM / YYYYMMDDHHMMSS
-        if len(s) in (8, 12, 14):
-            year = int(s[0:4]); month = int(s[4:6]); day = int(s[6:8])
-            hh = mm = ss = 0
-            if len(s) >= 12:
-                hh = int(s[8:10]); mm = int(s[10:12])
-            if len(s) == 14:
-                ss = int(s[12:14])
-            # interpret as *local* time then convert to UTC
-            lt = datetime(year, month, day, hh, mm, ss).astimezone()  # system local tz
-            return int(lt.astimezone(timezone.utc).timestamp() * 1000)
-
-    # ISO8601 (naive => local)
-    try:
-        tz_local = Clock.get_tz()
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=tz_local)
-        return int(dt.astimezone(timezone.utc).timestamp() * 1000)
-
-    except Exception:
-        pass
-
-    raise ValueError(f"Unrecognized timestamp format: {s}")
+    def _run(self):
+        while not self._stop.is_set():
+            now = time.time()
+            todo: list[tuple[str, Callable[[], None], int]] = []
+            with self._lock:
+                for name, j in self._jobs.items():
+                    if now >= j["next"]:
+                        todo.append((name, j["fn"], j["interval"]))
+                        j["next"] = now + j["interval"]
+            for name, fn, _itv in todo:
+                try:
+                    fn()
+                except Exception as e:
+                    log().exc(e, where="scheduler.job", job=name)
+            time.sleep(0.5)
 
 
 # =======================
@@ -170,7 +110,7 @@ class MarketCatalog:
             self._base_assets[base] = sym
 
         self._cache = info
-        log.info("MarketCatalog loaded (USDT PERPETUAL only)",
+        log().info("MarketCatalog loaded (USDT PERPETUAL only)",
                  symbols=len(self._filters), bases=len(self._base_assets))
 
     def normalize(self, token_or_symbol: str) -> str:
@@ -217,12 +157,6 @@ class PricePoint:
     price_ts: int
     method: str   # aggTrade|kline|mark_kline
 
-# FULL CLASS REPLACEMENT for PriceOracle
-@dataclass
-class PricePoint:
-    price: float
-    price_ts: int
-    method: str   # aggTrade|kline|mark_kline
 
 class PriceOracle:
     def __init__(self, cfg: AppConfig, api: BinanceUM):
@@ -235,7 +169,7 @@ class PriceOracle:
         while window <= max_w:
             start = ts_ms - window * 1000
             end = ts_ms + window * 1000
-            log.debug("oracle.try", symbol=symbol, ts=ts_ms, window_sec=window)
+            log().debug("oracle.try", symbol=symbol, ts=ts_ms, window_sec=window)
 
             # aggTrades
             try:
@@ -243,10 +177,10 @@ class PriceOracle:
                 if isinstance(trades, list) and trades:
                     closest = min(trades, key=lambda t: abs(int(t["T"]) - ts_ms))
                     price = float(closest["p"]); pts = int(closest["T"])
-                    log.debug("oracle.hit", method="aggTrade", price=price, price_ts=pts)
+                    log().debug("oracle.hit", method="aggTrade", price=price, price_ts=pts)
                     return PricePoint(price, pts, "aggTrade")
             except Exception as e:
-                log.debug("oracle.fail", method="aggTrades", err=str(e))
+                log().debug("oracle.fail", method="aggTrades", err=str(e))
 
             # klines 1m
             try:
@@ -255,10 +189,10 @@ class PriceOracle:
                     k = min(kl, key=lambda r: abs(int(r[0]) - ts_ms))
                     open_t = int(k[0]); close_t = open_t + 60_000
                     price = float(k[1] if ts_ms <= (open_t + close_t)//2 else k[4])
-                    log.debug("oracle.hit", method="kline", price=price, candle_open=open_t)
+                    log().debug("oracle.hit", method="kline", price=price, candle_open=open_t)
                     return PricePoint(price, open_t, "kline")
             except Exception as e:
-                log.debug("oracle.fail", method="klines", err=str(e))
+                log().debug("oracle.fail", method="klines", err=str(e))
 
             # markPriceKlines 1m
             try:
@@ -267,14 +201,14 @@ class PriceOracle:
                     k = min(mk, key=lambda r: abs(int(r[0]) - ts_ms))
                     open_t = int(k[0]); close_t = open_t + 60_000
                     price = float(k[1] if ts_ms <= (open_t + close_t)//2 else k[4])
-                    log.debug("oracle.hit", method="mark_kline", price=price, candle_open=open_t)
+                    log().debug("oracle.hit", method="mark_kline", price=price, candle_open=open_t)
                     return PricePoint(price, open_t, "mark_kline")
             except Exception as e:
-                log.debug("oracle.fail", method="mark_price_klines", err=str(e))
+                log().debug("oracle.fail", method="mark_price_klines", err=str(e))
 
             window *= 2
 
-        log.error("oracle.giveup", symbol=symbol, ts=ts_ms)
+        log().error("oracle.giveup", symbol=symbol, ts=ts_ms)
         raise RuntimeError(f"Could not backfill price for {symbol} around {ts_ms}")
 
 
@@ -291,22 +225,27 @@ class PositionBook:
     def __init__(self, store: Storage, mc: MarketCatalog, oracle: PriceOracle):
         self.store, self.mc, self.oracle = store, mc, oracle
 
-    def open_position(self, num_tok: str, den_tok: str, usd_notional: int, user_ts: int, note: str = "") -> str:
+    def open_position(self, num_tok: str, den_tok: Optional[str],
+                      usd_notional: int, user_ts: int, note: str = "") -> int:
         num = self.mc.normalize(num_tok)
         den = self.mc.normalize(den_tok) if den_tok else None
         dir_sign = 1 if usd_notional >= 0 else -1
         target = abs(float(usd_notional))
-        pid = position_id_of(num, den, dir_sign, target, user_ts)
-        self.store.upsert_position({
-            "position_id": pid, "num": num, "den": den,
-            "dir_sign": dir_sign, "target_usd": target,
-            "user_ts": user_ts, "status": "OPEN", "note": note,
-            "created_ts": Clock.now_utc_ms()
-        })
+
+        # 1) get/create position (auto-increment id)
+        pid = self.store.get_or_create_position(num, den, dir_sign, target, user_ts, status="OPEN", note=note)
+
+        # 2) create leg stubs (single or pair) — qty/price will be filled by backfill job
+        self.store.ensure_leg_stub(pid, num)
+        if den:
+            self.store.ensure_leg_stub(pid, den)
+
+        # 3) enqueue backfill job (will compute qty from USD + price)
         self.store.enqueue_job(f"price:{pid}", "FETCH_ENTRY_PRICES",
                                {"position_id": pid, "user_ts": user_ts}, position_id=pid)
-        log.info("Position opened (queued price backfill)", position_id=pid, num=num, den=den,
-                 dir=("LONG num/SHORT den" if dir_sign > 0 else "SHORT num/LONG den"), usd=target)
+
+        log().info("Position opened (queued price backfill)", position_id=pid, num=num, den=den,
+                 dir=("LONG" if dir_sign > 0 else "SHORT"), usd=target)
         return pid
 
     def size_leg_from_price(self, symbol:str, usd:float, price:float) -> float:
@@ -342,9 +281,9 @@ class Reconciler:
         rows = self.api.income(start_ms, end_ms)
         if isinstance(rows, list) and rows:
             self.store.insert_income(rows)
-            log.info("Income rows inserted", n=len(rows))
+            log().info("Income rows inserted", n=len(rows))
         else:
-            log.info("Income (none)")
+            log().info("Income (none)")
 
 # =======================
 # ===== JOB QUEUE/WORKER
@@ -359,13 +298,13 @@ class Worker:
     def stop(self): self._stop.set()
 
     def run_forever(self, idle_sleep=2):
-        log.info("Worker started")
+        log().info("Worker started")
         while not self._stop.is_set():
             job = self.store.fetch_next_job()
             if not job:
                 time.sleep(idle_sleep); continue
             jid = job["job_id"]; task = job["task"]
-            log.debug("job.start", job_id=jid, task=task)
+            log().debug("job.start", job_id=jid, task=task)
             try:
                 payload = json.loads(job["payload"] or "{}")
                 if task == "FETCH_ENTRY_PRICES":
@@ -377,13 +316,13 @@ class Worker:
                     self.store.finish_job(jid, ok=True)
                 else:
                     raise ValueError(f"Unknown task {task}")
-                log.debug("job.done", job_id=jid, task=task)
+                log().debug("job.done", job_id=jid, task=task)
             except Exception as e:
-                log.exc(e, job_id=jid, task=task)
+                log().exc(e, job_id=jid, task=task)
                 self.store.finish_job(jid, ok=False, error=str(e))
 
     def _do_price_backfill(self, job_id: str, payload: dict):
-        pid = payload["position_id"];
+        pid = int(payload["position_id"])
         user_ts = int(payload["user_ts"])
         position = self.store.get_position(pid)
         if not position:
@@ -391,15 +330,14 @@ class Worker:
 
         intended_usd = float(position["target_usd"])
         num_sym = position["num"]
-        den_raw = position["den"]  # may be None/"" when single-leg
-        dir_sign = int(position["dir_sign"])  # +1 LONG ; -1 SHORT
+        den_raw = position["den"]  # may be None
+        dir_sign = int(position["dir_sign"])
 
-        # detect single-leg (no denominator)
         den_is_none = (den_raw is None)
-        den_str = ("" if den_is_none else str(den_raw).strip().upper())
+        den_str = "" if den_is_none else str(den_raw).strip().upper()
         single_leg = den_is_none or den_str in ("", "1", "UNIT")
 
-        # always backfill NUM
+        # price for NUM
         pp_num = self.oracle.price_at(num_sym, user_ts)
 
         def _signed_qty(symbol: str, usd: float, px: float, sign: int) -> float:
@@ -407,40 +345,21 @@ class Worker:
             return sign * q_abs
 
         if single_leg:
-            # Single leg: qty sign follows dir_sign (+ long / - short)
             q_num = _signed_qty(num_sym, intended_usd, pp_num.price, +1 if dir_sign > 0 else -1)
-
-            self.store.upsert_leg({
-                "position_id": pid, "symbol": num_sym, "qty": q_num,
-                "entry_price": pp_num.price, "entry_price_ts": pp_num.price_ts,
-                "price_method": pp_num.method, "note": None
-            })
-
-            self.store.finish_job(job_id, ok=True)
-            log.info("Backfill complete (single-leg)", position_id=pid, q_num=q_num)
+            self.store.fulfill_leg(pid, num_sym, q_num, pp_num.price, pp_num.price_ts, pp_num.method)
+            log().info("Backfill complete (single-leg)", position_id=pid, q_num=q_num)
             return
 
-        # Two-leg (RV) flow
+        # pair
         den_sym = den_str
         pp_den = self.oracle.price_at(den_sym, user_ts)
 
-        # For RV pair: LONG dir => +num / -den ; SHORT dir => -num / +den
         q_num = _signed_qty(num_sym, intended_usd, pp_num.price, +1 if dir_sign > 0 else -1)
         q_den = _signed_qty(den_sym, intended_usd, pp_den.price, -1 if dir_sign > 0 else +1)
 
-        self.store.upsert_leg({
-            "position_id": pid, "symbol": num_sym, "qty": q_num,
-            "entry_price": pp_num.price, "entry_price_ts": pp_num.price_ts,
-            "price_method": pp_num.method, "note": None
-        })
-        self.store.upsert_leg({
-            "position_id": pid, "symbol": den_sym, "qty": q_den,
-            "entry_price": pp_den.price, "entry_price_ts": pp_den.price_ts,
-            "price_method": pp_den.method, "note": None
-        })
-
-        self.store.finish_job(job_id, ok=True)
-        log.info("Backfill complete (pair)", position_id=pid, q_num=q_num, q_den=q_den)
+        self.store.fulfill_leg(pid, num_sym, q_num, pp_num.price, pp_num.price_ts, pp_num.method)
+        self.store.fulfill_leg(pid, den_sym, q_den, pp_den.price, pp_den.price_ts, pp_den.method)
+        log().info("Backfill complete (pair)", position_id=pid, q_num=q_num, q_den=q_den)
 
 
 # =======================
@@ -520,92 +439,14 @@ class Reporter:
         return "\n".join(lines) if lines else "No positions match."
 
 
-# =======================
-# ===== TELEGRAM ===
-# =======================
-
-@dataclass
-class CommandContext:
-    chat_id: int
-    text: str
-    # give handlers access to your services:
-    store: Storage
-    positionbook: PositionBook
-    mc: MarketCatalog
-    oracle: PriceOracle
-    api: BinanceUM
-    alerts: AlertsEngine
-    reporter: Reporter
-
-
-class CommandRegistry:
-    def __init__(self):
-        # keys are ('@'|'!', command_name)
-        self._handlers: Dict[Tuple[str,str], Callable[[CommandContext, Dict[str,str]], str]] = {}
-
-    def at(self, name: str):
-        """Decorator for '@' (GET) commands."""
-        def deco(fn):
-            self._handlers[('@', name.lower())] = fn
-            return fn
-        return deco
-
-    def bang(self, name: str):
-        """Decorator for '!' (SET) commands."""
-        def deco(fn):
-            self._handlers[('!', name.lower())] = fn
-            return fn
-        return deco
-
-    # FULL METHOD REPLACEMENT in class CommandRegistry
-    def dispatch(self, ctx: CommandContext) -> str:
-        s = (ctx.text or "").strip()
-        log.debug("dispatch.enter", text=s)
-        if not s or s[0] not in ("@", "!"):
-            log.debug("dispatch.exit", reason="not-a-command")
-            return "Unrecognized. Use @help for available commands."
-
-        prefix = s[0]
-        parts = s.split(None, 1)
-        if not parts:
-            log.debug("dispatch.exit", reason="empty-after-prefix")
-            return "Empty command."
-
-        head = parts[0][1:].lower()
-        tail = parts[1].strip() if len(parts) > 1 else ""
-        handler = self._handlers.get((prefix, head))
-
-        if not handler:
-            log.warn("dispatch.unknown", prefix=prefix, head=head)
-            return f"Unknown {prefix}{head}. Try @help."
-
-        args: Dict[str, str] = {}
-        if prefix == '@':
-            for tok in tail.split():
-                if ":" in tok:
-                    k, v = tok.split(":", 1)
-                    args[k.strip().lower()] = v.strip()
-                elif tok:
-                    log.debug("dispatch.ignored-token", token=tok)
-        else:
-            args["_"] = tail
-
-        log.debug("dispatch.call", cmd=head, prefix=prefix, args=args)
-        try:
-            out = handler(ctx, args)
-            log.debug("dispatch.ok", cmd=head)
-            return out
-        except Exception as e:
-            log.exc(e, where="dispatch.handler", cmd=head)
-            return f"Error: {e}"
-
+# =========================
 
 class TelegramBot:
     """
     Thin Telegram adapter. No internal enable flag.
     """
-    def __init__(self, book: PositionBook):
-        self.book = book
+    def __init__(self, eng: BotEngine):
+        self.engine = eng
         self._registry = None
 
     def set_registry(self, registry: CommandRegistry):
@@ -615,69 +456,17 @@ class TelegramBot:
     async def _on_text(self, update, context):
         msg = (update.message.text or "").strip()
         chat_id = update.effective_chat.id
-        log.debug("tg.on_text", chat_id=chat_id, text=msg)
-
-        engine = context.application.bot_data.get("engine")
-        cmd_ctx = CommandContext(
-            chat_id=chat_id, text=msg,
-            store=engine.store, positionbook=engine.positionbook, mc=engine.mc,
-            oracle=engine.oracle, api=engine.api, alerts=engine.alerts, reporter=engine.reporter,
-        )
+        log().debug("tg.on_text", chat_id=chat_id, text=msg)
 
         try:
-            out = self._registry.dispatch(cmd_ctx)
+            out = self._registry.dispatch(self.engine, msg)
             await context.bot.send_message(chat_id=chat_id, text=out or "OK")
         except Exception as e:
-            log.exc(e, where="tg.on_text.dispatch")
+            log().exc(e, where="tg.on_text.dispatch")
             await context.bot.send_message(chat_id=chat_id, text=f"Error: {e}")
 
-# --- add this lightweight internal scheduler somewhere in bot_api.py ---
 
-import threading, time
-from typing import Callable, Dict
-
-class InternalScheduler:
-    def __init__(self):
-        self._jobs: Dict[str, Dict] = {}
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thr: Optional[threading.Thread] = None
-
-    def schedule_every(self, name: str, interval_sec: int, fn: Callable[[], None], run_immediately: bool = False):
-        nxt = time.time() if run_immediately else (time.time() + max(1, interval_sec))
-        with self._lock:
-            self._jobs[name] = {"interval": max(1, int(interval_sec)), "fn": fn, "next": nxt}
-
-    def cancel(self, name: str):
-        with self._lock:
-            self._jobs.pop(name, None)
-
-    def start(self, thread_name: str = "rv-scheduler"):
-        if self._thr and self._thr.is_alive(): return
-        self._stop.clear()
-        self._thr = threading.Thread(target=self._run, name=thread_name, daemon=True)
-        self._thr.start()
-
-    def stop(self):
-        self._stop.set()
-        if self._thr: self._thr.join(timeout=3)
-
-    def _run(self):
-        while not self._stop.is_set():
-            now = time.time()
-            todo: list[tuple[str, Callable[[], None], int]] = []
-            with self._lock:
-                for name, j in self._jobs.items():
-                    if now >= j["next"]:
-                        todo.append((name, j["fn"], j["interval"]))
-                        j["next"] = now + j["interval"]
-            for name, fn, _itv in todo:
-                try:
-                    fn()
-                except Exception as e:
-                    log.exc(e, where="scheduler.job", job=name)
-            time.sleep(0.5)
-
+# =========================
 
 class BotEngine:
     """
@@ -687,7 +476,7 @@ class BotEngine:
     - Schedules spontaneous heartbeat messages ("are you ok?")
     """
     def __init__(self, cfg: AppConfig):
-        from thinkers import ThinkerManager
+        from thinkers1 import ThinkerManager
 
         self.cfg = cfg
 
@@ -703,59 +492,61 @@ class BotEngine:
         self.scheduler: Optional[InternalScheduler] = None
         self.tgbot: Optional[TelegramBot] = None
         self._registry: Optional[CommandRegistry] = None
+        self.kc: Optional[KlinesCache] = None
 
         # PTB application (only if Telegram is enabled)
         self._app = None
 
         # thinkers
-        self.thinkers: Optional[ThinkerManager] = None
+        self.tm: Optional[ThinkerManager] = None
 
         tz = cfg.TZ_LOCAL
         Clock.set_tz(tz)
-        log.info("Clock TZ set", tz=str(tz))
+        log().info("Clock TZ set", tz=str(tz))
 
 
     # --------------------------------
     # Building + wiring (single place)
     # --------------------------------
     def _build_parts(self):
-        from thinkers import ThinkerManager
+        assert self.api is None
+
+        from thinkers1 import ThinkerManager
+        from commands import build_registry
 
         # Clock / TZ once
-        tz = getattr(self.cfg, "TZ_LOCAL", None)
-        if tz is not None:
-            Clock.set_tz(tz)
-            log.info("Clock TZ set", tz=str(tz))
+        tz = self.cfg.TZ_LOCAL
+        Clock.set_tz(tz)
+        log().info("Clock TZ set", tz=str(tz))
 
         # Core deps
-        self.api    = self.api    or BinanceUM(self.cfg)
-        self.store  = self.store  or Storage(self.cfg.DB_PATH or "./rv.sqlite3")
-        self.mc     = self.mc     or MarketCatalog(self.api)
-        self.oracle = self.oracle or PriceOracle(self.cfg, self.api)
-        self.positionbook = self.positionbook or PositionBook(self.store, self.mc, self.oracle)
-        self.alerts = self.alerts or AlertsEngine(self.store, self.positionbook)
-        self.reporter = self.reporter or Reporter()
-        self.worker   = self.worker   or Worker(self.cfg, self.store, self.api, self.mc, self.oracle)
-        self.scheduler= self.scheduler or InternalScheduler()
+        self.api    = BinanceUM(self.cfg)
+        self.store  = Storage(self.cfg.DB_PATH)
+        self.mc     = MarketCatalog(self.api)
+        self.oracle = PriceOracle(self.cfg, self.api)
+        self.positionbook = PositionBook(self.store, self.mc, self.oracle)
+        self.alerts = AlertsEngine(self.store, self.positionbook)
+        self.reporter = Reporter()
+        self.worker   = Worker(self.cfg, self.store, self.api, self.mc, self.oracle)
+        self.scheduler = InternalScheduler()
+        self.kc = KlinesCache(self)
+        self.tm = ThinkerManager(self)
 
         # Preload catalog to avoid first-use hiccups
         try:
             self.mc.load()
         except Exception as e:
-            log.exc(e, where="engine.build.mc.load")
+            log().exc(e, where="engine.build.mc.load")
 
         # Registry (commands) — single canonical instance
-        self._registry = self._registry or build_registry()
+        self._registry = build_registry()
 
-        # Thinkers (manager uses engine services)
-        if not self.thinkers:
-            self.thinkers = ThinkerManager(self.cfg, self.store, self.api, self.mc, self.oracle, services=self)
 
         # Telegram (optional)
         if self.cfg.TELEGRAM_ENABLED:
             try:
                 from telegram.ext import Application, MessageHandler, CommandHandler, filters
-                self.tgbot = self.tgbot or TelegramBot(self.positionbook)
+                self.tgbot = TelegramBot(self)
                 self.tgbot.set_registry(self._registry)
 
                 self._app = Application.builder().token(self.cfg.TELEGRAM_TOKEN).build()
@@ -765,13 +556,13 @@ class BotEngine:
                 self._app.add_handler(CommandHandler("start", self._cmd_start))
                 self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
-                log.info("Telegram: application prepared")
+                log().info("Telegram: application prepared")
             except Exception as e:
-                log.exc(e, where="engine.telegram.init")
-                log.warn("Telegram disabled due to initialization error")
+                log().exc(e, where="engine.telegram.init")
+                log().warn("Telegram disabled due to initialization error")
 
         # Schedule periodic jobs (always via our own scheduler)
-        tick_sec = int(self.cfg.KLINES_POLL_SEC or 15)
+        tick_sec = int(self.cfg.THINKING_SEC or 15)
         self.scheduler.schedule_every("thinkers.tick", tick_sec, self._job_thinkers, run_immediately=True)
         self.scheduler.schedule_every("heartbeat", 3600, self._job_heartbeat, run_immediately=False)
 
@@ -782,14 +573,79 @@ class BotEngine:
     # ---------- interface ----------
     def send_text(self, text: str) -> None:
         if not self.cfg.TELEGRAM_ENABLED:
-            log.info("ALERT", text=text);
+            log().info("ALERT", text=text);
             return
         assert self._app
         self._app.create_task(self._app.bot.send_message(chat_id=self.cfg.TELEGRAM_CHAT_ID, text=text))
 
-        # --------------------------------
-        # Lifecycle
-        # --------------------------------
+    def send_photo(self, path: str, caption: str | None = None):
+        """Send a photo through Telegram if enabled, else open locally."""
+        if not os.path.exists(path):
+            log().warn("engine.send_photo.missing", path=path)
+            return
+
+        if not self.cfg.TELEGRAM_ENABLED:
+            log().info("photo.local", path=path)
+            os.system(f"xdg-open '{path}' >/dev/null 2>&1 &")
+            return
+
+        try:
+            assert self._app is not None
+            with open(path, "rb") as f:
+                self._app.create_task(
+                    self._app.bot.send_photo(
+                        chat_id=int(self.cfg.TELEGRAM_CHAT_ID),
+                        photo=f,
+                        caption=caption or "",
+                    )
+                )
+            log().info("photo.sent", path=path, caption=caption)
+        except Exception as e:
+            log().exc(e, where="engine.send_photo", path=path)
+
+    def refresh_klines_cache(self):
+        """Pulls recent klines for all relevant symbols."""
+
+        # Gather all relevant symbols
+        open_positions = self.store.list_open_positions()
+        syms = {lg["symbol"] for r in open_positions for lg in self.store.get_legs(r["position_id"]) if lg["symbol"]}
+        syms.update(self.cfg.AUX_SYMBOLS)
+        log().debug(f"refresh_klines_cache(): symbols: {syms}")
+
+        # Refresh all
+        for s in syms:
+            try:
+                self._refresh_symbol(s)  # or your configured timeframes
+                log().debug("engine.klines.refreshed", symbol=s)
+            except Exception as e:
+                log().warn("engine.klines.refresh.fail", symbol=s, err=str(e))
+
+    def _refresh_symbol(self, symbol: str, timeframes=None):
+        """Fetch new candles, upsert, then prune."""
+
+        assert not isinstance(timeframes, str)
+        timeframes = timeframes or self.cfg.KLINES_TIMEFRAMES
+
+        for tf in timeframes:
+            try:
+                last_open = self.kc.latest_open_ts(symbol, tf)
+                n = self._fetch_and_cache(symbol, tf, since_open_ts=last_open)
+                log().debug("engine.klines.refresh.symbol.timeframe", symbol=symbol, tf=tf, added=n, last_open=last_open)
+            except Exception as e:
+                log().warn("engine.klines.refresh.symbol.timeframe.fail", symbol=symbol, tf=tf, err=str(e))
+
+        self.kc.prune_keep_last_n(keep_n=self.cfg.KLINES_CACHE_KEEP_BARS)
+
+    def _fetch_and_cache(self, symbol: str, timeframe: str, since_open_ts: Optional[int]) -> int:
+        """Pull fresh klines from Binance and store them, safely overwriting the live candle."""
+        now_ms = self.api.now_ms()
+        start = max(0, since_open_ts - tf_ms(timeframe)) if since_open_ts else None
+        klines = self.api.klines(symbol, timeframe, start, now_ms, self.cfg.KLINES_CACHE_KEEP_BARS)
+        return self.kc.ingest_klines(symbol, timeframe, klines, now_ms=now_ms)
+
+    # --------------------------------
+    # Lifecycle
+    # --------------------------------
 
     def start(self):
         # Build everything lazily
@@ -799,25 +655,25 @@ class BotEngine:
         # Start worker + scheduler
         t = threading.Thread(target=self.worker.run_forever, name="rv-worker", daemon=True)
         t.start()
-        log.info("Worker thread started")
+        log().info("Worker thread started")
 
         self.scheduler.start()
 
         # If Telegram prepared, run polling (non-blocking loop handled by PTB)
         if self._app:
-            log.info("Telegram polling…")
+            log().info("Telegram polling…")
             # Run PTB in a thread so console/other UIs can coexist
             threading.Thread(target=lambda: self._app.run_polling(close_loop=False),
                              name="rv-telegram", daemon=True).start()
         else:
-            log.info("Engine running without Telegram")
+            log().info("Engine running without Telegram")
 
     def stop(self):
         try:
             if self._app:
                 self._app.stop()
         except Exception as e:
-            log.exc(e, where="engine.stop.telegram")
+            log().exc(e, where="engine.stop.telegram")
         try:
             self.worker.stop()
         finally:
@@ -834,32 +690,15 @@ class BotEngine:
                         self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=msg)
                     )
                 else:
-                    log.info("ALERT", text=msg)
+                    log().info("ALERT", text=msg)
             except Exception as e:
-                log.exc(e, where="emit_alert")
+                log().exc(e, where="emit_alert")
         else:
-            log.info("ALERT", text=msg)
-
-    # inside class BotEngine
-
-    def make_cmd_ctx(self, text: str, chat_id: int = 0) -> CommandContext:
-        """Unified factory for CommandContext (Telegram or console)."""
-        return CommandContext(
-            chat_id=chat_id,
-            text=text,
-            store=self.store,
-            positionbook=self.positionbook,
-            mc=self.mc,
-            oracle=self.oracle,
-            api=self.api,
-            alerts=self.alerts,
-            reporter=self.reporter,
-        )
+            log().info("ALERT", text=msg)
 
     def dispatch_command(self, text: str, chat_id: int = 0) -> str:
         """Build context and route through the registry."""
-        ctx = self.make_cmd_ctx(text=text, chat_id=chat_id)
-        return self._registry.dispatch(ctx)
+        return self._registry.dispatch(self, text)
 
     # ---------- telegram handlers ----------
     async def _cmd_start(self, update, context):
@@ -868,12 +707,12 @@ class BotEngine:
     async def _on_text(self, update, context):
         msg = (update.message.text or "").strip()
         chat_id = update.effective_chat.id
-        log.debug("engine.on_text", chat_id=chat_id, text=msg)
+        log().debug("engine.on_text", chat_id=chat_id, text=msg)
         try:
             out = self.dispatch_command(msg, chat_id=chat_id)
             self.send_text(out or "OK")
         except Exception as e:
-            log.exc(e, where="engine.on_text.dispatch")
+            log().exc(e, where="engine.on_text.dispatch")
             self.send_text(f"Error: {e}")
 
     # --------------------------------
@@ -892,63 +731,21 @@ class BotEngine:
             txt = f"👋 are you ok?\nOpen positions: {len(open_positions)} | PNL ≈ ${total_pnl:.2f}"
             self.send_text(txt)
         except Exception as e:
-            log.exc(e, where="job.heartbeat")
+            log().exc(e, where="job.heartbeat")
 
     def _job_thinkers(self):
         try:
-            n = self.thinkers.run_once()
+            log().debug("Gonna think ...")
+            log().info(f"Current log level: {log().level}; log id: {id(log)}")
+
+            self.refresh_klines_cache()
+            n = self.tm.run_once()
             if n:
-                log.debug("thinkers.cycle", actions=n)
+                log().debug("thinkers.cycle", actions=n)
         except Exception as e:
-            log.exc(e, where="job.thinkers")
+            log().exc(e, where="job.thinkers")
 
     # ---------- execution helpers ----------
-    def _exec_positions(self, args: Dict) -> str:
-        """
-        Executes @positions against *your DB* (RV pairs). Summarizes or lists.
-        """
-        status = args["status"]
-        what = args["what"]
-        limit = args["limit"]
-
-        # Filter positions by status
-        if status == "open":
-            rows = self.store.list_open_positions()
-        elif status == "closed":
-            rows = self.store.con.execute("SELECT * FROM positions WHERE status='CLOSED'").fetchall()
-        else:
-            rows = self.store.con.execute("SELECT * FROM positions").fetchall()
-
-        # Optional position_id or pair filter
-        pid = args.get("position_id")
-        if pid:
-            rows = [r for r in rows if r["position_id"] == pid]
-        if args.get("pair"):
-            num, den = args["pair"]
-            def _match(r):
-                if den is None:
-                    # single-instrument vs USDT: match either leg == sym normalized
-                    legs = self.store.get_legs(r["position_id"])
-                    return any(l["symbol"].startswith(num) for l in legs)
-                return (r["num"].startswith(num) and r["den"].startswith(den))
-            rows = [r for r in rows if _match(r)]
-
-        # Marks snapshot for current PNL
-        valid = {"summary", "full", "legs"}
-
-        if what not in valid:
-            return f"Unknown 'what': {what}. Try one of: {', '.join(sorted(valid))}"
-
-        # ChatGPT: gotta retrieve from klines cache, not api directly-
-        marks = latest_marks_for_positions(self.api, self.store, rows)
-
-        if what == "summary":
-            return self.reporter.fmt_positions_summary(self.store, self.positionbook, rows, marks)
-        if what == "full":
-            return self.reporter.fmt_positions_full(self.store, self.positionbook, rows, marks, limit)
-        # what == "legs"
-        return self.reporter.fmt_positions_legs(self.store, self.positionbook, rows, marks, limit)
-
     def _latest_marks_for_open_symbols(self, pair_rows) -> Dict[str, float]:
         """
         Very light mark snapshot: for each symbol involved, take the latest mark close from markPriceKlines.
@@ -970,251 +767,37 @@ class BotEngine:
                 if isinstance(mk, list) and mk:
                     marks[s] = float(mk[-1][4])  # last close
             except Exception as e:
-                log.debug("mark snapshot fail", symbol=s, err=str(e))
+                log().debug("mark snapshot fail", symbol=s, err=str(e))
         return marks
 
 
-# ===== COMMAND DECLARATIONS =====
-
-def build_registry() -> CommandRegistry:
-    R = CommandRegistry()
-
-    @R.at("help")
-    def _help(ctx: CommandContext, args: Dict[str,str]) -> str:
-        return (
-            "Commands:\n"
-            "  @open                 – list open RV positions (summary)\n"
-            "  @positions [filters]  – advanced view; e.g. @positions what:full limit:20\n"
-            "  !open <spec>          – open/add RV position (e.g. '!open 2025-11-10T13:44:05 STRK/ETH -5000 note: x')\n"
-            "  !close <position_id>      – close a recorded position\n"
-        )
-
-    @R.at("open")
-    def _at_open(ctx: CommandContext, args: Dict[str,str]) -> str:
-        # alias to @positions status:open summary
-        text_alias = "@positions status:open what:summary"
-        ctx2 = CommandContext(**{**ctx.__dict__, "text": text_alias})
-        return R.dispatch(ctx2)
-
-    @R.at("positions")
-    def _at_positions(ctx: CommandContext, args: Dict[str, str]) -> str:
-        # defaults
-        status = args.get("status", "open")
-        what = args.get("what", "summary")
-        sort_ = args.get("sort", "pnl")  # (kept for future; unused here)
-        limit = int(args.get("limit", "100"))
-        position_id = args.get("position_id")
-        pair = args.get("pair")
-
-        exec_args = {
-            "status": status, "what": what, "sort": sort_, "limit": limit,
-            "position_id": position_id, "pair": None
-        }
-        if pair:
-            up = pair.upper()
-            if "/" in up:
-                num, den = (x.strip() for x in up.split("/", 1))
-                exec_args["pair"] = (num, den)
-            else:
-                exec_args["pair"] = (up, None)
-
-        # call the pure helper
-        return exec_positions(ctx.store, ctx.positionbook, ctx.api, ctx.reporter, exec_args)
-
-        return _exec_positions(exec_args)
-
-    @R.bang("open")
-    def _bang_open(ctx: CommandContext, args: Dict[str,str]) -> str:
-        """
-        !open <ISO|epoch_ms> <NUM/DEN | SYMBOL> <±usd> [note:...]
-        Example:
-          !open 2025-11-10T13:44:05 STRK/ETH -5000 note:rv test
-          !open 2025-11-10T13:44:05 ETHUSDT +3000
-        """
-        tail = args.get("_","").strip()
-        if not tail:
-            return "Usage: !open <ts> <NUM/DEN|SYMBOL> <±usd> [note:...]"
-        parts = tail.split()
-        if len(parts) < 3:
-            return "Usage: !open <ts> <NUM/DEN|SYMBOL> <±usd> [note:...]"
-        ts_raw, pair_raw, usd_raw = parts[0], parts[1], parts[2]
-        note = ""
-        if "note:" in tail:
-            note = tail.split("note:",1)[1].strip()
-
-        # ts
-        ts_ms = parse_when(ts_raw)
-
-        # parse pair vs single
-        if "/" in pair_raw.upper():
-            num_tok, den_tok = pair_raw.upper().split("/",1)
-            num = ctx.mc.normalize(num_tok)
-            den = ctx.mc.normalize(den_tok)
-        else:
-            num = ctx.mc.normalize(pair_raw.upper())
-            den = None
-
-        usd = int(float(usd_raw))
-        pid = ctx.positionbook.open_position(num, den, usd, ts_ms, note=note)
-        return f"Opened pair {pid}: {num}/{den} target=${abs(usd):.0f} (queued price backfill)."
-
-    @R.at("thinkers")
-    def _at_thinkers(ctx: CommandContext, args: Dict[str,str]) -> str:
-        rows = ctx.store.list_thinkers()
-        if not rows:
-            return "No thinkers."
-        out = []
-        for r in rows:
-            out.append(f"#{r['id']} {r['kind']} enabled={r['enabled']} cfg={r['config_json']}")
-        return "\n".join(out)
-
-    @R.bang("thinker-enable")
-    def _bang_thinker_enable(ctx: CommandContext, args: Dict[str,str]) -> str:
-        tid = args.get("_","").strip()
-        if not tid.isdigit():
-            return "Usage: !thinker-enable <id>"
-        ctx.store.update_thinker_enabled(int(tid), True)
-        return f"Thinker #{tid} enabled."
-
-    @R.bang("thinker-disable")
-    def _bang_thinker_disable(ctx: CommandContext, args: Dict[str,str]) -> str:
-        tid = args.get("_","").strip()
-        if not tid.isdigit():
-            return "Usage: !thinker-disable <id>"
-        ctx.store.update_thinker_enabled(int(tid), False)
-        return f"Thinker #{tid} disabled."
-
-    @R.bang("thinker-rm")
-    def _bang_thinker_rm(ctx: CommandContext, args: Dict[str,str]) -> str:
-        tid = args.get("_","").strip()
-        if not tid.isdigit():
-            return "Usage: !thinker-rm <id>"
-        ctx.store.delete_thinker(int(tid))
-        return f"Thinker #{tid} deleted."
-
-    @R.bang("alert")
-    def _bang_alert(ctx: CommandContext, args: Dict[str,str]) -> str:
-        """
-        !alert <SYMBOL> >= <PRICE> [msg:...]
-        !alert <SYMBOL> <= <PRICE> [msg:...]
-        """
-        tail = args.get("_","").strip()
-        parts = tail.split()
-        if len(parts) < 3:
-            return "Usage: !alert <SYMBOL> (>=|<=) <PRICE> [msg:...]"
-        sym, op, pr = parts[0].upper(), parts[1], parts[2]
-        if op not in (">=", "<="):
-            return "Op must be >= or <="
-        direction = "ABOVE" if op == ">=" else "BELOW"
-        try:
-            price = float(pr)
-        except:
-            return "Bad price."
-        msg = ""
-        if "msg:" in tail:
-            msg = tail.split("msg:",1)[1].strip()
-        cfg = {"symbol": sym, "direction": direction, "price": price, "message": msg}
-        tid = ctx.store.insert_thinker("THRESHOLD_ALERT", cfg)
-        return f"Thinker #{tid} THRESHOLD_ALERT set for {sym} {direction} {price}"
-
-    @R.bang("psar")
-    def _bang_psar(ctx: CommandContext, args: Dict[str,str]) -> str:
-        """
-        !psar <position_id> <symbol> <LONG|SHORT> [af:0.02] [max:0.2] [win:200]
-        """
-        tail = args.get("_","").strip()
-        parts = tail.split()
-        if len(parts) < 3:
-            return "Usage: !psar <position_id> <symbol> <LONG|SHORT> [af:0.02] [max:0.2] [win:200]"
-        pid, sym, d = parts[0], parts[1].upper(), parts[2].upper()
-        if d not in ("LONG","SHORT"):
-            return "Direction must be LONG|SHORT"
-        # optional kvs
-        kv = {"af":0.02, "max_af":0.2, "window_min":200}
-        for tok in parts[3:]:
-            if ":" in tok:
-                k,v = tok.split(":",1)
-                k = k.lower().strip()
-                v = v.strip()
-                if k == "af": kv["af"] = float(v)
-                elif k in ("max","max_af"): kv["max_af"] = float(v)
-                elif k in ("win","window","window_min"): kv["window_min"] = int(v)
-        cfg = {"position_id": pid, "symbol": sym, "direction": d, **kv}
-        tid = ctx.store.insert_thinker("PSAR_STOP", cfg)
-        return f"Thinker #{tid} PSAR_STOP set for {pid}/{sym} dir={d} af={kv['af']} max={kv['max_af']} win={kv['window_min']}"
-
-    # ---------- @jobs: list DB jobs ----------
-    @R.at("jobs")
-    def _at_jobs(ctx: CommandContext, args: Dict[str, str]) -> str:
-        """
-        @jobs [state:PENDING|RUNNING|DONE|ERR] [limit:50]
-        """
-        state = args.get("state")
-        limit = int(args.get("limit", "50"))
-
-        rows = ctx.store.list_jobs(state=state, limit=limit)
-        if not rows:
-            return "No jobs."
-
-        def _fmt_ts(ms: int) -> str:
-            # ISO UTC, seconds precision
-            return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat(timespec="seconds")
-
-        lines = []
-        for r in rows:
-            err = (r["last_error"] or "")
-            if len(err) > 120:
-                err = err[:117] + "..."
-            lines.append(
-                f"{r['job_id']}  {r['state']}  {r['task']}  attempts={r['attempts']} "
-                f"pos={r['position_id'] or '-'}  "
-                f"created={_fmt_ts(r['created_ts'])}  updated={_fmt_ts(r['updated_ts'])}"
-                + (f"\n  err: {err}" if r["state"] == "ERR" and err else "")
-            )
-        return "\n".join(lines)
-
-    # ---------- !retry_jobs: retry failed jobs ----------
-    @R.bang("retry_jobs")
-    def _bang_retry_jobs(ctx: CommandContext, args: Dict[str, str]) -> str:
-        """
-        !retry_jobs [id:<job_id>] [limit:N]
-          - With id: retries one job.
-          - Without id: retries all ERR jobs (optionally limited).
-        """
-        jid = args.get("id")
-        if jid:
-            ok = ctx.store.retry_job(jid)
-            return f"{'Retried' if ok else 'Not found'}: {jid}"
-
-        limit = args.get("limit")
-        n = ctx.store.retry_failed_jobs(limit=int(limit) if limit else None)
-        return f"Retried {n} failed job(s)."
-
-    return R
-
-
-def latest_marks_for_positions(api, store, rows) -> Dict[str,float]:
-    syms = {lg["symbol"] for r in rows for lg in store.get_legs(r["position_id"]) if lg["symbol"]}
+# TODO use KlinesCache
+def latest_marks_for_positions(eng: BotEngine, rows) -> Dict[str,float]:
+    syms = {lg["symbol"] for r in rows for lg in eng.store.get_legs(r["position_id"]) if lg["symbol"]}
     now = Clock.now_utc_ms(); out={}
     for s in syms:
         try:
-            mk = api.mark_price_klines(s, "1m", now-60_000, now)
+            mk = eng.api.mark_price_klines(s, "1m", now-60_000, now)
             if mk: out[s] = float(mk[-1][4])
         except Exception as e:
-            log.debug("mark snapshot fail", symbol=s, err=str(e))
+            log().debug("mark snapshot fail", symbol=s, err=str(e))
     return out
 
-
-def pnl_for_position(store, positionbook, position_id, marks) -> float:
-    res = positionbook.pnl_position(position_id, marks)
+# TODO use KlinesCache
+def pnl_for_position(eng: BotEngine, position_id, marks) -> float:
+    res = eng.positionbook.pnl_position(position_id, marks)
     return res["pnl_usd"] if res["ok"] else 0.0
 
 
-def exec_positions(store, positionbook, api, reporter, args) -> str:
+def exec_positions(eng: BotEngine, args) -> str:
     """
     Pure function used by @positions. Mirrors BotEngine._exec_positions but without self.
     args keys: status, what, limit, position_id, pair
     """
+    store = eng.store
+    reporter = eng.reporter
+    positionbook = eng.positionbook
+
     status = args.get("status", "open")
     what   = args.get("what", "summary")
     limit  = int(args.get("limit", 100))
@@ -1243,7 +826,7 @@ def exec_positions(store, positionbook, api, reporter, args) -> str:
         rows = [r for r in rows if _match(r)]
 
     # marks & render
-    marks = latest_marks_for_positions(api, store, rows)
+    marks = latest_marks_for_positions(eng, rows)
     if what == "summary":
         return reporter.fmt_positions_summary(store, positionbook, rows, marks)
     if what == "full":
@@ -1254,3 +837,103 @@ def exec_positions(store, positionbook, api, reporter, args) -> str:
     # Signal mis-usage clearly (your earlier convention)
     raise RuntimeError('ChatGPT: unknown "what". Use one of summary|full|legs')
 
+
+def render_chart(eng: BotEngine, symbol: str, timeframe: str, outdir: str = "/tmp") -> str:
+    """Render a candlestick+volume chart from KlinesCache → PNG. Returns file path."""
+    kc = eng.kc
+    rows = kc.last_n(symbol, timeframe, n=200)
+    if not rows:
+        raise ValueError(f"No cached klines for {symbol} {timeframe}")
+
+    df = pd.DataFrame([{
+        "Date": pd.to_datetime(r["open_ts"], unit="ms"),
+        "Open": float(r["o"]),
+        "High": float(r["h"]),
+        "Low":  float(r["l"]),
+        "Close":float(r["c"]),
+        "Volume":float(r["v"]),
+    } for r in rows]).set_index("Date")
+
+    # Simple indicator (20-period MA)
+    df["MA20"] = df["Close"].rolling(window=20).mean()
+
+    style = mpf.make_mpf_style(base_mpf_style="binance", y_on_right=True)
+
+    fig, axlist = mpf.plot(
+        df,
+        type="candle",
+        mav=(20,),
+        volume=True,
+        style=style,
+        title=f"{symbol} {timeframe} – last {len(df)} candles",
+        returnfig=True,
+        figsize=(9, 6),
+    )
+
+    out_path = os.path.join(outdir, f"chart_{symbol}_{timeframe}.png")
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def parse_pair_or_single(eng: BotEngine, raw: str) -> Tuple[str, Optional[str]]:
+    """
+    Parse a trading spec into (num_symbol, den_symbol_or_None).
+
+    Accepts:
+      - "ETH/STRK"            -> ("ETHUSDT", "STRKUSDT")
+      - "ETHUSDT/STRKUSDT"    -> ("ETHUSDT", "STRKUSDT")
+      - "ETH" or "ETHUSDT"    -> ("ETHUSDT", None)     # single-leg
+      - "ETH/" or "ETH/1"     -> ("ETHUSDT", None)     # explicit single-leg
+
+    Rules:
+      - Uses mc.normalize() for both sides.
+      - Denominator tokens "1", "UNIT", "" mean single-leg.
+      - Plain "USDT" as denominator is **not** allowed (ambiguous). Omit the denominator instead.
+
+    Raises:
+      ValueError with a precise message on bad input.
+    """
+    if not raw or not isinstance(raw, str):
+        raise ValueError("Empty pair/symbol.")
+
+    s = raw.strip().upper()
+
+    # Single token (no slash): single-leg
+    if "/" not in s:
+        try:
+            num = eng.mc.normalize(s)
+        except Exception as e:
+            raise ValueError(f"Unknown/unsupported symbol or base asset: {raw}") from e
+        return num, None
+
+    # Pair form
+    left, right = (t.strip() for t in s.split("/", 1))
+
+    if not left:
+        raise ValueError("Missing numerator before '/'.")
+
+    # Explicit single-leg hints on the right side
+    if right in ("", "1", "UNIT", "-"):
+        try:
+            num = eng.mc.normalize(left)
+        except Exception as e:
+            raise ValueError(f"Unknown/unsupported numerator: {left}") from e
+        return num, None
+
+    if right == "USDT":
+        # Denominator must be a PERPETUAL symbol, not the quote token.
+        raise ValueError("Denominator 'USDT' is not valid. For single-leg, omit the denominator (e.g., 'ETH' or 'ETHUSDT').")
+
+    # Proper pair: normalize both sides
+    try:
+        num = eng.mc.normalize(left)
+    except Exception as e:
+        raise ValueError(f"Unknown/unsupported numerator: {left}") from e
+
+    try:
+        den = eng.mc.normalize(right)
+    except Exception as e:
+        raise ValueError(f"Unknown/unsupported denominator: {right}") from e
+
+    return num, den

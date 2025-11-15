@@ -24,36 +24,53 @@ class Storage:
 
     def _init_db(self):
         c = self.con.cursor()
-        # in Storage._init_db(), replace ONLY the legs table part:
         c.executescript("""
-        CREATE TABLE IF NOT EXISTS positions (  -- your formerly positions table, if renamed
-          position_id TEXT PRIMARY KEY,
-          num TEXT NOT NULL,
-          den TEXT,
-          dir_sign INTEGER NOT NULL,
-          target_usd REAL NOT NULL,
-          user_ts INTEGER NOT NULL,
-          status TEXT NOT NULL DEFAULT 'OPEN',
-          note TEXT,
-          created_ts INTEGER NOT NULL
+        -- ========== positions ==========
+        CREATE TABLE IF NOT EXISTS positions (
+          position_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+          num           TEXT    NOT NULL,
+          den           TEXT,                    -- NULL => single-leg
+          dir_sign      INTEGER NOT NULL,        -- +1 long, -1 short (meaning for single-leg)
+          target_usd    REAL    NOT NULL,
+          user_ts       INTEGER NOT NULL,        -- user-declared timestamp (ms)
+          status        TEXT    NOT NULL DEFAULT 'OPEN',
+          note          TEXT,
+          created_ts    INTEGER NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS legs (
-          leg_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          position_id TEXT NOT NULL,
-          symbol  TEXT NOT NULL,
-          qty     REAL NOT NULL,            -- SIGNED
-          entry_price REAL NOT NULL,
-          entry_price_ts INTEGER NOT NULL,
-          price_method TEXT,
-          note TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_legs_pair_sym ON legs(position_id, symbol);
+        -- Uniqueness of a conceptual “position”
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_positions_signature
+          ON positions(num, den, dir_sign, target_usd, user_ts);
 
-        CREATE TABLE IF NOT EXISTS jobs(
-          job_id TEXT PRIMARY KEY, position_id TEXT, task TEXT NOT NULL, payload TEXT,
-          state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
-          created_ts INTEGER NOT NULL, updated_ts INTEGER NOT NULL
+        -- ============ legs ============
+        CREATE TABLE IF NOT EXISTS legs (
+          leg_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id     INTEGER NOT NULL,
+          symbol          TEXT    NOT NULL,
+          qty             REAL,                  -- signed; NULL until backfilled
+          entry_price     REAL,                  -- NULL until backfilled
+          entry_price_ts  INTEGER,               -- NULL until backfilled
+          price_method    TEXT,
+          need_backfill   INTEGER NOT NULL DEFAULT 1,  -- 1 => needs qty/price fill
+          note            TEXT,
+          UNIQUE(position_id, symbol),
+          FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE
         );
+        CREATE INDEX IF NOT EXISTS idx_legs_pos ON legs(position_id);
+
+        -- ============= jobs =============
+        CREATE TABLE IF NOT EXISTS jobs(
+          job_id      TEXT PRIMARY KEY,
+          position_id INTEGER,
+          task        TEXT NOT NULL,
+          payload     TEXT,
+          state       TEXT NOT NULL,
+          attempts    INTEGER NOT NULL DEFAULT 0,
+          last_error  TEXT,
+          created_ts  INTEGER NOT NULL,
+          updated_ts  INTEGER NOT NULL
+        );
+
+        -- ============= marks/pnl =========
         CREATE TABLE IF NOT EXISTS marks(
           ts INTEGER NOT NULL, symbol TEXT NOT NULL, mark_price REAL NOT NULL,
           PRIMARY KEY (ts, symbol)
@@ -62,10 +79,8 @@ class Storage:
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           ts INTEGER NOT NULL, symbol TEXT NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL
         );
-        """)
 
-        # --- thinkers subsystem ---
-        c.executescript("""
+        -- ============= thinkers ==========
         CREATE TABLE IF NOT EXISTS thinkers (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           kind TEXT NOT NULL,
@@ -88,6 +103,62 @@ class Storage:
         );
         """)
         self.con.commit()
+
+    # --- positions (auto-increment, unique signature) ---
+    def get_or_create_position(self, num: str, den: Optional[str], dir_sign: int,
+                               target_usd: float, user_ts: int,
+                               status: str = "OPEN", note: Optional[str] = None) -> int:
+        ts = Clock.now_utc_ms()
+        cur = self.con.cursor()
+        try:
+            cur.execute("""
+                INSERT INTO positions (num,den,dir_sign,target_usd,user_ts,status,note,created_ts)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (num, den, int(dir_sign), float(target_usd), int(user_ts), status, note, ts))
+            self.con.commit()
+            return int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            # already exists per UX index; fetch id
+            r = cur.execute("""
+                SELECT position_id FROM positions
+                WHERE num=? AND den IS ? AND dir_sign=? AND target_usd=? AND user_ts=?
+            """, (num, den, int(dir_sign), float(target_usd), int(user_ts))).fetchone()
+            if not r:
+                raise
+            return int(r["position_id"])
+
+    def get_position(self, position_id: int):
+        return self.con.execute("SELECT * FROM positions WHERE position_id=?", (int(position_id),)).fetchone()
+
+    def list_open_positions(self):
+        return self.con.execute("SELECT * FROM positions WHERE status='OPEN'").fetchall()
+
+    def close_position(self, position_id: int):
+        self.con.execute("UPDATE positions SET status='CLOSED' WHERE position_id=?", (int(position_id),))
+        self.con.commit()
+
+    # --- legs (stubs + fulfill) ---
+    def ensure_leg_stub(self, position_id: int, symbol: str):
+        """Create the leg if absent, marked as needing backfill."""
+        self.con.execute("""
+            INSERT OR IGNORE INTO legs(position_id, symbol, need_backfill)
+            VALUES (?, ?, 1)
+        """, (int(position_id), symbol))
+        self.con.commit()
+
+    def fulfill_leg(self, position_id: int, symbol: str, qty: float, price: float, price_ts: int, method: str):
+        """Fill qty/price and clear backfill flag."""
+        self.con.execute("""
+            UPDATE legs
+            SET qty = ?, entry_price = ?, entry_price_ts = ?, price_method = ?, need_backfill = 0
+            WHERE position_id = ? AND symbol = ?
+        """, (float(qty), float(price), int(price_ts), method, int(position_id), symbol))
+        self.con.commit()
+
+    def legs_needing_backfill(self, position_id: int):
+        return self.con.execute("""
+            SELECT * FROM legs WHERE position_id=? AND need_backfill=1
+        """, (int(position_id),)).fetchall()
 
     # --- pairs
     def upsert_position(self, row: dict):

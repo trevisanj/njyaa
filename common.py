@@ -1,12 +1,15 @@
 # common.py
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import List, Optional
 from zoneinfo import ZoneInfo
-import sys, json, threading
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+import sys, json
+from typing import List, Optional
+import re
+from datetime import datetime, timezone, timedelta
+import threading
 
-__all__ = [ "AppConfig", "Clock", "Log", "log", "set_global_logger", ]
+
+__all__ = [ "AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when"]
 
 # =======================
 # ====== CONFIG =========
@@ -71,14 +74,17 @@ class AppConfig:
     # Number of most recent bars to keep per (symbol, timeframe).
     KLINES_CACHE_KEEP_BARS: Optional[int] = None
 
-    # Polling interval (seconds) for refreshing klines from API.
-    KLINES_POLL_SEC: Optional[int] = None
+    # Polling interval (seconds) to refreshing klines, then think
+    THINKING_SEC: Optional[int] = None
 
     # List of timeframes to maintain in cache, e.g. ["1m", "5m", "1h"].
     KLINES_TIMEFRAMES: Optional[List[str]] = field(default_factory=list)
 
     # Max number of bars to fetch per API call.
     KLINES_FETCH_LIMIT: Optional[int] = None
+
+    # Auxiliary symbols to be fetched
+    AUX_SYMBOLS: Optional[List[str]] = None
 
 
 # =======================
@@ -130,6 +136,7 @@ class Log:
     LV = {"DEBUG":10, "INFO":20, "WARN":30, "ERROR":40}
 
     def __init__(self, level="INFO", stream=None, json_mode=False, name=None, context=None):
+        print("CREATING A LOGGGGGGGGGGGGGGGGGGGGGGGGGGGGG")
         self.stream = stream or sys.stdout
         self.level  = self.LV.get(str(level).upper(), 20)
         self.json_mode = bool(json_mode)
@@ -190,9 +197,100 @@ class Log:
 
 
 # ---- global logger + override hook ----
-log = Log("DEBUG", name="rv")  # default singleton used across API
+_log = Log("DEBUG", name="rv")  # default singleton used across API
 
 def set_global_logger(new_log: Log):
     """Call this from your main to replace the API's global `log`."""
-    global log
-    log = new_log
+    global _log
+    _log = new_log
+
+def log() -> Log:
+    return _log
+
+def sublog(name, **ctx) -> Log:
+    """Create a child logger sharing global config."""
+    return _log.child(name).bind(**ctx)
+
+
+# ---- tiny TF helpers ----
+_TF_MS = {
+    "1s": 1_000, "3s": 3_000, "5s": 5_000, "15s": 15_000, "30s": 30_000,
+    "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+    "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "6h": 21_600_000,
+    "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000, "3d": 259_200_000,
+    "1w": 604_800_000,
+}
+def tf_ms(tf: str) -> int:
+    """
+    Return timeframe length in milliseconds.
+
+    Args:
+        tf: Timeframe string like '1m', '5m', '1h', '1d'.
+
+    Returns:
+        Milliseconds for the timeframe.
+
+    Raises:
+        ValueError: If `tf` is unknown.
+    """
+    if tf not in _TF_MS:
+        raise ValueError(f"Unknown timeframe '{tf}'. Supported: {', '.join(_TF_MS)}")
+    return _TF_MS[tf]
+
+
+def parse_when(s: str) -> int:
+    """
+    Return UTC epoch milliseconds parsed from:
+      - "now" or "now-<n>[s|min|h|d]"   (e.g., now-30min, now-5h, now-2d, now-45s)
+      - YYYYMMDD                        (local midnight)
+      - YYYYMMDDHHMM or YYYYMMDDHHMMSS  (local time)
+      - ISO 8601 (e.g., 2025-11-10T13:44:05[+TZ])
+      - epoch seconds (10 digits) or milliseconds (13 digits)
+
+    Local tz for naive dates = system local tz (so it works even without Clock.set_tz()).
+    """
+    s = (s or "").strip()
+    if not s:
+        raise ValueError("Empty timestamp")
+
+    # now / now-*
+    m = re.fullmatch(r"now(?:-(\d+)(s|min|h|d))?", s.lower())
+    if m:
+        n, unit = m.groups()
+        dt = datetime.now(timezone.utc)
+        if n:
+            n = int(n)
+            delta = {"s": "seconds", "min": "minutes", "h": "hours", "d": "days"}[unit]
+            dt = dt - timedelta(**{delta: n})
+        return int(dt.timestamp() * 1000)
+
+    # pure digits
+    if s.isdigit():
+        if len(s) == 13:
+            return int(s)  # epoch ms
+        if len(s) == 10:
+            return int(s) * 1000  # epoch sec
+        # YYYYMMDD / YYYYMMDDHHMM / YYYYMMDDHHMMSS
+        if len(s) in (8, 12, 14):
+            year = int(s[0:4]); month = int(s[4:6]); day = int(s[6:8])
+            hh = mm = ss = 0
+            if len(s) >= 12:
+                hh = int(s[8:10]); mm = int(s[10:12])
+            if len(s) == 14:
+                ss = int(s[12:14])
+            # interpret as *local* time then convert to UTC
+            lt = datetime(year, month, day, hh, mm, ss).astimezone()  # system local tz
+            return int(lt.astimezone(timezone.utc).timestamp() * 1000)
+
+    # ISO8601 (naive => local)
+    try:
+        tz_local = Clock.get_tz()
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz_local)
+        return int(dt.astimezone(timezone.utc).timestamp() * 1000)
+
+    except Exception:
+        pass
+
+    raise ValueError(f"Unrecognized timestamp format: {s}")

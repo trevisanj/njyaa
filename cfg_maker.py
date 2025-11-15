@@ -35,9 +35,11 @@ def make_cfg():
         # ---- NEW: klines cache ----
         KLINES_CACHE_DB_PATH=os.environ.get("RV_CACHE_SQLITE", "./rv_cache.sqlite"),
         KLINES_CACHE_KEEP_BARS=int(os.environ.get("RV_CACHE_KEEP_BARS", "2000")),
-        KLINES_POLL_SEC=int(os.environ.get("RV_KLINES_POLL_SEC", "10")),
+        THINKING_SEC=int(os.environ.get("RV_KLINES_POLL_SEC", "10")),
         KLINES_TIMEFRAMES=(os.environ.get("RV_KLINES_TFS", "1m").split(",")),
         KLINES_FETCH_LIMIT=int(os.environ.get("RV_KLINES_FETCH_LIMIT", "1000")),
+
+        AUX_SYMBOLS=[],
     )
 
     return cfg

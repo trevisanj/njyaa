@@ -39,12 +39,12 @@ def main():
         # ---- NEW: klines cache ----
         KLINES_CACHE_DB_PATH=os.environ.get("RV_CACHE_SQLITE", "./rv_cache.sqlite"),
         KLINES_CACHE_KEEP_BARS=int(os.environ.get("RV_CACHE_KEEP_BARS", "2000")),
-        KLINES_POLL_SEC=int(os.environ.get("RV_KLINES_POLL_SEC", "10")),
+        THINKING_SEC=int(os.environ.get("RV_KLINES_POLL_SEC", "10")),
         KLINES_TIMEFRAMES=(os.environ.get("RV_KLINES_TFS", "1m").split(",")),
         KLINES_FETCH_LIMIT=int(os.environ.get("RV_KLINES_FETCH_LIMIT", "1000")),
     )
     Clock.set_tz(cfg.TZ_LOCAL)
-    log.info("Clock TZ set", tz=str(cfg.TZ_LOCAL))
+    log().info("Clock TZ set", tz=str(cfg.TZ_LOCAL))
 
     # 2) Core services
     api = BinanceUM(cfg)
@@ -67,7 +67,7 @@ def main():
 
     # 5) Graceful shutdown hooks
     def _graceful_exit(signum, frame):
-        log.info("Signal received, stopping...", sign=signum)
+        log().info("Signal received, stopping...", sign=signum)
         try:
             engine.stop()
         finally:

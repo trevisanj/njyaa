@@ -13,10 +13,7 @@ import readline  # GNU readline on Linux/macOS
 
 # --- import your project bits ---
 from bot_api import (
-    AppConfig, Storage, BinanceUM, MarketCatalog, PriceOracle,
-    PositionBook, AlertsEngine, Reporter, Worker,
-    TelegramBot, BotEngine, Clock, set_global_logger, Log,
-    build_registry, CommandContext,
+    AppConfig, BotEngine, Clock, set_global_logger, Log,
 )
 
 # ------------- small helpers -------------
@@ -122,7 +119,7 @@ class ConsoleUI:
                 out = self.eng.dispatch_command(line, chat_id=0)
                 self._print(out or "⏳ thinking…")
             except Exception as e:
-                log.exc(e, where="console.dispatch")
+                log().exc(e, where="console.dispatch")
                 self._print(f"Error: {e}")
         self._print("Shutting down…")
         self._alive = False
@@ -135,10 +132,11 @@ def main():
 
     cfg = make_cfg()
 
-    cfg.TELEGRAM_ENABLED=False
+    cfg.TELEGRAM_ENABLED = False
+    cfg.LOG_LEVEL = "DEBUG"
 
     # reflect desired log level
-    lg.set_level(cfg.LOG_LEVEL or "INFO")
+    lg.set_level(cfg.LOG_LEVEL)
 
     eng = start_engine(cfg)
 
