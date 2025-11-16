@@ -1,5 +1,3 @@
-# v03
-
 from __future__ import annotations
 import hashlib, math
 from typing import Any
@@ -15,7 +13,7 @@ from binance_um import BinanceUM
 import threading, time
 from typing import Callable, Dict
 from klines_cache import KlinesCache, rows_to_dataframe
-# inside bot_api.py (or a separate charts.py helper imported there)
+# inside bot_api.py (or a separate enghelpers.py helper imported there)
 import tempfile, os, io
 import matplotlib.pyplot as plt
 import mplfinance as mpf
@@ -161,20 +159,38 @@ class PricePoint:
 
 
 class PriceOracle:
+    """
+    Backfills a point-in-time price for a futures symbol using multiple sources with
+    an expanding time window.
+
+    Strategy (in order):
+      1) aggTrades (most precise)
+      2) klines(1m) (stable, reproducible proxy)
+         proxy when no nearby trade exists or trade APIs return empty.
+      3) markPriceKlines(1m) (synthetic fair price)
+    """
+
     def __init__(self, cfg: AppConfig, api: BinanceUM):
         self.cfg = cfg
         self.api = api
 
     def price_at(self, symbol: str, ts_ms: int) -> PricePoint:
+        """
+        Backfills a point-in-time price
+
+        Notes:
+          - Returned `PricePoint.price_ts` is the chosen series’ native reference time
+            (aggTrade time or candle open time), not necessarily equal to `ts_ms`.
+        """
         window = max(1, int(self.cfg.PRICE_BACKFILL_WINDOW_SEC))
         max_w = max(window, int(self.cfg.PRICE_BACKFILL_MAX_SEC))
         while window <= max_w:
-            start = ts_ms - window * 1000
-            end = ts_ms + window * 1000
-            log().debug("oracle.try", symbol=symbol, ts=ts_ms, window_sec=window)
 
             # aggTrades
             try:
+                start = ts_ms - window * 1000
+                end = ts_ms + window * 1000
+                log().debug("oracle.try", symbol=symbol, ts=ts_ms, window_sec=window)
                 trades = self.api.agg_trades(symbol, start, end)
                 if isinstance(trades, list) and trades:
                     closest = min(trades, key=lambda t: abs(int(t["T"]) - ts_ms))
@@ -182,36 +198,45 @@ class PriceOracle:
                     log().debug("oracle.hit", method="aggTrade", price=price, price_ts=pts)
                     return PricePoint(price, pts, "aggTrade")
             except Exception as e:
-                log().debug("oracle.fail", method="aggTrades", err=str(e))
+                log().warn("oracle.fail", method="aggTrades", err=str(e))
 
             # klines 1m
             try:
-                kl = self.api.klines(symbol, "1m", ts_ms - 60_000, ts_ms + 60_000)
+                start = ts_ms - window * 1000
+                end = ts_ms + window * 1000
+                kl = self.api.klines(symbol, "1m", start, end)
                 if isinstance(kl, list) and kl:
                     k = min(kl, key=lambda r: abs(int(r[0]) - ts_ms))
-                    open_t = int(k[0]); close_t = open_t + 60_000
-                    price = float(k[1] if ts_ms <= (open_t + close_t)//2 else k[4])
+                    open_t = int(k[0]);
+                    close_t = open_t + 60_000
+                    # return `open` if `ts_ms` lies in the first half of the minute, else `close`
+                    price = float(k[1] if ts_ms <= (open_t + close_t) // 2 else k[4])
                     log().debug("oracle.hit", method="kline", price=price, candle_open=open_t)
                     return PricePoint(price, open_t, "kline")
             except Exception as e:
-                log().debug("oracle.fail", method="klines", err=str(e))
-
+                log().warn("oracle.fail", method="klines", err=str(e))
             # markPriceKlines 1m
+
             try:
-                mk = self.api.mark_price_klines(symbol, "1m", ts_ms - 60_000, ts_ms + 60_000)
+                start = ts_ms - window * 1000
+                end = ts_ms + window * 1000
+                mk = self.api.mark_price_klines(symbol, "1m", start, end)
                 if isinstance(mk, list) and mk:
                     k = min(mk, key=lambda r: abs(int(r[0]) - ts_ms))
-                    open_t = int(k[0]); close_t = open_t + 60_000
-                    price = float(k[1] if ts_ms <= (open_t + close_t)//2 else k[4])
+                    open_t = int(k[0]);
+                    close_t = open_t + 60_000
+                    price = float(k[1] if ts_ms <= (open_t + close_t) // 2 else k[4])
                     log().debug("oracle.hit", method="mark_kline", price=price, candle_open=open_t)
                     return PricePoint(price, open_t, "mark_kline")
             except Exception as e:
-                log().debug("oracle.fail", method="mark_price_klines", err=str(e))
+                log().warn("oracle.fail", method="mark_price_klines", err=str(e))
 
+            log().debug("oracle.window.double", window=window*2)
             window *= 2
 
-        log().error("oracle.giveup", symbol=symbol, ts=ts_ms)
-        raise RuntimeError(f"Could not backfill price for {symbol} around {ts_ms}")
+        ts_ = fmt_ts_ms(ts_ms)
+        log().error("oracle.giveup", symbol=symbol, ts=ts_)
+        raise RuntimeError(f"Could not backfill price for {symbol} around {ts_}")
 
 
 # =======================
@@ -256,14 +281,20 @@ class PositionBook:
 
     def pnl_position(self, pid: str, prices: Dict[str, float]) -> Dict[str, Any]:
         legs = self.store.get_legs(pid)
-        if not legs: return {"position_id": pid, "pnl_usd": 0.0, "ok": False}
+        if not legs: return {"position_id": pid, "pnl_usd": None, "ok": False}
         pnl = 0.0
+        ok = True
         for leg in legs:
             mk = prices.get(leg["symbol"])
             if mk is None: continue
-            q = float(leg["qty"]); ep = float(leg["entry_price"])
+            q = leg["qty"]
+            ep = leg["entry_price"]
+            if q is None or ep is None:
+                pnl = None
+                ok = False
+                break
             pnl += (mk - ep) * q
-        return {"position_id": pid, "pnl_usd": pnl, "ok": True}
+        return {"position_id": pid, "pnl_usd": pnl, "ok": ok}
 
 
 # =======================
@@ -301,6 +332,13 @@ class Worker:
 
     def run_forever(self, idle_sleep=2):
         log().info("Worker started")
+
+        log().info("Worker started")
+        try:
+            self.store.recover_stale_jobs()
+        except Exception as e:
+            log().exc(e, where="worker.recover_stale")
+
         while not self._stop.is_set():
             job = self.store.fetch_next_job()
             if not job:
@@ -401,11 +439,13 @@ class AlertsEngine:
 
 class Reporter:
     @staticmethod
-    def fmt_positions_summary(store, positionbook, rows, marks) -> str:
+    def fmt_positions_summary(store, positionbook, rows, prices) -> str:
         total_target = sum(float(r["target_usd"]) for r in rows)
         total_pnl = 0.0
         for r in rows:
-            res = positionbook.pnl_position(r["position_id"], marks)
+            print("BEFORE SHIT")
+            res = positionbook.pnl_position(r["position_id"], prices)
+            print("AFTER SHIT")
             total_pnl += (res["pnl_usd"] if res["ok"] else 0.0)
         return f"Positions: {len(rows)} | Target ≈ ${total_target:.2f} | PNL ≈ ${total_pnl:.2f}"
 
@@ -539,7 +579,6 @@ class BotEngine:
         # Registry (commands) — single canonical instance
         self._registry = build_registry()
 
-
         # Telegram (optional)
         if self.cfg.TELEGRAM_ENABLED:
             try:
@@ -571,7 +610,7 @@ class BotEngine:
     # ---------- interface ----------
     def send_text(self, text: str) -> None:
         if not self.cfg.TELEGRAM_ENABLED:
-            log().info("ALERT", text=text);
+            log().info("ALERT", text=text)
             return
         assert self._app
         self._app.create_task(self._app.bot.send_message(chat_id=self.cfg.TELEGRAM_CHAT_ID, text=text))
@@ -645,10 +684,52 @@ class BotEngine:
     # Lifecycle
     # --------------------------------
 
+    def _install_thread_excepthook_once(self):
+        """
+        Ensure unhandled exceptions in ANY thread are logged via our logger.
+        """
+        if getattr(self, "_excepthook_installed", False):
+            return
+
+        def _hook(args):
+            try:
+                import traceback
+                tb = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+                log().error("thread.crash", thread=args.thread.name, exc=str(args.exc_value))
+                # Keep traceback as a separate log to avoid giant single-line JSON payloads if json_mode
+                for line in tb.rstrip("\n").splitlines():
+                    log().error(line)
+            except Exception:
+                # Last-ditch print if logging itself fails
+                sys.stderr.write(f"[thread {args.thread.name}] {args.exc_type}: {args.exc_value}\n")
+
+        threading.excepthook = _hook
+        self._excepthook_installed = True
+
+    def _telegram_thread_main(self):
+        """
+        Wrapper for PTB polling to:
+          - avoid signal registration in non-main thread,
+          - produce deterministic logs on exit/crash.
+        """
+        try:
+            assert self._app is not None
+            log().info("Telegram polling thread starting")
+            # IMPORTANT: stop_signals=None prevents asyncio signal handlers in non-main thread
+            self._app.run_polling(stop_signals=None, close_loop=False)
+            log().warn("Telegram polling stopped cleanly")
+        except Exception as e:
+            log().exc(e, where="telegram.thread")
+        finally:
+            log().warn("Telegram thread exiting")
+
     def start(self):
         # Build everything lazily
         if self.api is None:
             self._build_parts()
+
+        # Ensure thread exceptions are captured
+        self._install_thread_excepthook_once()
 
         # Start worker + scheduler
         t = threading.Thread(target=self.worker.run_forever, name="rv-worker", daemon=True)
@@ -660,8 +741,9 @@ class BotEngine:
         # If Telegram prepared, run polling (non-blocking loop handled by PTB)
         if self._app:
             log().info("Telegram polling…")
-            # Run PTB in a thread so console/other UIs can coexist
-            threading.Thread(target=lambda: self._app.run_polling(close_loop=False),
+            # Run PTB in a thread so console/other UIs can coexist.
+            # Key fix: stop_signals=None is set inside _telegram_thread_main()
+            threading.Thread(target=self._telegram_thread_main,
                              name="rv-telegram", daemon=True).start()
         else:
             log().info("Engine running without Telegram")
@@ -718,15 +800,7 @@ class BotEngine:
     # --------------------------------
     def _job_heartbeat(self):
         try:
-            open_positions = self.store.list_open_positions()
-            marks = self._latest_marks_for_open_symbols(open_positions)
-            total_pnl = 0.0
-            for row in open_positions:
-                pid = row["position_id"]
-                res = self.positionbook.pnl_position(pid, marks)
-                if res["ok"]:
-                    total_pnl += res["pnl_usd"]
-            txt = f"👋 are you ok?\nOpen positions: {len(open_positions)} | PNL ≈ ${total_pnl:.2f}"
+            txt = f"👋 are you ok?\nOpen positions: ... "
             self.send_text(txt)
         except Exception as e:
             log().exc(e, where="job.heartbeat")
@@ -734,7 +808,6 @@ class BotEngine:
     def _job_thinkers(self):
         try:
             log().debug("Gonna think ...")
-            log().info(f"Current log level: {log().level}; log id: {id(log)}")
 
             self.refresh_klines_cache()
             n = self.tm.run_once()
@@ -742,190 +815,3 @@ class BotEngine:
                 log().debug("thinkers.cycle", actions=n)
         except Exception as e:
             log().exc(e, where="job.thinkers")
-
-    # ---------- execution helpers ----------
-    def _latest_marks_for_open_symbols(self, pair_rows) -> Dict[str, float]:
-        """
-        Very light mark snapshot: for each symbol involved, take the latest mark close from markPriceKlines.
-        Good enough for quick Telegram responses.
-        """
-        syms = set()
-        for r in pair_rows:
-            legs = self.store.get_legs(r["position_id"])
-            for lg in legs:
-                if lg["symbol"]:
-                    syms.add(lg["symbol"])
-        marks: Dict[str,float] = {}
-        if not syms:
-            return marks
-        now = Clock.now_utc_ms()
-        for s in syms:
-            try:
-                mk = self.api.mark_price_klines(s, "1m", now-60_000, now)
-                if isinstance(mk, list) and mk:
-                    marks[s] = float(mk[-1][4])  # last close
-            except Exception as e:
-                log().debug("mark snapshot fail", symbol=s, err=str(e))
-        return marks
-
-
-# TODO:chatgpt use KlinesCache, not directly from Binance API (I don't mind the delay in cached info)
-def latest_prices_for_positions(eng: BotEngine, rows) -> Dict[str,float]:
-    syms = {leg["symbol"] for r in rows for leg in eng.store.get_legs(r["position_id"]) if leg["symbol"]}
-    now = Clock.now_utc_ms(); out={}
-    for s in syms:
-        try:
-            mk = eng.api.mark_price_klines(s, "1m", now-60_000, now)
-            if mk: out[s] = float(mk[-1][4])
-        except Exception as e:
-            log().debug("mark snapshot fail", symbol=s, err=str(e))
-    return out
-
-
-def pnl_for_position(eng: BotEngine, position_id, prices) -> float:
-    res = eng.positionbook.pnl_position(position_id, prices)
-    return res["pnl_usd"] if res["ok"] else 0.0
-
-
-def exec_positions(eng: BotEngine, args) -> str:
-    """
-    Pure function used by @positions.
-
-    args keys: status, what, limit, position_id, pair
-    """
-    store = eng.store
-    reporter = eng.reporter
-    positionbook = eng.positionbook
-
-    status = args.get("status", "open")
-    what   = args.get("what", "summary")
-    limit  = int(args.get("limit", 100))
-    pair   = args.get("pair")
-    pid    = args.get("position_id")
-
-    # rows by status
-    if status == "open":
-        rows = store.list_open_positions()
-    elif status == "closed":
-        rows = store.con.execute("SELECT * FROM positions WHERE status='CLOSED'").fetchall()
-    else:
-        rows = store.con.execute("SELECT * FROM positions").fetchall()
-
-    # optional filters
-    if pid:
-        rows = [r for r in rows if r["position_id"] == pid]
-
-    if pair:
-        num, den = pair
-        def _match(r):
-            if den is None:
-                legs = store.get_legs(r["position_id"])
-                return any((lg["symbol"] or "").startswith(num) for lg in legs)
-            return (r["num"].startswith(num) and r["den"].startswith(den))
-        rows = [r for r in rows if _match(r)]
-
-    # marks & render
-    prices = latest_prices_for_positions(eng, rows)
-    if what == "summary":
-        return reporter.fmt_positions_summary(store, positionbook, rows, prices)
-    if what == "full":
-        return reporter.fmt_positions_full(store, positionbook, rows, prices, limit)
-    if what == "legs":
-        return reporter.fmt_positions_legs(store, positionbook, rows, prices, limit)
-
-    # Signal mis-usage clearly (your earlier convention)
-    raise RuntimeError('ChatGPT: unknown "what". Use one of summary|full|legs')
-
-
-def render_chart(eng: BotEngine, symbol: str, timeframe: str, outdir: str = "/tmp") -> str:
-    """Render a candlestick+volume chart from KlinesCache → PNG. Returns file path."""
-    kc = eng.kc
-    rows = kc.last_n(symbol, timeframe, n=200)
-    if not rows:
-        raise ValueError(f"No cached klines for {symbol} {timeframe}")
-
-    df = rows_to_dataframe(rows)
-
-    # Simple indicator (20-period MA)
-    df["MA20"] = df["Close"].rolling(window=20).mean()
-
-    style = mpf.make_mpf_style(base_mpf_style="binance", y_on_right=True)
-
-    fig, axlist = mpf.plot(
-        df,
-        type="candle",
-        mav=(20,),
-        volume=True,
-        style=style,
-        title=f"{symbol} {timeframe} – last {len(df)} candles",
-        returnfig=True,
-        figsize=(9, 6),
-    )
-
-    out_path = os.path.join(outdir, f"chart_{symbol}_{timeframe}.png")
-    fig.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
-
-
-def parse_pair_or_single(eng: BotEngine, raw: str) -> Tuple[str, Optional[str]]:
-    """
-    Parse a trading spec into (num_symbol, den_symbol_or_None).
-
-    Accepts:
-      - "ETH/STRK"            -> ("ETHUSDT", "STRKUSDT")
-      - "ETHUSDT/STRKUSDT"    -> ("ETHUSDT", "STRKUSDT")
-      - "ETH" or "ETHUSDT"    -> ("ETHUSDT", None)     # single-leg
-      - "ETH/" or "ETH/1"     -> ("ETHUSDT", None)     # explicit single-leg
-
-    Rules:
-      - Uses mc.normalize() for both sides.
-      - Denominator tokens "1", "UNIT", "" mean single-leg.
-      - Plain "USDT" as denominator is **not** allowed (ambiguous). Omit the denominator instead.
-
-    Raises:
-      ValueError with a precise message on bad input.
-    """
-    if not raw or not isinstance(raw, str):
-        raise ValueError("Empty pair/symbol.")
-
-    s = raw.strip().upper()
-
-    # Single token (no slash): single-leg
-    if "/" not in s:
-        try:
-            num = eng.mc.normalize(s)
-        except Exception as e:
-            raise ValueError(f"Unknown/unsupported symbol or base asset: {raw}") from e
-        return num, None
-
-    # Pair form
-    left, right = (t.strip() for t in s.split("/", 1))
-
-    if not left:
-        raise ValueError("Missing numerator before '/'.")
-
-    # Explicit single-leg hints on the right side
-    if right in ("", "1", "UNIT", "-"):
-        try:
-            num = eng.mc.normalize(left)
-        except Exception as e:
-            raise ValueError(f"Unknown/unsupported numerator: {left}") from e
-        return num, None
-
-    if right == "USDT":
-        # Denominator must be a PERPETUAL symbol, not the quote token.
-        raise ValueError("Denominator 'USDT' is not valid. For single-leg, omit the denominator (e.g., 'ETH' or 'ETHUSDT').")
-
-    # Proper pair: normalize both sides
-    try:
-        num = eng.mc.normalize(left)
-    except Exception as e:
-        raise ValueError(f"Unknown/unsupported numerator: {left}") from e
-
-    try:
-        den = eng.mc.normalize(right)
-    except Exception as e:
-        raise ValueError(f"Unknown/unsupported denominator: {right}") from e
-
-    return num, den

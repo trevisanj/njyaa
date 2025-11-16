@@ -1,8 +1,11 @@
+# storage.py
 from __future__ import annotations
 import sqlite3
 import json
 from common import Clock
 from typing import List, Optional
+from common import log
+
 
 # =======================
 # ====== STORAGE ========
@@ -67,7 +70,8 @@ class Storage:
           attempts    INTEGER NOT NULL DEFAULT 0,
           last_error  TEXT,
           created_ts  INTEGER NOT NULL,
-          updated_ts  INTEGER NOT NULL
+          updated_ts  INTEGER NOT NULL,
+          worker_id   TEXT
         );
 
         -- ============= marks/pnl =========
@@ -160,7 +164,7 @@ class Storage:
             SELECT * FROM legs WHERE position_id=? AND need_backfill=1
         """, (int(position_id),)).fetchall()
 
-    # --- pairs
+    # --- positions
     def upsert_position(self, row: dict):
         q = """INSERT OR IGNORE INTO positions(position_id,num,den,dir_sign,target_usd,user_ts,status,note,created_ts)
                VALUES(:position_id,:num,:den,:dir_sign,:target_usd,:user_ts,:status,:note,:created_ts)"""
@@ -176,6 +180,45 @@ class Storage:
     def close_position(self, position_id:str):
         self.con.execute("UPDATE positions SET status='CLOSED' WHERE position_id=?", (position_id,))
         self.con.commit()
+
+    def delete_position_completely(self, position_id: int) -> int:
+        """
+        Permanently remove a position and all related data (legs, jobs, etc.).
+
+        Returns:
+            int: total number of rows deleted across tables (best-effort).
+
+        Notes:
+            - Idempotent: if the id is missing, deletes 0 rows.
+            - Wrapped in a single transaction; will rollback on any failure.
+            - Extend here if you add new tables referencing positions (alerts, notes, etc.).
+        """
+        cur = self.con.cursor()
+        try:
+            cur.execute("BEGIN")
+
+            # Delete dependents first (order matters if you add FKs later)
+            cur.execute("DELETE FROM legs WHERE position_id = ?", (position_id,))
+            n_legs = cur.rowcount or 0
+
+            cur.execute("DELETE FROM jobs WHERE position_id = ?", (position_id,))
+            n_jobs = cur.rowcount or 0
+
+            # If you have an alerts/rules table tied to positions, delete here too:
+            # cur.execute("DELETE FROM alerts WHERE position_id = ?", (position_id,))
+            # n_alerts = cur.rowcount or 0
+
+            cur.execute("DELETE FROM positions WHERE position_id = ?", (position_id,))
+            n_pos = cur.rowcount or 0
+
+            self.con.commit()
+            log().info("position.deleted", position_id=position_id,
+                       rows=dict(legs=n_legs, jobs=n_jobs, positions=n_pos))
+            return (n_legs + n_jobs + n_pos)
+        except Exception as e:
+            self.con.rollback()
+            log().exc(e, where="storage.delete_position_completely", position_id=position_id)
+            raise
 
     # --- legs
     def upsert_leg(self, row: dict):
@@ -203,6 +246,15 @@ class Storage:
                             VALUES(:job_id,:position_id,:task,:payload,:state,:attempts,:last_error,:created_ts,:updated_ts)""", row)
         self.con.commit()
 
+    def recover_stale_jobs(self):
+        cur = self.con.execute("UPDATE jobs SET state='PENDING' WHERE state='RUNNING'")
+        n = cur.rowcount
+        self.con.commit()
+        if n:
+            log().warn("jobs.recovered", count=n)
+        return n
+
+    # Storage
     def fetch_next_job(self) -> Optional[sqlite3.Row]:
         cur = self.con.cursor()
         cur.execute("BEGIN IMMEDIATE TRANSACTION;")
@@ -293,3 +345,16 @@ class Storage:
             if self.retry_job(r["job_id"]):
                 n += 1
         return n
+
+
+    def sql_update(self, table: str, pk_field: str, pk_value: int, fields: dict) -> int:
+        """Perform a parameterized UPDATE; returns rowcount."""
+        if not fields:
+            return 0
+        cols = sorted(fields.keys())
+        sets = ", ".join(f"{c}=?" for c in cols)
+        args = [fields[c] for c in cols] + [pk_value]
+        cur = self.con.cursor()
+        cur.execute(f"UPDATE {table} SET {sets} WHERE {pk_field}=?", args)
+        self.con.commit()
+        return cur.rowcount

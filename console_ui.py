@@ -133,7 +133,8 @@ def main():
     cfg = make_cfg()
 
     cfg.TELEGRAM_ENABLED = False
-    cfg.LOG_LEVEL = "DEBUG"
+    cfg.LOG_LEVEL = "INFO"
+    # cfg.PRICE_BACKFILL_MAX_SEC = 3600
 
     # reflect desired log level
     lg.set_level(cfg.LOG_LEVEL)

@@ -78,7 +78,7 @@ class ThinkerManager:
 
         actions = 0
         rows = self._load()
-        self.log.info(f"Thinking ... {len(rows)} thinkers ...")
+        self.log.debug(f"Thinking ... {len(rows)} thinkers ...")
         for tr in rows:
             self._ensure_instantiated(tr)
             inst = self._instances[tr.id]

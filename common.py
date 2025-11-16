@@ -5,11 +5,13 @@ from dataclasses import dataclass, field
 import sys, json
 from typing import List, Optional
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, tzinfo
 import threading
+from typing import Optional, Union
 
 
-__all__ = [ "AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when"]
+__all__ = [ "AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when",
+            "fmt_ts_ms", "fmt_ts_s"]
 
 # =======================
 # ====== CONFIG =========
@@ -136,7 +138,6 @@ class Log:
     LV = {"DEBUG":10, "INFO":20, "WARN":30, "ERROR":40}
 
     def __init__(self, level="INFO", stream=None, json_mode=False, name=None, context=None):
-        print("CREATING A LOGGGGGGGGGGGGGGGGGGGGGGGGGGGGG")
         self.stream = stream or sys.stdout
         self.level  = self.LV.get(str(level).upper(), 20)
         self.json_mode = bool(json_mode)
@@ -294,3 +295,35 @@ def parse_when(s: str) -> int:
         pass
 
     raise ValueError(f"Unrecognized timestamp format: {s}")
+
+
+
+
+def fmt_ts_ms(ts_ms: Union[int, float, str],
+              tz: Optional[tzinfo] = None,
+              timespec: str = "seconds") -> str:
+    """
+    Convert epoch milliseconds to an ISO-8601 string.
+
+    Args:
+        ts_ms: Timestamp in **milliseconds** since epoch.
+        tz: Output timezone (defaults to Clock.tz if set, else UTC).
+        timespec: Passed to datetime.isoformat (e.g. "seconds", "milliseconds").
+
+    Returns:
+        ISO string like '2025-11-16T12:34:56-03:00'.
+    """
+    ms = int(float(ts_ms))
+    z = tz or Clock.get_tz()
+    return datetime.fromtimestamp(ms / 1000.0, tz=z).isoformat(timespec=timespec)
+
+
+def fmt_ts_s(ts_s: Union[int, float, str],
+             tz: Optional[tzinfo] = None,
+             timespec: str = "seconds") -> str:
+    """
+    Convert epoch **seconds** to an ISO-8601 string (convenience wrapper).
+    """
+    s = int(float(ts_s))
+    z = tz or Clock.get_tz()
+    return datetime.fromtimestamp(s, tz=z).isoformat(timespec=timespec)

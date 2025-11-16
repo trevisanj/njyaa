@@ -13,7 +13,8 @@ from datetime import datetime, timezone, timedelta
 from binance_um import BinanceUM
 import threading, time
 from typing import Callable, Dict
-from bot_api import BotEngine, parse_when, parse_pair_or_single, exec_positions, render_chart
+from bot_api import BotEngine
+import enghelpers as eh
 
 
 class CommandRegistry:
@@ -134,7 +135,7 @@ class CommandRegistry:
         if meta["options"]:
             opt_items = " ".join(f"[{o}:…]" for o in sorted(meta["options"]))
             opt = (" " + opt_items) if opt_items else ""
-        line = f"Usage: {pre}{nm}" + (f" {pos}" if pos else "") + opt
+        line = f"{pre}{nm}" + (f" {pos}" if pos else "") + opt
         if reason:
             return f"{reason}\n{line}"
         return line
@@ -151,9 +152,9 @@ class CommandRegistry:
             usage = self._usage_line(meta)
             summary = meta.get("summary") or ""
             if summary:
-                lines.append(f"  {usage}\n    – {summary}")
+                lines.append(f"  {usage}\n    {summary}\n")
             else:
-                lines.append(f"  {usage}")
+                lines.append(f"  {usage}\n")
         return "\n".join(lines)
 
 
@@ -161,6 +162,7 @@ def build_registry() -> CommandRegistry:
     R = CommandRegistry()
 
     # ----------------------- HELP -----------------------
+    # TODO improve help formatting
     @R.at("help")
     def _help(eng: BotEngine, args: Dict[str, str]) -> str:
         """Show this help."""
@@ -169,39 +171,182 @@ def build_registry() -> CommandRegistry:
     # ----------------------- OPEN (alias) -----------------------
     @R.at("open")
     def _at_open(eng: BotEngine, args: Dict[str, str]) -> str:
-        """List open RV positions (summary). Alias for: @positions status:open what:summary"""
-        return R.dispatch(eng, "@positions status:open what:summary")
+        """List open RV positions (summary). Alias for: @positions status:open detail:2"""
+        return R.dispatch(eng, "@positions status:open detail:2")
 
-    # ----------------------- POSITIONS -----------------------
-    @R.at("positions", options=["status", "what", "sort", "limit", "position_id", "pair"])
+    # ----------------------- POSITIONS (detail levels) -----------------------
+    @R.at("positions", options=["status", "detail", "sort", "limit", "position_id", "pair"])
     def _at_positions(eng: BotEngine, args: Dict[str, str]) -> str:
         """
-        Advanced positions view.
+        Positions report with detail levels.
+
+        detail: 1 = summary
+                2 = summary + per-position overview (with opened datetime & signed target)
+                3 = level 2 + per-symbol leg summary (agg qty, WAP, last price, PnL)
+                4 = level 2 + list every leg (timestamp, entry, last, qty, PnL)
 
         Examples:
-          @positions what:full limit:20
-          @positions status:closed
-          @positions pair:STRK/ETH
+          @positions detail:1
+          @positions status:closed detail:2
+          @positions pair:STRK/ETH detail:3 limit:20
         """
+        store = eng.store
+
         status = args.get("status", "open")
-        what = args.get("what", "summary")
-        sort_ = args.get("sort", "pnl")  # (kept for future; unused here)
+        # Back-compat: map what: to detail
+        detail = int(args.get("detail", 2))
         limit = int(args.get("limit", "100"))
-        position_id = args.get("position_id")
-        pair = args.get("pair")
+        pid = args.get("position_id")
+        raw_pair = args.get("pair")
+        pair = None
+        if raw_pair:
+            pair = eh.parse_pair_or_single(eng, raw_pair.upper())
 
-        exec_args = {
-            "status": status, "what": what, "sort": sort_, "limit": limit,
-            "position_id": position_id, "pair": None
-        }
+        # fetch rows by status
+        if status == "open":
+            rows = store.list_open_positions()
+        elif status == "closed":
+            rows = store.con.execute("SELECT * FROM positions WHERE status='CLOSED'").fetchall()
+        else:
+            rows = store.con.execute("SELECT * FROM positions").fetchall()
+
+        # filters
+        if pid:
+            rows = [r for r in rows if r["position_id"] == int(pid)]
+
         if pair:
-            up = pair.upper()
-            exec_args["pair"] = parse_pair_or_single(eng, up)
+            num, den = pair
+            def _match(r):
+                if den is None:
+                    legs = store.get_legs(r["position_id"])
+                    return any((lg["symbol"] or "").startswith(num) for lg in legs)
+                return (r["num"].startswith(num) and r["den"].startswith(den))
+            rows = [r for r in rows if _match(r)]
 
-        return exec_positions(eng, exec_args)
+        # Precompute last cached prices for all involved symbols
+        involved_syms = set()
+        for r in rows:
+            for lg in store.get_legs(r["position_id"]):
+                if lg["symbol"]:
+                    involved_syms.add(lg["symbol"])
+        marks: Dict[str, Optional[float]] = {s: _last_cached_price(eng, s) for s in involved_syms}
+
+        # ---------- detail 1: summary ----------
+        total_target = 0.0
+        total_pnl = 0.0
+        pnl_missing_count = 0
+        for r in rows:
+            total_target += _position_signed_target(r)
+            # Sum position PnL from legs with None-safe handling
+            pos_pnl = 0.0
+            pos_missing = 0
+            for lg in store.get_legs(r["position_id"]):
+                m = marks.get(lg["symbol"])
+                pnl = _leg_pnl(lg["entry_price"], lg["qty"], m)
+                if pnl is None:
+                    pos_missing += 1
+                    continue
+                pos_pnl += pnl
+            total_pnl += pos_pnl
+            pnl_missing_count += (1 if pos_missing else 0)
+
+        lines: List[str] = []
+        lines.append(
+            f"Positions: {len(rows)} | Target ≈ ${_fmt_num(total_target, 2)} | "
+            f"PNL ≈ ${_fmt_num(total_pnl, 2)}"
+            + (f" (PnL incomplete for {pnl_missing_count} position(s))" if pnl_missing_count else "")
+        )
+        if detail == 1:
+            return "\n".join(lines)
+
+        # ---------- detail 2+: per-position overview ----------
+        count = 0
+        for r in rows:
+            if count >= limit:
+                break
+            pid = r["position_id"]
+            opened_ms = r["user_ts"] or r["created_ts"]
+            opened_str = _ts_human(opened_ms)
+            signed_target = _position_signed_target(r)
+
+            # compute position pnl and missing flag
+            pos_pnl = 0.0
+            any_missing = False
+            for lg in store.get_legs(pid):
+                m = marks.get(lg["symbol"])
+                pnl = _leg_pnl(lg["entry_price"], lg["qty"], m)
+                if pnl is None:
+                    any_missing = True
+                else:
+                    pos_pnl += pnl
+
+            pnl_str = _fmt_num(pos_pnl, 2)
+            if any_missing:
+                pnl_str += " (incomplete)"
+
+            lines.append(
+                f"{pid} {r['num']} / {r['den'] or '-'} "
+                f"status={r['status']} opened={opened_str} "
+                f"signed_target=${_fmt_num(signed_target, 2)} PNL=${pnl_str}"
+            )
+
+            # ---------- detail 3: per-symbol leg summary ----------
+            if detail == 3:
+                # aggregate per symbol: signed qty sum; WAP by abs(qty) as weight
+                by_sym: Dict[str, Dict[str, float]] = {}
+                missing_map: Dict[str, bool] = {}
+                for lg in store.get_legs(pid):
+                    s = lg["symbol"]
+                    q = lg["qty"]
+                    ep = lg["entry_price"]
+                    if s not in by_sym:
+                        by_sym[s] = {"qty": 0.0, "wap_num": 0.0, "wap_den": 0.0, "pnl": 0.0}
+                        missing_map[s] = False
+                    if q is not None:
+                        by_sym[s]["qty"] += float(q)
+                    if ep is not None and q is not None:
+                        w = abs(float(q))
+                        by_sym[s]["wap_num"] += float(ep) * w
+                        by_sym[s]["wap_den"] += w
+                    # pnl accumulation
+                    pnl = _leg_pnl(ep, q, marks.get(s))
+                    if pnl is None:
+                        missing_map[s] = True
+                    else:
+                        by_sym[s]["pnl"] += pnl
+
+                for s, acc in by_sym.items():
+                    wap = (acc["wap_num"] / acc["wap_den"]) if acc["wap_den"] > 0 else None
+                    last = marks.get(s)
+                    pnl_s = _fmt_num(acc["pnl"], 2)
+                    if missing_map.get(s):
+                        pnl_s += " (incomplete)"
+                    lines.append(
+                        f"  - {s}  qty={_fmt_qty(acc['qty'])}  entry≈{_fmt_num(wap, 6)}  "
+                        f"last={_fmt_num(last, 6)}  pnl=${pnl_s}"
+                    )
+
+            # ---------- detail 4: list every leg ----------
+            if detail == 4:
+                for lg in store.get_legs(pid):
+                    ts = lg["entry_price_ts"]
+                    ts_h = _ts_human(ts)
+                    last = marks.get(lg["symbol"])
+                    pnl = _leg_pnl(lg["entry_price"], lg["qty"], last)
+                    pnl_str = _fmt_num(pnl, 2)
+                    if pnl is None:
+                        pnl_str = "? (missing price/entry/qty)"
+                    lines.append(
+                        f"  - {lg['symbol']}  t={ts_h}  qty={_fmt_qty(lg['qty'])}  "
+                        f"entry={_fmt_num(lg['entry_price'], 6)}  last={_fmt_num(last, 6)}  pnl=${pnl_str}"
+                    )
+
+            count += 1
+
+        return "\n".join(lines)
 
     # ----------------------- !OPEN POSITION -----------------------
-    @R.bang("open", argspec=["ts", "pair", "usd"], options=["note"])
+    @R.bang("open", argspec=["pair", "ts", "usd"], options=["note"])
     def _bang_open(eng: BotEngine, args: Dict[str, str]) -> str:
         """
         Open/add an RV position.
@@ -209,11 +354,11 @@ def build_registry() -> CommandRegistry:
         Usage:
           !open <ISO|epoch_ms> <NUM/DEN|SYMBOL> <±usd> [note:...]
         Examples:
-          !open 2025-11-10T13:44:05 STRK/ETH -5000 note:rv test
-          !open 2025-11-10T13:44:05 ETHUSDT +3000
+          !open STRK/ETH 2025-11-10T13:44:05  -5000 note:rv test
+          !open ETHUSDT  2025-11-10T13:44:05 +3000
         """
         ts_ms = parse_when(args["ts"])
-        num, den = parse_pair_or_single(eng, args["pair"])
+        num, den = eh.parse_pair_or_single(eng, args["pair"])
         usd = int(float(args["usd"]))
         note = args.get("note", "")
 
@@ -392,11 +537,212 @@ def build_registry() -> CommandRegistry:
         symbol = args["symbol"].upper()
         tf = args["timeframe"]
         try:
-            path = render_chart(eng, symbol, tf)
+            path = eh.render_chart(eng, symbol, tf)
             eng.send_photo(path, caption=f"{symbol} {tf}")
             return f"Chart generated for {symbol} {tf}"
         except Exception as e:
             log().exc(e, where="cmd.chart")
             return f"Error: {e}"
 
+    @R.bang("position-rm", argspec=["position_id"])
+    def _bang_position_rm(eng: BotEngine, args: Dict[str, str]) -> str:
+        pid = int(args["position_id"])
+        deleted = eng.store.delete_position_completely(pid)
+        # TODO improve reporting (still shows this message even if the position id does not exist)
+        return f"Deleted position {pid} ({deleted} row(s))."
+
+    # ======================= POSITION EDIT =======================
+    @R.bang("position-set",
+            argspec=["position_id"],
+            options=["num", "den", "dir_sign", "target_usd", "user_ts", "status", "note", "created_ts"])
+    def _bang_position_set(eng: BotEngine, args: Dict[str, str]) -> str:
+        """
+        Update fields in a position row (by position_id).
+        Usage:
+          !position-set <position_id> [num:ETHUSDT] [den:STRKUSDT|-] [dir_sign:-1|+1]
+                          [target_usd:5000] [user_ts:<when>] [status:OPEN|CLOSED]
+                          [note:...] [created_ts:<when>]
+        Notes:
+          - user_ts/created_ts accept ISO or epoch via parse_when().
+          - den:"-" (or empty/none/null) clears denominator (single-leg).
+        """
+        pid_s = args.get("position_id", "")
+        if not pid_s.isdigit():
+            return "Usage: !position-set <position_id> …options…"
+        pid = int(pid_s)
+
+        # capture only provided (recognized) option keys
+        provided = {k: v for k, v in args.items()
+                    if k in {"num", "den", "dir_sign", "target_usd", "user_ts", "status", "note",
+                             "created_ts"} and v is not None}
+
+        if not provided:
+            return ("Nothing to update. Allowed keys: "
+                    "num den dir_sign target_usd user_ts status note created_ts")
+
+        try:
+            fields = _coerce_position_fields(provided)
+            n = _sql_update(eng.store.con, "positions", "position_id", pid, fields)
+            if n == 0:
+                return f"Position {pid} not found or unchanged."
+            # brief echo of what changed
+            changed = ", ".join(f"{k}={fields[k]!r}" for k in sorted(fields.keys()))
+            return f"Position {pid} updated: {changed}"
+        except Exception as e:
+            log().exc(e, where="cmd.position-set")
+            return f"Error updating position {pid}: {e}"
+
+    # ======================= LEG EDIT =======================
+    @R.bang("leg-set",
+            argspec=["leg_id"],
+            options=["position_id", "symbol", "qty", "entry_price", "entry_price_ts", "price_method", "need_backfill",
+                     "note"])
+    def _bang_leg_set(eng: BotEngine, args: Dict[str, str]) -> str:
+        """
+        Update fields in a leg row (by leg_id).
+        Usage:
+          !leg-set <leg_id> [position_id:123] [symbol:ETHUSDT] [qty:-0.75]
+                           [entry_price:3521.4] [entry_price_ts:<when>]
+                           [price_method:aggTrade|kline|mark_kline] [need_backfill:0|1]
+                           [note:...]
+        Notes:
+          - entry_price_ts accepts ISO or epoch via parse_when().
+          - Changing position_id/symbol must respect UNIQUE(position_id,symbol).
+        """
+        lid_s = args.get("leg_id", "")
+        if not lid_s.isdigit():
+            return "Usage: !leg-set <leg_id> …options…"
+        lid = int(lid_s)
+
+        provided = {k: v for k, v in args.items()
+                    if
+                    k in {"position_id", "symbol", "qty", "entry_price", "entry_price_ts", "price_method",
+                          "need_backfill",
+                          "note"} and v is not None}
+
+        if not provided:
+            return ("Nothing to update. Allowed keys: "
+                    "position_id symbol qty entry_price entry_price_ts price_method need_backfill note")
+
+        try:
+            fields = _coerce_leg_fields(provided)
+            n = _sql_update(eng.store.con, "legs", "leg_id", lid, fields)
+            if n == 0:
+                return f"Leg {lid} not found or unchanged."
+            changed = ", ".join(f"{k}={fields[k]!r}" for k in sorted(fields.keys()))
+            return f"Leg {lid} updated: {changed}"
+        except Exception as e:
+            # Likely UNIQUE(position_id,symbol) or FK violations, surface cleanly.
+            log().exc(e, where="cmd.leg-set")
+            return f"Error updating leg {lid}: {e}"
+
     return R
+
+# === helpers (local to build_registry) ====================================
+# TODO this is all so horrible, but if it works for the moment, it is fine
+
+def _ts_human(ms: int | None) -> str:
+    """Human timestamp from ms (UTC ISO seconds)."""
+    if not ms:
+        return "?"
+    try:
+        return datetime.fromtimestamp(int(ms)/1000, tz=timezone.utc).isoformat(timespec="seconds")
+    except Exception:
+        return "?"
+
+# TODO make a klinescache facility last_prices(symbols) --> {symbol: {"price": price, "timestamp": ..., "timeframe": ..., "ok": ...}, ...}
+def _last_cached_price(eng: BotEngine, symbol: str) -> Optional[float]:
+    """Latest cached close from KlinesCache (first configured timeframe)."""
+    kc = eng.kc
+    if kc is None:
+        return None
+    tfs = getattr(eng.cfg, "KLINES_TIMEFRAMES", None) or ["1m"]
+    for tf in tfs:
+        try:
+            r = kc.last_row(symbol, tf)
+            if r and r["close"] is not None:
+                return float(r["close"])
+        except Exception:
+            pass
+    return None
+
+def _fmt_num(x: Any, nd=2) -> str:
+    if x is None:
+        return "?"
+    try:
+        return f"{float(x):.{nd}f}"
+    except Exception:
+        return "?"
+
+def _fmt_qty(x: Any) -> str:
+    # show up to 6 decimals but trim zeros
+    if x is None: return "?"
+    try:
+        s = f"{float(x):.6f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+    except Exception:
+        return "?"
+
+def _leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float]) -> Optional[float]:
+    if entry is None or qty is None or mark is None:
+        return None
+    return (float(mark) - float(entry)) * float(qty)
+
+def _position_signed_target(row) -> float:
+    # Correct sign: dir_sign * target_usd
+    ds = row["dir_sign"]
+    tgt = row["target_usd"]
+    return ds * tgt
+
+
+# ===== helpers for field coercion / updates (local to build_registry) ====
+def _blank_to_none(v: str | None):
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s.lower() in ("", "none", "null", "-"):
+        return None
+    return v
+
+
+def _boolish_to_int(v: str) -> int:
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "y", "on"): return 1
+    if s in ("0", "false", "no", "n", "off"): return 0
+    # fall back to int (raises if bad)
+    return 1 if int(float(s)) != 0 else 0
+
+
+def _coerce_position_fields(raw: dict) -> dict:
+    """Coerce incoming option strings to proper types for positions table."""
+    out = {}
+    if "num" in raw: out["num"] = str(raw["num"]).upper().strip()
+    if "den" in raw:
+        v = _blank_to_none(raw["den"])
+        out["den"] = None if v is None else str(v).upper().strip()
+    if "dir_sign" in raw:
+        ds = int(raw["dir_sign"])
+        if ds not in (-1, 1):
+            raise ValueError("dir_sign must be -1 or +1")
+        out["dir_sign"] = ds
+    if "target_usd" in raw: out["target_usd"] = float(raw["target_usd"])
+    if "user_ts" in raw: out["user_ts"] = parse_when(str(raw["user_ts"]))
+    if "created_ts" in raw: out["created_ts"] = parse_when(str(raw["created_ts"]))
+    if "status" in raw: out["status"] = str(raw["status"]).upper().strip()
+    if "note" in raw: out["note"] = str(raw["note"])
+    return out
+
+
+def _coerce_leg_fields(raw: dict) -> dict:
+    """Coerce incoming option strings to proper types for legs table."""
+    out = {}
+    if "position_id" in raw: out["position_id"] = int(raw["position_id"])
+    if "symbol" in raw: out["symbol"] = str(raw["symbol"]).upper().strip()
+    if "qty" in raw: out["qty"] = float(raw["qty"])
+    if "entry_price" in raw: out["entry_price"] = float(raw["entry_price"])
+    if "entry_price_ts" in raw: out["entry_price_ts"] = parse_when(str(raw["entry_price_ts"]))
+    if "price_method" in raw: out["price_method"] = str(raw["price_method"])
+    if "need_backfill" in raw: out["need_backfill"] = _boolish_to_int(raw["need_backfill"])
+    if "note" in raw: out["note"] = str(raw["note"])
+    return out
+
