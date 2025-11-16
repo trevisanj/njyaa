@@ -337,7 +337,7 @@ def build_registry() -> CommandRegistry:
                     if pnl is None:
                         pnl_str = "? (missing price/entry/qty)"
                     lines.append(
-                        f"  - {lg['symbol']}  t={ts_h}  qty={_fmt_qty(lg['qty'])}  "
+                        f"  - {lg['leg_id']} {lg['symbol']}  t={ts_h}  qty={_fmt_qty(lg['qty'])}  "
                         f"entry={_fmt_num(lg['entry_price'], 6)}  last={_fmt_num(last, 6)}  pnl=${pnl_str}"
                     )
 
@@ -582,7 +582,7 @@ def build_registry() -> CommandRegistry:
 
         try:
             fields = _coerce_position_fields(provided)
-            n = _sql_update(eng.store.con, "positions", "position_id", pid, fields)
+            n = eng.store.sql_update("positions", "position_id", pid, fields)
             if n == 0:
                 return f"Position {pid} not found or unchanged."
             # brief echo of what changed
@@ -626,7 +626,7 @@ def build_registry() -> CommandRegistry:
 
         try:
             fields = _coerce_leg_fields(provided)
-            n = _sql_update(eng.store.con, "legs", "leg_id", lid, fields)
+            n = eng.store.sql_update("legs", "leg_id", lid, fields)
             if n == 0:
                 return f"Leg {lid} not found or unchanged."
             changed = ", ".join(f"{k}={fields[k]!r}" for k in sorted(fields.keys()))
@@ -636,10 +636,172 @@ def build_registry() -> CommandRegistry:
             log().exc(e, where="cmd.leg-set")
             return f"Error updating leg {lid}: {e}"
 
+    # ----------------------- LEG BACKFILL PRICE -----------------------
+    @R.bang("leg-set-ebyp", argspec=["leg_id", "price"], options=["lookback_days"])
+    def _bang_leg_set_ebyp(eng: BotEngine, args: Dict[str, str]) -> str:
+        """
+        Entry-by-price: set a leg's entry_price and entry_price_ts by locating the most recent candle
+        whose [low, high] contains the given price, using a configurable coarse→fine path.
+
+        Usage:
+          !leg-backfill-price <leg_id> <price> [lookback_days:365]
+
+        Behavior:
+          - If the coarsest TF finds no engulfing candle over the lookback, it fails.
+          - Otherwise it refines inside that candle's window; if a finer TF has no hit,
+            it uses the last level that did.
+        """
+        try:
+            leg_id = int(args["leg_id"])
+            price = float(args["price"])
+        except Exception:
+            return "Usage: !leg-backfill-price <leg_id> <price> [lookback_d:7] [path:1d,1h,1m]"
+
+        lookback_days = int(args.get("lookback_d", "365"))
+        path = ["1d", "1h", "1m"]
+
+        leg = eng.store.con.execute("SELECT * FROM legs WHERE leg_id=?", (leg_id,)).fetchone()
+        if not leg:
+            return f"Leg #{leg_id} not found."
+        symbol = leg["symbol"]
+
+        ts = _find_price_touch_ts(eng.api, symbol, price, lookback_days=lookback_days, path=path)
+        if ts is None:
+            return f"No {path[0]} candle for {symbol} contained {price} within ~{lookback_days}d."
+
+        eng.store.sql_update(
+            table="legs",
+            pk_field="leg_id",
+            pk_value=leg_id,
+            fields={
+                "entry_price": price,
+                "entry_price_ts": ts,
+                "price_method": "manual_touch",
+            },
+        )
+
+        return (
+            f"Leg #{leg_id} ({symbol}) updated: entry_price={price} "
+            f"at {_ts_human(ts)} (path={','.join(path)}, manual_touch)."
+        )
+
+    # ----------------------- PNL PER SYMBOL (LEGS) -----------------------
+    @R.at("pnl-symbols", options=["status"])
+    def _at_pnl_symbols(eng: BotEngine, args: Dict[str, str]) -> str:
+        """
+        Aggregate PnL per symbol by traversing legs directly.
+
+        Usage:
+          @pnl-symbols [status:open|closed|all]
+
+        Notes:
+          - Uses last cached close from KlinesCache as mark price.
+          - PnL per leg = (mark - entry_price) * qty.
+          - If any of (entry_price, qty, mark) is missing, PnL is "?" and
+            treated as 0 in aggregates, but missing counts are reported.
+        """
+        status_opt = (args.get("status") or "all").strip().lower()
+        valid_status = {"open", "closed", "all"}
+        if status_opt not in valid_status:
+            return "status must be one of: open|closed|all"
+
+        # --- fetch legs joined with positions.status ---
+        q = """
+            SELECT l.*, p.status
+            FROM legs l
+            JOIN positions p ON p.position_id = l.position_id
+        """
+        params: list = []
+        if status_opt in ("open", "closed"):
+            q += " WHERE p.status = ?"
+            params.append(status_opt.upper())
+        q += " ORDER BY l.symbol, l.leg_id"
+
+        rows = eng.store.con.execute(q, params).fetchall()
+        if not rows:
+            return "No legs match."
+
+        # --- gather marks per symbol ---
+        symbols = sorted({r["symbol"] for r in rows if r["symbol"]})
+        marks: Dict[str, Optional[float]] = {s: _last_cached_price(eng, s) for s in symbols}
+
+        # stats[symbol] = {
+        #   "last_price": float|None,
+        #   "open":  {"legs": int, "pnl_sum": float, "missing": int},
+        #   "closed":{"legs": int, "pnl_sum": float, "missing": int},
+        # }
+        stats: Dict[str, Dict[str, Any]] = {}
+
+        for r in rows:
+            sym = r["symbol"]
+            if not sym:
+                continue
+            pos_status = (r["status"] or "").upper()
+            grp = "open" if pos_status == "OPEN" else "closed"
+
+            if sym not in stats:
+                stats[sym] = {
+                    "last_price": marks.get(sym),
+                    "open":  {"legs": 0, "pnl_sum": 0.0, "missing": 0},
+                    "closed":{"legs": 0, "pnl_sum": 0.0, "missing": 0},
+                }
+
+            g = stats[sym][grp]
+            g["legs"] += 1
+
+            mark = stats[sym]["last_price"]
+            pnl = _leg_pnl(r["entry_price"], r["qty"], mark)
+            if pnl is None:
+                g["missing"] += 1
+            else:
+                g["pnl_sum"] += float(pnl)
+
+        # --- render ---
+        lines: list[str] = []
+        lines.append("PnL per symbol (mark = last cached close):")
+        lines.append(
+            "SYMBOL      LAST        OPEN_PNL (legs/miss)   "
+            "CLOSED_PNL (legs/miss)   TOTAL_PNL"
+        )
+
+        total_open = total_closed = 0.0
+        total_open_missing = total_closed_missing = 0
+
+        for sym in sorted(stats.keys()):
+            s = stats[sym]
+            lp = s["last_price"]
+            o = s["open"]
+            c = s["closed"]
+
+            total_sym = o["pnl_sum"] + c["pnl_sum"]
+            total_open += o["pnl_sum"]
+            total_closed += c["pnl_sum"]
+            total_open_missing += o["missing"]
+            total_closed_missing += c["missing"]
+
+            lines.append(
+                f"{sym:>8}  {_fmt_num(lp, nd=4):>10}  "
+                f"{_fmt_num(o['pnl_sum']):>10} ({o['legs']}/{o['missing']})   "
+                f"{_fmt_num(c['pnl_sum']):>10} ({c['legs']}/{c['missing']})   "
+                f"{_fmt_num(total_sym):>10}"
+            )
+
+        lines.append("")
+        lines.append(
+            "Totals: "
+            f"open={_fmt_num(total_open)} (missing legs={total_open_missing}), "
+            f"closed={_fmt_num(total_closed)} (missing legs={total_closed_missing}), "
+            f"grand_total={_fmt_num(total_open + total_closed)}"
+        )
+
+        return "\n".join(lines)
+
+
     return R
 
 # === helpers (local to build_registry) ====================================
 # TODO this is all so horrible, but if it works for the moment, it is fine
+
 
 def _ts_human(ms: int | None) -> str:
     """Human timestamp from ms (UTC ISO seconds)."""
@@ -746,3 +908,120 @@ def _coerce_leg_fields(raw: dict) -> dict:
     if "note" in raw: out["note"] = str(raw["note"])
     return out
 
+
+def _find_price_touch_ts(
+    api: BinanceUM,
+    symbol: str,
+    price: float,
+    *,
+    lookback_days: int = 365,
+    path: list[str] = None,        # e.g., ["1d", "1h", "1m"]
+    now_ms: int | None = None,
+    eps: float = 1e-12,
+) -> int | None:
+    """
+    Find the timestamp (ms) of the most recent candle whose [low, high] contains `price`,
+    using a coarse→fine 1-D grid search over kline intervals.
+
+    Strategy
+    --------
+    1) At the coarsest interval (path[0]), fetch all klines over the last `lookback_days`.
+    2) Scan **backwards** and pick the last candle whose [low, high] contains `price`.
+    3) Restrict the time window to that candle's [open_ts, close_ts).
+    4) Repeat for each finer interval in `path`.
+    5) On the finest interval, return an interpolated timestamp in [open_ts, close_ts]
+       using the distances from `price` to open/close:
+
+           ts = open_ts + (close_ts - open_ts) *
+                |price - open| / (|price - open| + |price - close|)
+
+       (If the denominator is ~0, fall back to the midpoint.)
+
+    Parameters
+    ----------
+    api : BinanceUM
+        Live API client (no cache).
+    symbol : str
+        E.g. "ETHUSDT".
+    price : float
+        Target price to detect.
+    lookback_days : int
+        Window (in days) to scan on the coarsest interval.
+    path : list[str]
+        Timeframes coarse→fine. Default: ["1d", "1h", "1m"].
+    prefer : str
+        Kept only for backward-compatibility; currently ignored. Behavior is always
+        "most recent hit" (scan backwards).
+    now_ms : int | None
+        Reference "now" in ms. Defaults to api.now_ms().
+    eps : float
+        Tolerance for float comparisons.
+
+    Returns
+    -------
+    int | None
+        Interpolated timestamp (ms) in [open_ts, close_ts] of the finest-matched candle,
+        or None if no match at any level.
+    """
+
+    if path is None:
+        path = ["1d", "1h", "1m"]
+
+    if now_ms is None:
+        now_ms = api.now_ms()
+
+    # --- helpers ---
+    def _hits(lo: float, hi: float) -> bool:
+        return (lo - eps) <= price <= (hi + eps)
+
+    # Coarsest window: full lookback
+    start_ms = now_ms - int(lookback_days) * 86_400_000
+    end_ms = now_ms
+    window = (start_ms, end_ms)
+
+    last_kline: list | None = None
+    last_interval: str | None = None
+
+    for interval in path:
+        rows = api.klines(symbol, interval, window[0], window[1])
+        if not (isinstance(rows, list) and rows):
+            return None
+
+        hit = None
+        # Scan backwards: most recent candle first
+        for r in reversed(rows):
+            lo = float(r[3])  # low
+            hi = float(r[2])  # high
+            if _hits(lo, hi):
+                hit = r
+                break
+
+        if not hit:
+            return None
+
+        o_ts = int(hit[0])
+        c_ts = o_ts + tf_ms(interval)
+        window = (o_ts, c_ts)
+        last_kline = hit
+        last_interval = interval
+
+    if last_kline is None:
+        return None
+
+    # ---- interpolate inside the finest candle's [open_ts, close_ts] ----
+    open_ts, close_ts = window
+    o_price = float(last_kline[1])  # open
+    c_price = float(last_kline[4])  # close
+
+    dist_o = abs(price - o_price)
+    dist_c = abs(price - c_price)
+    denom = dist_o + dist_c
+
+    if denom <= eps:
+        # Degenerate case: open == close == price (or numerically very close)
+        return int((open_ts + close_ts) // 2)
+
+    #   ts = open_ts + (close_ts - open_ts) * |price-open| / (|price-open| + |price-close|)
+    frac = dist_o / denom
+    ts = open_ts + (close_ts - open_ts) * frac
+    return int(round(ts))
