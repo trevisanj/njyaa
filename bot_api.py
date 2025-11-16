@@ -21,6 +21,8 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
 
+if False:
+    from commands import CommandRegistry
 
 
 class InternalScheduler:
@@ -252,14 +254,14 @@ class PositionBook:
         qty = usd / price
         return self.mc.step_round_qty(symbol, qty)
 
-    def pnl_position(self, pid: str, marks: Dict[str, float]) -> Dict[str, Any]:
+    def pnl_position(self, pid: str, prices: Dict[str, float]) -> Dict[str, Any]:
         legs = self.store.get_legs(pid)
         if not legs: return {"position_id": pid, "pnl_usd": 0.0, "ok": False}
         pnl = 0.0
-        for lg in legs:
-            mk = marks.get(lg["symbol"])
+        for leg in legs:
+            mk = prices.get(leg["symbol"])
             if mk is None: continue
-            q = float(lg["qty"]); ep = float(lg["entry_price"])
+            q = float(leg["qty"]); ep = float(leg["entry_price"])
             pnl += (mk - ep) * q
         return {"position_id": pid, "pnl_usd": pnl, "ok": True}
 
@@ -477,6 +479,7 @@ class BotEngine:
     """
     def __init__(self, cfg: AppConfig):
         from thinkers1 import ThinkerManager
+        from commands import CommandRegistry
 
         self.cfg = cfg
 
@@ -499,11 +502,6 @@ class BotEngine:
 
         # thinkers
         self.tm: Optional[ThinkerManager] = None
-
-        tz = cfg.TZ_LOCAL
-        Clock.set_tz(tz)
-        log().info("Clock TZ set", tz=str(tz))
-
 
     # --------------------------------
     # Building + wiring (single place)
@@ -771,9 +769,9 @@ class BotEngine:
         return marks
 
 
-# TODO use KlinesCache
-def latest_marks_for_positions(eng: BotEngine, rows) -> Dict[str,float]:
-    syms = {lg["symbol"] for r in rows for lg in eng.store.get_legs(r["position_id"]) if lg["symbol"]}
+# TODO:chatgpt use KlinesCache, not directly from Binance API (I don't mind the delay in cached info)
+def latest_prices_for_positions(eng: BotEngine, rows) -> Dict[str,float]:
+    syms = {leg["symbol"] for r in rows for leg in eng.store.get_legs(r["position_id"]) if leg["symbol"]}
     now = Clock.now_utc_ms(); out={}
     for s in syms:
         try:
@@ -783,15 +781,16 @@ def latest_marks_for_positions(eng: BotEngine, rows) -> Dict[str,float]:
             log().debug("mark snapshot fail", symbol=s, err=str(e))
     return out
 
-# TODO use KlinesCache
-def pnl_for_position(eng: BotEngine, position_id, marks) -> float:
-    res = eng.positionbook.pnl_position(position_id, marks)
+
+def pnl_for_position(eng: BotEngine, position_id, prices) -> float:
+    res = eng.positionbook.pnl_position(position_id, prices)
     return res["pnl_usd"] if res["ok"] else 0.0
 
 
 def exec_positions(eng: BotEngine, args) -> str:
     """
-    Pure function used by @positions. Mirrors BotEngine._exec_positions but without self.
+    Pure function used by @positions.
+
     args keys: status, what, limit, position_id, pair
     """
     store = eng.store
@@ -826,13 +825,13 @@ def exec_positions(eng: BotEngine, args) -> str:
         rows = [r for r in rows if _match(r)]
 
     # marks & render
-    marks = latest_marks_for_positions(eng, rows)
+    prices = latest_prices_for_positions(eng, rows)
     if what == "summary":
-        return reporter.fmt_positions_summary(store, positionbook, rows, marks)
+        return reporter.fmt_positions_summary(store, positionbook, rows, prices)
     if what == "full":
-        return reporter.fmt_positions_full(store, positionbook, rows, marks, limit)
+        return reporter.fmt_positions_full(store, positionbook, rows, prices, limit)
     if what == "legs":
-        return reporter.fmt_positions_legs(store, positionbook, rows, marks, limit)
+        return reporter.fmt_positions_legs(store, positionbook, rows, prices, limit)
 
     # Signal mis-usage clearly (your earlier convention)
     raise RuntimeError('ChatGPT: unknown "what". Use one of summary|full|legs')
@@ -846,15 +845,6 @@ def render_chart(eng: BotEngine, symbol: str, timeframe: str, outdir: str = "/tm
         raise ValueError(f"No cached klines for {symbol} {timeframe}")
 
     df = rows_to_dataframe(rows)
-
-
-    #     "Date": pd.to_datetime(r["open_ts"], unit="ms"),
-    #     "Open": float(r["o"]),
-    #     "High": float(r["h"]),
-    #     "Low":  float(r["l"]),
-    #     "Close":float(r["c"]),
-    #     "Volume":float(r["v"]),
-    # } for r in rows]).set_index("Date")
 
     # Simple indicator (20-period MA)
     df["MA20"] = df["Close"].rolling(window=20).mean()
