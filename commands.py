@@ -1,21 +1,213 @@
 # commands.py
 from __future__ import annotations
-import hashlib, math
-from typing import Any
-from typing import Callable, Dict, Tuple, Optional
 from dataclasses import dataclass, field
-import sys, json, threading
+from typing import Any, Callable, Dict, Tuple, Optional, List, Sequence, Literal, TYPE_CHECKING
+
 from common import *
-from typing import Callable, List, Optional
-from storage import Storage
-import re
 from datetime import datetime, timezone, timedelta
 from binance_um import BinanceUM
-import threading, time
-from typing import Callable, Dict
-from bot_api import BotEngine
+import tabulate
 import enghelpers as eh
+import re
 
+if TYPE_CHECKING:
+    from bot_api import BotEngine
+
+
+__all__ = ["OC", "OCText", "OCMarkDown", "OCPhoto", "OCTable", "CO", "CommandRegistry", "build_registry",
+           "DEFAULT_MD_STYLES"]
+
+# Simple global style switches (can be overridden at runtime).
+DEFAULT_MD_STYLES = {
+    "reset": "\033[0m",
+    "title": "\033[1m\033[4m",       # bold + underline
+    "subtitle": "\033[1m",           # bold
+    "bold": "\033[1m",
+    "italic": "\033[3m",
+    "bullet": "• ",
+    "bullet_indent": "  ",           # used when leading spaces are absent
+    "bullet_text": "",               # optional wrapper for bullet text
+}
+
+# ============== UI OUTPUT MODEL ==============
+
+# OutputKind = Literal["text", "markdown", "photo", "table"]
+
+# ============== UI OUTPUT MODEL ==============
+
+@dataclass
+class OC:
+    """Base command Output Component. Subclasses know how to render themselves."""
+
+    def render_console(self, eng: BotEngine) -> str:
+        raise NotImplementedError
+
+    def render_telegram(self, eng: BotEngine) -> str:
+        raise NotImplementedError
+
+
+@dataclass
+class OCText(OC):
+    text: str
+
+    def __post_init__(self):
+        if self.text is None:
+            raise ValueError("TextComponent requires 'text'")
+
+    def render_console(self, eng: BotEngine) -> str:
+        return self.text
+
+    def render_telegram(self, eng: BotEngine) -> str:
+        return self.text
+
+
+@dataclass
+class OCMarkDown(OC):
+    text: str
+
+    def __post_init__(self):
+        if self.text is None:
+            raise ValueError("MarkdownComponent requires 'text'")
+
+    def render_console(self, eng: BotEngine) -> str:
+        styles = DEFAULT_MD_STYLES
+        reset = styles.get("reset", "")
+
+        def _wrap(style_key: str, content: str) -> str:
+            start = styles.get(style_key, "")
+            if not start:
+                return content
+            return f"{start}{content}{reset}" if reset else f"{start}{content}"
+
+        def _inline(txt: str) -> str:
+            # Bold: **text**
+            if "**" in txt and styles.get("bold") is not None:
+                txt = re.sub(r"\*\*(.+?)\*\*", lambda m: _wrap("bold", m.group(1)), txt)
+            # Italic: _text_
+            if "_" in txt and styles.get("italic") is not None:
+                txt = re.sub(r"_(.+?)_", lambda m: _wrap("italic", m.group(1)), txt)
+            return txt
+
+        rendered: List[str] = []
+        for raw in self.text.splitlines():
+            stripped = raw.lstrip()
+
+            # Headings (# Title, ## Subtitle…)
+            if stripped.startswith("#"):
+                level = len(stripped) - len(stripped.lstrip("#"))
+                content = stripped[level:].strip()
+                content = _inline(content)
+                style_key = "title" if level == 1 else "subtitle"
+                rendered.append(_wrap(style_key, content))
+                continue
+
+            # Bullets (- item / * item)
+            if stripped.startswith(("- ", "* ")):
+                body = _inline(stripped[2:].strip())
+                bullet_sym = styles.get("bullet", "- ")
+                indent_len = len(raw) - len(stripped)
+                indent = raw[:indent_len] if indent_len else styles.get("bullet_indent", "")
+                bullet_text = _wrap("bullet_text", body)
+                rendered.append(f"{indent}{bullet_sym}{bullet_text}")
+                continue
+
+            rendered.append(_inline(raw))
+
+        return "\n".join(rendered)
+
+    def render_telegram(self, eng: BotEngine) -> str:
+        # send as-is; Telegram can deal with some markdown if you later enable parse_mode
+        return self.text
+
+
+@dataclass
+class OCPhoto(OC):
+    path: str
+    caption: Optional[str] = None
+
+    def __post_init__(self):
+        if not self.path:
+            raise ValueError("PhotoComponent requires 'path'")
+
+    def render_console(self, eng: BotEngine) -> str:
+        try:
+            eng._send_photo_console(self.path, caption=self.caption)
+        except Exception as e:
+            log().exc(e, where="PhotoComponent.render_console", path=self.path)
+            return f"[photo error: {e}]"
+        return f"[photo: {self.path}]"
+
+    def render_telegram(self, eng: BotEngine) -> str:
+        try:
+            eng._send_photo_telegram(self.path, caption=self.caption)
+        except Exception as e:
+            log().exc(e, where="OCPhoto.render_telegram", path=self.path)
+            msg = f"[photo error: {e}]"
+            return msg
+        return self.caption or ""
+
+
+@dataclass
+class OCTable(OC):
+    headers: List[str]
+    rows: List[Sequence[Any]]
+
+    def __post_init__(self):
+        if not self.headers:
+            raise ValueError("TableComponent requires non-empty headers")
+        if self.rows is None:
+            raise ValueError("TableComponent requires 'rows' list")
+
+    def render_console(self, eng: BotEngine) -> str:
+        if not self.rows:
+            return "(empty)"
+        if tabulate:
+            try:
+                return tabulate(self.rows, headers=self.headers, tablefmt="github")
+            except Exception as e:
+                log().exc(e, where="TableComponent.render_console.tabulate")
+        # Fallback formatting
+        lines: List[str] = []
+        for row in self.rows:
+            parts = [f"{h}: {v}" for h, v in zip(self.headers, row)]
+            lines.append("; ".join(parts) if parts else "(empty row)")
+        return "\n".join(lines)
+
+    def render_telegram(self, eng: BotEngine) -> str:
+        if not self.rows:
+            msg = "(empty)"
+            return msg
+        
+        ret = []
+        for row in self.rows:
+            parts = [f"{h}: {v}" for h, v in zip(self.headers, row)]
+            line = "; ".join(parts) if parts else "(empty row)"
+            ret.append(line)
+        return line
+
+
+class CO:
+    """Collection of OutputComponent"""
+
+    def __init__(self, *args):
+        """Very tolerant init method for convenience"""
+        cc = self.components = []
+        for arg in args:
+            argh = [arg] if not isinstance(arg, (List, Tuple)) else arg
+            for aargh in argh:
+                if isinstance(aargh, str):
+                    cc.append(OCText(aargh))
+                elif not (isinstance(aargh, OC) and type(OC) is not OC):
+                    name = aargh.__class__.__name__
+                    raise TypeError(f"Output item must be OC (output component) subclass or str, not {name}")
+                else:
+                    cc.append(aargh)
+
+
+    def __iter__(self):
+        return self.components.__iter__()
+
+    components: List[OC] = field(default_factory=list)
 
 class CommandRegistry:
     """
@@ -32,7 +224,8 @@ class CommandRegistry:
     """
     def __init__(self):
         # keys are ('@'|'!', command_name)
-        self._handlers: Dict[Tuple[str, str], Callable[[BotEngine, Dict[str, str]], str]] = {}
+        self._handlers: Dict[Tuple[str, str], Callable[[BotEngine, Dict[str, str]], Any]] = {}
+
         self._meta: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     # ---- decorators ----
@@ -61,7 +254,7 @@ class CommandRegistry:
         return deco
 
     # ---- dispatcher ----
-    def dispatch(self, eng: BotEngine, msg: str) -> str:
+    def dispatch(self, eng: BotEngine, msg: str) -> Any:
         s = (msg or "").strip()
         log().debug("dispatch.enter", text=s)
         if not s or s[0] not in ("@", "!"):
@@ -140,43 +333,57 @@ class CommandRegistry:
             return f"{reason}\n{line}"
         return line
 
-    def _help_text(self) -> str:
+    def _help_text(self) -> CO:
         """
         Build a help listing from registered commands.
         Shows: @name/!name — usage — first doc line (if any).
         """
-        lines: List[str] = ["Commands:"]
+        lines: List[str] = ["# Commands"]
         # sort by prefix then name
         for (prefix, name) in sorted(self._handlers.keys()):
             meta = self._meta.get((prefix, name), {})
             usage = self._usage_line(meta)
             summary = meta.get("summary") or ""
+            bullet = f"- `{usage}`"
             if summary:
-                lines.append(f"  {usage}\n    {summary}\n")
-            else:
-                lines.append(f"  {usage}\n")
-        return "\n".join(lines)
+                bullet += f": {summary}"
+            lines.append(bullet)
+        return CO(OCMarkDown("\n".join(lines)))
 
 
 def build_registry() -> CommandRegistry:
     R = CommandRegistry()
+    # Local helpers to keep handlers concise
+    def _md(text: str) -> CO:
+        return CO(OCMarkDown(text))
+
+    def _txt(text: str) -> CO:
+        return CO(OCText(text))
+
+    def _tbl(headers: List[str], rows: List[Sequence[Any]], intro: str | None = None) -> CO:
+        comps: List[OC] = []
+        if intro:
+            comps.append(OCMarkDown(intro))
+        comps.append(OCTable(headers=headers, rows=rows))
+        return CO(comps)
 
     # ----------------------- HELP -----------------------
     # TODO improve help formatting
     @R.at("help")
-    def _help(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _help(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Show this help."""
         return R._help_text()
 
     # ----------------------- OPEN (alias) -----------------------
     @R.at("open")
-    def _at_open(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _at_open(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List open RV positions (summary). Alias for: @positions status:open detail:2"""
-        return R.dispatch(eng, "@positions status:open detail:2")
+        res = R.dispatch(eng, "@positions status:open detail:2")
+        return res if isinstance(res, CO) else _txt(str(res))
 
     # ----------------------- POSITIONS (detail levels) -----------------------
     @R.at("positions", options=["status", "detail", "sort", "limit", "position_id", "pair"])
-    def _at_positions(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _at_positions(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Positions report with detail levels.
 
@@ -250,6 +457,7 @@ def build_registry() -> CommandRegistry:
             total_pnl += pos_pnl
             pnl_missing_count += (1 if pos_missing else 0)
 
+        md_lines: List[str] = [f"# Positions ({status})"]
         lines: List[str] = []
         lines.append(
             f"Positions: {len(rows)} | Target ≈ ${_fmt_num(total_target, 2)} | "
@@ -257,7 +465,7 @@ def build_registry() -> CommandRegistry:
             + (f" (PnL incomplete for {pnl_missing_count} position(s))" if pnl_missing_count else "")
         )
         if detail == 1:
-            return "\n".join(lines)
+            return _md("\n".join(md_lines + [""] + lines))
 
         # ---------- detail 2+: per-position overview ----------
         count = 0
@@ -343,11 +551,11 @@ def build_registry() -> CommandRegistry:
 
             count += 1
 
-        return "\n".join(lines)
+        return _md("\n".join(md_lines + [""] + lines))
 
     # ----------------------- !OPEN POSITION -----------------------
     @R.bang("open", argspec=["pair", "ts", "usd"], options=["note"])
-    def _bang_open(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_open(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Open/add an RV position.
 
@@ -363,63 +571,64 @@ def build_registry() -> CommandRegistry:
         note = args.get("note", "")
 
         pid = eng.positionbook.open_position(num, den, usd, ts_ms, note=note)
-        return f"Opened pair {pid}: {num}/{den} target=${abs(usd):.0f} (queued price backfill)."
+        return _txt(f"Opened pair {pid}: {num}/{den} target=${abs(usd):.0f} (queued price backfill).")
 
     # ----------------------- THINKERS LIST -----------------------
     @R.at("thinkers")
-    def _at_thinkers(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _at_thinkers(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List thinkers stored in DB."""
         rows = eng.store.list_thinkers()
         if not rows:
-            return "No thinkers."
-        out = []
+            return _txt("No thinkers.")
+        lines = ["# Thinkers", ""]
         for r in rows:
-            out.append(f"#{r['id']} {r['kind']} enabled={r['enabled']} cfg={r['config_json']}")
-        return "\n".join(out)
+            lines.append(f"- `#{r['id']}` {r['kind']} enabled={r['enabled']} cfg={r['config_json']}")
+        return _md("\n".join(lines))
 
     # ----------------------- THINKER KINDS -----------------------
     @R.at("thinker-kinds")
-    def _at_thinker_kinds(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _at_thinker_kinds(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List available thinker kinds (from factory auto-discovery)."""
         try:
             kinds = list(eng.thinkers.factory.kinds())
         except Exception:
             kinds = []
-        return "Available thinker kinds:\n" + ("\n".join(sorted(kinds)) if kinds else "(none)")
+        body = "\n".join(f"- {k}" for k in sorted(kinds)) if kinds else "(none)"
+        return _md("# Thinker kinds\n" + body)
 
     # ----------------------- THINKER ENABLE -----------------------
     @R.bang("thinker-enable", argspec=["id"])
-    def _bang_thinker_enable(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_thinker_enable(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Enable a thinker by ID. Usage: !thinker-enable <id>"""
         tid = args["id"].strip()
         if not tid.isdigit():
-            return "Usage: !thinker-enable <id>"
+            return _txt("Usage: !thinker-enable <id>")
         eng.store.update_thinker_enabled(int(tid), True)
-        return f"Thinker #{tid} enabled."
+        return _txt(f"Thinker #{tid} enabled.")
 
     # ----------------------- THINKER DISABLE -----------------------
     @R.bang("thinker-disable", argspec=["id"])
-    def _bang_thinker_disable(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_thinker_disable(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Disable a thinker by ID. Usage: !thinker-disable <id>"""
         tid = args["id"].strip()
         if not tid.isdigit():
-            return "Usage: !thinker-disable <id>"
+            return _txt("Usage: !thinker-disable <id>")
         eng.store.update_thinker_enabled(int(tid), False)
-        return f"Thinker #{tid} disabled."
+        return _txt(f"Thinker #{tid} disabled.")
 
     # ----------------------- THINKER REMOVE -----------------------
     @R.bang("thinker-rm", argspec=["id"])
-    def _bang_thinker_rm(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_thinker_rm(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Delete a thinker by ID. Usage: !thinker-rm <id>"""
         tid = args["id"].strip()
         if not tid.isdigit():
-            return "Usage: !thinker-rm <id>"
+            return _txt("Usage: !thinker-rm <id>")
         eng.store.delete_thinker(int(tid))
-        return f"Thinker #{tid} deleted."
+        return _txt(f"Thinker #{tid} deleted.")
 
     # ----------------------- ALERT -----------------------
     @R.bang("alert", argspec=["symbol", "op", "price"], options=["msg"])
-    def _bang_alert(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_alert(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Create a simple threshold alert thinker.
 
@@ -430,22 +639,22 @@ def build_registry() -> CommandRegistry:
         op = args["op"]
         pr = args["price"]
         if op not in (">=", "<="):
-            return "Op must be >= or <="
+            return _txt("Op must be >= or <=")
 
         try:
             price = float(pr)
         except:
-            return "Bad price."
+            return _txt("Bad price.")
 
         direction = "ABOVE" if op == ">=" else "BELOW"
         msg = args.get("msg", "")
         cfg = {"symbol": sym, "direction": direction, "price": price, "message": msg}
         tid = eng.store.insert_thinker("THRESHOLD_ALERT", cfg)
-        return f"Thinker #{tid} THRESHOLD_ALERT set for {sym} {direction} {price}"
+        return _txt(f"Thinker #{tid} THRESHOLD_ALERT set for {sym} {direction} {price}")
 
     # ----------------------- PSAR -----------------------
     @R.bang("psar", argspec=["position_id", "symbol", "direction"], options=["af", "max", "max_af", "win", "window", "window_min"])
-    def _bang_psar(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_psar(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Set a PSAR stop thinker.
 
@@ -456,7 +665,7 @@ def build_registry() -> CommandRegistry:
         sym = args["symbol"].upper()
         d = args["direction"].upper()
         if d not in ("LONG", "SHORT"):
-            return "Direction must be LONG|SHORT"
+            return _txt("Direction must be LONG|SHORT")
 
         kv = {"af": 0.02, "max_af": 0.2, "window_min": 200}
         # Allow multiple option spellings
@@ -469,11 +678,11 @@ def build_registry() -> CommandRegistry:
 
         cfg = {"position_id": pid, "symbol": sym, "direction": d, **kv}
         tid = eng.store.insert_thinker("PSAR_STOP", cfg)
-        return f"Thinker #{tid} PSAR_STOP set for {pid}/{sym} dir={d} af={kv['af']} max={kv['max_af']} win={kv['window_min']}"
+        return _txt(f"Thinker #{tid} PSAR_STOP set for {pid}/{sym} dir={d} af={kv['af']} max={kv['max_af']} win={kv['window_min']}")
 
     # ----------------------- JOBS -----------------------
     @R.at("jobs", options=["state", "limit"])
-    def _at_jobs(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _at_jobs(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         List DB jobs.
 
@@ -485,27 +694,32 @@ def build_registry() -> CommandRegistry:
 
         rows = eng.store.list_jobs(state=state, limit=limit)
         if not rows:
-            return "No jobs."
+            return _txt("No jobs.")
 
         def _fmt_ts(ms: int) -> str:
             return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat(timespec="seconds")
 
-        lines = []
+        headers = ["id", "state", "task", "attempts", "position", "created", "updated", "error"]
+        rows_out: List[Sequence[Any]] = []
         for r in rows:
             err = (r["last_error"] or "")
             if len(err) > 120:
                 err = err[:117] + "..."
-            lines.append(
-                f"{r['job_id']}  {r['state']}  {r['task']}  attempts={r['attempts']} "
-                f"pos={r['position_id'] or '-'}  "
-                f"created={_fmt_ts(r['created_ts'])}  updated={_fmt_ts(r['updated_ts'])}"
-                + (f"\n  err: {err}" if r["state"] == "ERR" and err else "")
-            )
-        return "\n".join(lines)
+            rows_out.append([
+                r["job_id"],
+                r["state"],
+                r["task"],
+                r["attempts"],
+                r["position_id"] or "-",
+                _fmt_ts(r["created_ts"]),
+                _fmt_ts(r["updated_ts"]),
+                err,
+            ])
+        return _tbl(headers, rows_out, intro="# Jobs")
 
     # ----------------------- RETRY_JOBS -----------------------
     @R.bang("retry_jobs", options=["id", "limit"])
-    def _bang_retry_jobs(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_retry_jobs(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Retry failed jobs.
 
@@ -517,17 +731,17 @@ def build_registry() -> CommandRegistry:
         jid = args.get("id")
         if jid:
             ok = eng.store.retry_job(jid)
-            return f"{'Retried' if ok else 'Not found'}: {jid}"
+            return _txt(f"{'Retried' if ok else 'Not found'}: {jid}")
 
         limit = args.get("limit")
         n = eng.store.retry_failed_jobs(limit=int(limit) if limit else None)
-        return f"Retried {n} failed job(s)."
+        return _txt(f"Retried {n} failed job(s).")
 
     # ----------------------- CHART -----------------------
     @R.at("chart", argspec=["symbol", "timeframe"])
-    def _at_chart(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _at_chart(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
-        Render candlestick chart (with volume & a simple indicator) and send/show it.
+        Render candlestick chart (with volume & a simple indicator).
 
         Usage:
           @chart <symbol> <timeframe>
@@ -538,24 +752,25 @@ def build_registry() -> CommandRegistry:
         tf = args["timeframe"]
         try:
             path = eh.render_chart(eng, symbol, tf)
-            eng.send_photo(path, caption=f"{symbol} {tf}")
-            return f"Chart generated for {symbol} {tf}"
+            return CO(OCPhoto(path=path, caption=f"{symbol} {tf}"),
+                      f"Chart generated for {symbol} {tf}")
         except Exception as e:
             log().exc(e, where="cmd.chart")
-            return f"Error: {e}"
+            return CO(f"Error: {e}")
+
 
     @R.bang("position-rm", argspec=["position_id"])
-    def _bang_position_rm(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_position_rm(eng: BotEngine, args: Dict[str, str]) -> CO:
         pid = int(args["position_id"])
         deleted = eng.store.delete_position_completely(pid)
         # TODO improve reporting (still shows this message even if the position id does not exist)
-        return f"Deleted position {pid} ({deleted} row(s))."
+        return _txt(f"Deleted position {pid} ({deleted} row(s)).")
 
     # ======================= POSITION EDIT =======================
     @R.bang("position-set",
             argspec=["position_id"],
             options=["num", "den", "dir_sign", "target_usd", "user_ts", "status", "note", "created_ts"])
-    def _bang_position_set(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_position_set(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Update fields in a position row (by position_id).
         Usage:
@@ -568,7 +783,7 @@ def build_registry() -> CommandRegistry:
         """
         pid_s = args.get("position_id", "")
         if not pid_s.isdigit():
-            return "Usage: !position-set <position_id> …options…"
+            return _txt("Usage: !position-set <position_id> …options…")
         pid = int(pid_s)
 
         # capture only provided (recognized) option keys
@@ -577,27 +792,26 @@ def build_registry() -> CommandRegistry:
                              "created_ts"} and v is not None}
 
         if not provided:
-            return ("Nothing to update. Allowed keys: "
-                    "num den dir_sign target_usd user_ts status note created_ts")
+            return _txt("Nothing to update. Allowed keys: num den dir_sign target_usd user_ts status note created_ts")
 
         try:
             fields = _coerce_position_fields(provided)
             n = eng.store.sql_update("positions", "position_id", pid, fields)
             if n == 0:
-                return f"Position {pid} not found or unchanged."
+                return _txt(f"Position {pid} not found or unchanged.")
             # brief echo of what changed
             changed = ", ".join(f"{k}={fields[k]!r}" for k in sorted(fields.keys()))
-            return f"Position {pid} updated: {changed}"
+            return _txt(f"Position {pid} updated: {changed}")
         except Exception as e:
             log().exc(e, where="cmd.position-set")
-            return f"Error updating position {pid}: {e}"
+            return _txt(f"Error updating position {pid}: {e}")
 
     # ======================= LEG EDIT =======================
     @R.bang("leg-set",
             argspec=["leg_id"],
             options=["position_id", "symbol", "qty", "entry_price", "entry_price_ts", "price_method", "need_backfill",
                      "note"])
-    def _bang_leg_set(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_leg_set(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Update fields in a leg row (by leg_id).
         Usage:
@@ -611,7 +825,7 @@ def build_registry() -> CommandRegistry:
         """
         lid_s = args.get("leg_id", "")
         if not lid_s.isdigit():
-            return "Usage: !leg-set <leg_id> …options…"
+            return _txt("Usage: !leg-set <leg_id> …options…")
         lid = int(lid_s)
 
         provided = {k: v for k, v in args.items()
@@ -621,24 +835,23 @@ def build_registry() -> CommandRegistry:
                           "note"} and v is not None}
 
         if not provided:
-            return ("Nothing to update. Allowed keys: "
-                    "position_id symbol qty entry_price entry_price_ts price_method need_backfill note")
+            return _txt("Nothing to update. Allowed keys: position_id symbol qty entry_price entry_price_ts price_method need_backfill note")
 
         try:
             fields = _coerce_leg_fields(provided)
             n = eng.store.sql_update("legs", "leg_id", lid, fields)
             if n == 0:
-                return f"Leg {lid} not found or unchanged."
+                return _txt(f"Leg {lid} not found or unchanged.")
             changed = ", ".join(f"{k}={fields[k]!r}" for k in sorted(fields.keys()))
-            return f"Leg {lid} updated: {changed}"
+            return _txt(f"Leg {lid} updated: {changed}")
         except Exception as e:
             # Likely UNIQUE(position_id,symbol) or FK violations, surface cleanly.
             log().exc(e, where="cmd.leg-set")
-            return f"Error updating leg {lid}: {e}"
+            return _txt(f"Error updating leg {lid}: {e}")
 
     # ----------------------- LEG BACKFILL PRICE -----------------------
     @R.bang("leg-set-ebyp", argspec=["leg_id", "price"], options=["lookback_days"])
-    def _bang_leg_set_ebyp(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _bang_leg_set_ebyp(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Entry-by-price: set a leg's entry_price and entry_price_ts by locating the most recent candle
         whose [low, high] contains the given price, using a configurable coarse→fine path.
@@ -655,19 +868,19 @@ def build_registry() -> CommandRegistry:
             leg_id = int(args["leg_id"])
             price = float(args["price"])
         except Exception:
-            return "Usage: !leg-backfill-price <leg_id> <price> [lookback_d:7] [path:1d,1h,1m]"
+            return _txt("Usage: !leg-backfill-price <leg_id> <price> [lookback_d:7] [path:1d,1h,1m]")
 
         lookback_days = int(args.get("lookback_d", "365"))
         path = ["1d", "1h", "1m"]
 
         leg = eng.store.con.execute("SELECT * FROM legs WHERE leg_id=?", (leg_id,)).fetchone()
         if not leg:
-            return f"Leg #{leg_id} not found."
+            return _txt(f"Leg #{leg_id} not found.")
         symbol = leg["symbol"]
 
         ts = _find_price_touch_ts(eng.api, symbol, price, lookback_days=lookback_days, path=path)
         if ts is None:
-            return f"No {path[0]} candle for {symbol} contained {price} within ~{lookback_days}d."
+            return _txt(f"No {path[0]} candle for {symbol} contained {price} within ~{lookback_days}d.")
 
         eng.store.sql_update(
             table="legs",
@@ -680,14 +893,14 @@ def build_registry() -> CommandRegistry:
             },
         )
 
-        return (
+        return _txt(
             f"Leg #{leg_id} ({symbol}) updated: entry_price={price} "
             f"at {_ts_human(ts)} (path={','.join(path)}, manual_touch)."
         )
 
     # ----------------------- PNL PER SYMBOL (LEGS) -----------------------
     @R.at("pnl-symbols", options=["status"])
-    def _at_pnl_symbols(eng: BotEngine, args: Dict[str, str]) -> str:
+    def _at_pnl_symbols(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Aggregate PnL per symbol by traversing legs directly.
 
@@ -703,7 +916,7 @@ def build_registry() -> CommandRegistry:
         status_opt = (args.get("status") or "all").strip().lower()
         valid_status = {"open", "closed", "all"}
         if status_opt not in valid_status:
-            return "status must be one of: open|closed|all"
+            return _txt("status must be one of: open|closed|all")
 
         # --- fetch legs joined with positions.status ---
         q = """
@@ -719,7 +932,7 @@ def build_registry() -> CommandRegistry:
 
         rows = eng.store.con.execute(q, params).fetchall()
         if not rows:
-            return "No legs match."
+            return _txt("No legs match.")
 
         # --- gather marks per symbol ---
         symbols = sorted({r["symbol"] for r in rows if r["symbol"]})
@@ -757,15 +970,10 @@ def build_registry() -> CommandRegistry:
                 g["pnl_sum"] += float(pnl)
 
         # --- render ---
-        lines: list[str] = []
-        lines.append("PnL per symbol (mark = last cached close):")
-        lines.append(
-            "SYMBOL      LAST        OPEN_PNL (legs/miss)   "
-            "CLOSED_PNL (legs/miss)   TOTAL_PNL"
-        )
-
         total_open = total_closed = 0.0
         total_open_missing = total_closed_missing = 0
+        headers = ["symbol", "last", "open pnl (legs/miss)", "closed pnl (legs/miss)", "total pnl"]
+        table_rows: List[Sequence[Any]] = []
 
         for sym in sorted(stats.keys()):
             s = stats[sym]
@@ -779,22 +987,25 @@ def build_registry() -> CommandRegistry:
             total_open_missing += o["missing"]
             total_closed_missing += c["missing"]
 
-            lines.append(
-                f"{sym:>8}  {_fmt_num(lp, nd=4):>10}  "
-                f"{_fmt_num(o['pnl_sum']):>10} ({o['legs']}/{o['missing']})   "
-                f"{_fmt_num(c['pnl_sum']):>10} ({c['legs']}/{c['missing']})   "
-                f"{_fmt_num(total_sym):>10}"
-            )
+            table_rows.append([
+                sym,
+                _fmt_num(lp, nd=4),
+                f"{_fmt_num(o['pnl_sum'])} ({o['legs']}/{o['missing']})",
+                f"{_fmt_num(c['pnl_sum'])} ({c['legs']}/{c['missing']})",
+                _fmt_num(total_sym),
+            ])
 
-        lines.append("")
-        lines.append(
-            "Totals: "
-            f"open={_fmt_num(total_open)} (missing legs={total_open_missing}), "
+        summary = (
+            f"Totals: open={_fmt_num(total_open)} (missing legs={total_open_missing}), "
             f"closed={_fmt_num(total_closed)} (missing legs={total_closed_missing}), "
             f"grand_total={_fmt_num(total_open + total_closed)}"
         )
 
-        return "\n".join(lines)
+        return CO([
+            OCMarkDown("# PnL per symbol\nMark source: last cached close."),
+            OCTable(headers=headers, rows=table_rows),
+            OCMarkDown(summary),
+        ])
 
 
     return R

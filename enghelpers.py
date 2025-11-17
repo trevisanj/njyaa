@@ -13,7 +13,6 @@ from binance_um import BinanceUM
 import threading, time
 from typing import Callable, Dict
 from klines_cache import KlinesCache, rows_to_dataframe
-# inside bot_api.py (or a separate enghelpers.py helper imported there)
 import tempfile, os, io
 import matplotlib.pyplot as plt
 import mplfinance as mpf
@@ -21,96 +20,6 @@ import pandas as pd
 
 if False:
     from bot_api import BotEngine
-
-
-def latest_prices_for_positions(eng: BotEngine, rows) -> Dict[str,float]:
-    """
-    Use KlinesCache for a lightweight mark snapshot.
-    # Falls back to API if cache empty.
-
-    Caveats:
-      - if price not found for symbol, fills with None
-    """
-    syms = {leg["symbol"] for r in rows for leg in eng.store.get_legs(r["position_id"]) if leg["symbol"]}
-    out: Dict[str, float] = {}
-    if not syms:
-        return out
-
-    # Prefer 1m if configured; else take the first configured tf; else default "1m".
-    tfs = list(eng.cfg.KLINES_TIMEFRAMES or [])
-    tf = "1m" if "1m" in tfs or not tfs else tfs[0]
-
-    for s in syms:
-        try:
-            last = eng.kc.last_n(s, tf, n=1, include_live=True, asc=True)
-            out[s] = float(last[0]["close"]) if last else None
-
-            # if last:
-            #     out[s] = float(last[0]["close"])
-            #     continue
-            # # fallback if cache is cold
-            # now = Clock.now_utc_ms()
-            # mk = eng.api.mark_price_klines(s, "1m", now-60_000, now)
-            # if mk:
-            #     out[s] = float(mk[-1][4])
-        except Exception as e:
-            log().debug("latest_prices.snapshot.fail", symbol=s, err=str(e))
-    return out
-
-
-# TODO get rid of this wrapper, treat None return values appropriately
-def pnl_for_position(eng: BotEngine, position_id, prices) -> float:
-    res = eng.positionbook.pnl_position(position_id, prices)
-    return res["pnl_usd"] if res["ok"] else 0.0
-
-
-def exec_positions(eng: BotEngine, args) -> str:
-    """
-    Pure function used by @positions
-    args keys: status, what, limit, position_id, pair
-    """
-    store = eng.store
-    reporter = eng.reporter
-    positionbook = eng.positionbook
-
-    status = args.get("status", "open")
-    what   = args.get("what", "summary")
-    limit  = int(args.get("limit", 100))
-    pair   = args.get("pair")
-    pid    = args.get("position_id")
-
-    # rows by status
-    if status == "open":
-        rows = store.list_open_positions()
-    elif status == "closed":
-        rows = store.con.execute("SELECT * FROM positions WHERE status='CLOSED'").fetchall()
-    else:
-        rows = store.con.execute("SELECT * FROM positions").fetchall()
-
-    # optional filters
-    if pid:
-        rows = [r for r in rows if r["position_id"] == pid]
-
-    if pair:
-        num, den = pair
-        def _match(r):
-            if den is None:
-                legs = store.get_legs(r["position_id"])
-                return any((lg["symbol"] or "").startswith(num) for lg in legs)
-            return (r["num"].startswith(num) and r["den"].startswith(den))
-        rows = [r for r in rows if _match(r)]
-
-    # marks & render
-    prices = latest_prices_for_positions(eng, rows)
-    if what == "summary":
-        return reporter.fmt_positions_summary(store, positionbook, rows, prices)
-    if what == "full":
-        return reporter.fmt_positions_full(store, positionbook, rows, prices, limit)
-    if what == "legs":
-        return reporter.fmt_positions_legs(store, positionbook, rows, prices, limit)
-
-    # Signal mis-usage clearly (your earlier convention)
-    raise RuntimeError('ChatGPT: unknown "what". Use one of summary|full|legs')
 
 
 def render_chart(eng: BotEngine, symbol: str, timeframe: str, outdir: str = "/tmp") -> str:
@@ -125,7 +34,23 @@ def render_chart(eng: BotEngine, symbol: str, timeframe: str, outdir: str = "/tm
     # Simple indicator (20-period MA)
     df["MA20"] = df["Close"].rolling(window=20).mean()
 
-    style = mpf.make_mpf_style(base_mpf_style="binance", y_on_right=True)
+    # Dark theme (helps when charts are viewed in Telegram clients with dark UI).
+    colors = mpf.make_marketcolors(
+        up="tab:green",
+        down="tab:red",
+        wick={"up": "tab:green", "down": "tab:red"},
+        edge="inherit",
+        volume="inherit",
+    )
+    style = mpf.make_mpf_style(
+        base_mpf_style="nightclouds",
+        marketcolors=colors,
+        y_on_right=True,
+        facecolor="#0d1117",
+        edgecolor="#111111",
+        gridcolor="#1f2933",
+        gridstyle="--",
+    )
 
     fig, axlist = mpf.plot(
         df,
@@ -141,6 +66,7 @@ def render_chart(eng: BotEngine, symbol: str, timeframe: str, outdir: str = "/tm
     out_path = os.path.join(outdir, f"chart_{symbol}_{timeframe}.png")
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
+    log().info("render_chart.success", out_path=out_path)
     return out_path
 
 

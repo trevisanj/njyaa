@@ -5,7 +5,7 @@ from typing import Protocol
 if False:  # type-checkers only
     from storage import Storage
     from binance_um import BinanceUM
-    from bot_api import MarketCatalog, PriceOracle, PositionBook, AlertsEngine, Reporter
+    from bot_api import MarketCatalog, PriceOracle, PositionBook, Reporter
     from common import AppConfig
     from klines_cache import KlinesCache
 
@@ -17,7 +17,6 @@ class EngineServices(Protocol):
     mc: "MarketCatalog"
     oracle: "PriceOracle"
     positionbook: "PositionBook"
-    alerts: "AlertsEngine"
     reporter: "Reporter"
     kc: "KlinesCache"
 

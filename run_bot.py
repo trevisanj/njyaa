@@ -1,32 +1,19 @@
 #!/usr/bin/env python3
-# FILE: run_bot_bk02.py
-
-import signal
-from zoneinfo import ZoneInfo
-import os, sys
-
-from bot_api import log, BotEngine
+# FILE: run_bot.py
 from cfg_maker import make_cfg
+from common import Log, set_global_logger
+from bot_api import BotEngine
 
 def main():
-    # run_bot.py (main)
-
     cfg = make_cfg()
+    cfg.TELEGRAM_ENABLED = True
+    cfg.CONSOLE_ENABLED = False
+
+    lg = Log(level=cfg.LOG_LEVEL, name="rv", json_mode=False)
+    set_global_logger(lg)
+
     eng = BotEngine(cfg)
-
-    # 5) Graceful shutdown hooks
-    def _graceful_exit(signum, frame):
-        log().info("Signal received, stopping...", sign=signum)
-        try:
-            eng.stop()
-        finally:
-            sys.exit(0)
-
-    signal.signal(signal.SIGINT, _graceful_exit)
-    signal.signal(signal.SIGTERM, _graceful_exit)
-
-    # 6) Run (blocks)
-    eng.start()
+    eng.run()
 
 if __name__ == "__main__":
     main()
