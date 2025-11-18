@@ -189,7 +189,7 @@ class PriceOracle:
             log().debug("oracle.window.double", window=window*2)
             window *= 2
 
-        ts_ = fmt_ts_ms(ts_ms)
+        ts_ = ts_human(ts_ms)
         log().error("oracle.giveup", symbol=symbol, ts=ts_)
         raise RuntimeError(f"Could not backfill price for {symbol} around {ts_}")
 

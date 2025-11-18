@@ -10,8 +10,7 @@ import threading
 from typing import Optional, Union
 
 
-__all__ = [ "AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when",
-            "fmt_ts_ms", "fmt_ts_s"]
+__all__ = ["AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when", "ts_human"]
 
 # =======================
 # ====== CONFIG =========
@@ -130,6 +129,30 @@ class Clock:
         return int(dt.astimezone(timezone.utc).timestamp() * 1000)
 
 
+_FLAG = "🇧🇷"
+
+def set_flag(x):
+    global _FLAG
+    _FLAG = x
+
+def get_flag():
+    return _FLAG
+
+def ts_human(ms: int | datetime | None) -> str:
+    """Human timestamp from ms (or datetime) in local tz."""
+    if ms is None:
+        return "?"
+    try:
+        tz = Clock.get_tz()
+        if isinstance(ms, datetime):
+            dt = ms.astimezone(tz)
+        else:
+            dt = datetime.fromtimestamp(int(ms)/1000, tz=tz)
+        return dt.strftime("%Y%m%d{}%H:%M:%S").format(get_flag())
+    except Exception:
+        return "?"
+
+
 # =======================
 # ====== TELEMETRY ======
 # =======================
@@ -170,7 +193,7 @@ class Log:
     def _emit(self, lvname:str, msg:str, **fields):
         if self.LV[lvname] < self.level:
             return
-        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        ts = ts_human(Clock.now_utc_ms())
         merged = {**self.ctx, **fields} if (fields or self.ctx) else None
         with self._lock:
             if self.json_mode:
@@ -295,35 +318,3 @@ def parse_when(s: str) -> int:
         pass
 
     raise ValueError(f"Unrecognized timestamp format: {s}")
-
-
-
-
-def fmt_ts_ms(ts_ms: Union[int, float, str],
-              tz: Optional[tzinfo] = None,
-              timespec: str = "seconds") -> str:
-    """
-    Convert epoch milliseconds to an ISO-8601 string.
-
-    Args:
-        ts_ms: Timestamp in **milliseconds** since epoch.
-        tz: Output timezone (defaults to Clock.tz if set, else UTC).
-        timespec: Passed to datetime.isoformat (e.g. "seconds", "milliseconds").
-
-    Returns:
-        ISO string like '2025-11-16T12:34:56-03:00'.
-    """
-    ms = int(float(ts_ms))
-    z = tz or Clock.get_tz()
-    return datetime.fromtimestamp(ms / 1000.0, tz=z).isoformat(timespec=timespec)
-
-
-def fmt_ts_s(ts_s: Union[int, float, str],
-             tz: Optional[tzinfo] = None,
-             timespec: str = "seconds") -> str:
-    """
-    Convert epoch **seconds** to an ISO-8601 string (convenience wrapper).
-    """
-    s = int(float(ts_s))
-    z = tz or Clock.get_tz()
-    return datetime.fromtimestamp(s, tz=z).isoformat(timespec=timespec)

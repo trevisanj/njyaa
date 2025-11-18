@@ -15,6 +15,7 @@ from rich.markdown import Markdown, Heading
 from rich.theme import Theme
 from rich.text import Text
 from rich.rule import Rule
+from common import Clock
 
 if TYPE_CHECKING:
     from bot_api import BotEngine
@@ -23,26 +24,38 @@ if TYPE_CHECKING:
 __all__ = ["OC", "OCText", "OCMarkDown", "OCPhoto", "OCTable", "CO", "CommandRegistry", "build_registry",
            "RICH_MD_THEME", "RICH_MD_CONFIG", "RENDER_MARKDOWN"]
 
+AT_KEY = "?"
+BANG_KEY = "!"
+
 # Rich Markdown theme/styles (tweak as needed)
+T_NORMAL = "grey66"
 RICH_MD_THEME = Theme({
-    "markdown.text": "grey70",
-    "markdown.paragraph": "grey70",
-    "markdown.em": "italic",
-    "markdown.strong": "bold white",
-    "markdown.h1": "bold bright_green",
-    "markdown.h2": "bold green3",
-    "markdown.list.item": "grey70",
-    "markdown.block_quote": "grey70",
-    "markdown.code": "white",
+    # "markdown.text": "plum2",
+    # "markdown.normal": "plum2",
+    "markdown.paragraph": T_NORMAL,
+    "markdown.em": "italic light_sky_blue3",
+    "markdown.strong": "bold grey93",
+    "markdown.h1": "bold grey100",
+    "markdown.h2": "bold grey93",
+    "markdown.h3": "bold grey85",
+    "markdown.item": T_NORMAL,
+    "markdown.item.bullet": T_NORMAL,
+    "markdown.block_quote": "steel_blue",
+    "markdown.block_quote.text": "steel_blue",
+    "markdown.code_block": "steel_blue",  # ineffective, since markdown.py:CodeBlock uses code_theme, defined below
 })
 RICH_MD_CONFIG = {
     "style": "markdown.text",
-    "code_theme": "monokai",
+    # check pygments docs: https://pygments.org/styles/
+    "code_theme": "lightbulb", # "monokai"/"lightbulb"/"github-dark"...
     "width": None,  # use terminal width
+    "color_system": "truecolor",  # None|standard|256|truecolor
 }
 
 # Toggle pure markdown (no rich rendering) for debugging.
 RENDER_MARKDOWN = True
+# Whether to render command details as code or blockquote
+BLOCKQUOTE = False
 
 # Custom heading renderer to avoid boxed/centered titles.
 class FlatHeading(Heading):
@@ -51,7 +64,9 @@ class FlatHeading(Heading):
         text.justify = "left"
         yield text
         if self.tag in ("h1", "h2"):
-            yield Rule(characters="─", style=self.style_name, align="left")
+            underline = "─" * max(len(text.plain), 1)
+            underline_text = Text(underline, style=self.style_name, justify="left")
+            yield underline_text
 
 # Patch Markdown to use the flat heading renderer
 Markdown.elements["heading_open"] = FlatHeading
@@ -100,7 +115,11 @@ class OCMarkDown(OC):
     def render_console(self, eng: BotEngine) -> str:
         if not RENDER_MARKDOWN:
             return self.text
-        console = Console(theme=RICH_MD_THEME, color_system="standard", width=RICH_MD_CONFIG.get("width"))
+        console = Console(
+            theme=RICH_MD_THEME,
+            # color_system=RICH_MD_CONFIG.get("color_system"),
+            width=RICH_MD_CONFIG.get("width"),
+        )
         md = Markdown(self.text, style=RICH_MD_CONFIG["style"], code_theme=RICH_MD_CONFIG["code_theme"])
         with console.capture() as cap:
             console.print(md)
@@ -155,17 +174,15 @@ class OCTable(OC):
     def render_console(self, eng: BotEngine) -> str:
         if not self.rows:
             return "(empty)"
-        if tabulate:
-            try:
-                return tabulate(self.rows, headers=self.headers, tablefmt="github")
-            except Exception as e:
-                log().exc(e, where="TableComponent.render_console.tabulate")
-        # Fallback formatting
-        lines: List[str] = []
-        for row in self.rows:
-            parts = [f"{h}: {v}" for h, v in zip(self.headers, row)]
-            lines.append("; ".join(parts) if parts else "(empty row)")
-        return "\n".join(lines)
+        return tabulate.tabulate(self.rows, headers=self.headers, tablefmt="github")
+        #     except Exception as e:
+        #         log().exc(e, where="TableComponent.render_console.tabulate")
+        # # Fallback formatting
+        # lines: List[str] = []
+        # for row in self.rows:
+        #     parts = [f"{h}: {v}" for h, v in zip(self.headers, row)]
+        #     lines.append("; ".join(parts) if parts else "(empty row)")
+        # return "\n".join(lines)
 
     def render_telegram(self, eng: BotEngine) -> str:
         if not self.rows:
@@ -217,34 +234,32 @@ class CommandRegistry:
     - Auto-help: builds usage + summary from registered metadata/docstrings.
     """
     def __init__(self):
-        # keys are ('@'|'!', command_name)
+        # keys are ('?'|'!', command_name)
         self._handlers: Dict[Tuple[str, str], Callable[[BotEngine, Dict[str, str]], Any]] = {}
 
         self._meta: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     # ---- decorators ----
     def at(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None):
-        return self._reg(('@', name.lower()), argspec, options, nreq)
+        return self._reg((AT_KEY, name.lower()), argspec, options, nreq)
 
     def bang(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None):
-        return self._reg(('!', name.lower()), argspec, options, nreq)
+        return self._reg((BANG_KEY, name.lower()), argspec, options, nreq)
 
     def _reg(self, key: Tuple[str, str], argspec: Optional[List[str]], options: Optional[List[str]], nreq: Optional[int]):
         def deco(fn):
             self._handlers[key] = fn
             # Extract first docstring line as summary (if present)
-            doc = (fn.__doc__ or "").strip()
-            summary = ""
-            if doc:
-                summary = doc.splitlines()[0].strip()
+
+            l_doc = _remove_indent(fn.__doc__ or "")
+            summary = "" if not l_doc else l_doc[0]
             self._meta[key] = {
                 "argspec": list(argspec or []),
                 "options": set(options or []),
                 "summary": summary,
                 "name": key[1],
                 "prefix": key[0],
-                "doc": doc,
-                "allow_missing": (key == ('@', 'help')),
+                "doc": "\n".join(l_doc),
                 "nreq": int(nreq) if nreq is not None else (len(argspec or [])),
             }
             return fn
@@ -254,7 +269,7 @@ class CommandRegistry:
     def dispatch(self, eng: BotEngine, msg: str) -> Any:
         s = (msg or "").strip()
         log().debug("dispatch.enter", text=s)
-        if not s or s[0] not in ("@", "!"):
+        if not s or s[0] not in (AT_KEY, BANG_KEY):
             log().debug("dispatch.exit", reason="not-a-command")
             return self._help_text()
 
@@ -271,7 +286,7 @@ class CommandRegistry:
 
         if not handler:
             log().warn("dispatch.unknown", prefix=prefix, head=head)
-            return f"Unknown {prefix}{head}. Try @help."
+            return f"Unknown {prefix}{head}. Try {AT_KEY}help."
 
         # Parse args according to argspec/options
         args = self._parse_args(tail, meta)
@@ -280,7 +295,7 @@ class CommandRegistry:
         # Required positionals: first nreq argspec entries
         required_names = argspec_in_meta[:nreq]
         missing = [a for a in required_names if a not in args]
-        if missing and not meta.get("allow_missing"):
+        if missing:
             return self._usage_line(meta, reason=f"Missing: {', '.join(missing)}")
 
         log().debug("dispatch.call", cmd=head, prefix=prefix, args=args)
@@ -352,7 +367,7 @@ class CommandRegistry:
         metas = []
         cmd_filter = (command or "").strip().lower()
         want_prefix = None
-        if cmd_filter.startswith("@") or cmd_filter.startswith("!"):
+        if cmd_filter.startswith(AT_KEY) or cmd_filter.startswith(BANG_KEY):
             want_prefix = cmd_filter[0]
             cmd_filter = cmd_filter[1:]
 
@@ -376,7 +391,7 @@ class CommandRegistry:
                 usage = self._usage_line(m)
                 bullet = f"- {usage}"
                 if detail == 3 and m["summary"]:
-                    bullet += f": {m['summary']}"
+                    bullet += f": *{m['summary']}*"
                 lines.append(bullet)
             return CO(OCMarkDown("\n".join(lines)))
 
@@ -391,7 +406,7 @@ class CommandRegistry:
             blocks.append(f"{header}\n{'-' * len(header)}")
         for m in metas:
             usage = self._usage_line(m)
-            doc_raw = textwrap.dedent(m.get("doc", "") or "").strip("\n")
+            doc_raw = m["doc"].strip("\n")
             paras: List[str] = []
             if doc_raw:
                 current: List[str] = []
@@ -405,13 +420,23 @@ class CommandRegistry:
                 if current:
                     paras.append("\n".join(current).strip("\n"))
             first_para_text = paras[0] if paras else ""
-            rest_text = "\n\n".join(paras[1:]) if len(paras) > 1 else ""
+
+            if BLOCKQUOTE:
+                DETAIL_PREFIX = "> "
+                rest_text = "\n".join([DETAIL_PREFIX+x for x in ("\n\n".join(paras[1:])).split("\n")]) if len(paras) > 1 else ""
+            else:
+                # formats as code
+                DETAIL_PREFIX = "  "
+                rest_text = textwrap.indent("\n\n".join(paras[1:]), DETAIL_PREFIX) if len(paras) > 1 else ""
 
             block_parts = [usage]
             if first_para_text:
                 block_parts.extend(["", f"*{first_para_text}*"])
             if rest_text:
-                block_parts.extend(["", "```", rest_text, "```"])
+                if BLOCKQUOTE:
+                    block_parts.extend(["", rest_text, ""])
+                else:
+                    block_parts.extend(["", "```", rest_text, "```"])
             blocks.append("\n".join(block_parts))
 
         return CO(OCMarkDown("\n\n".join(blocks)))
@@ -436,11 +461,11 @@ def build_registry() -> CommandRegistry:
     # ----------------------- HELP -----------------------
     # TODO improve help formatting
     @R.at("help", argspec=["command"], options=["detail"], nreq=0)
-    def _help(eng: BotEngine, args: Dict[str, str]) -> CO:
-        """Show this help.
+    def at_help(eng: BotEngine, args: Dict[str, str]) -> CO:
+        f"""Show this help.
 
         Usage:
-          @help [command] [detail:1]
+          {AT_KEY}help [command] [detail:1]
         """
         cmd = args.get("command")
         # default detail: 4 if a specific command was passed; otherwise 1
@@ -480,7 +505,7 @@ def build_registry() -> CommandRegistry:
     @R.at("open")
     def _at_open(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List open RV positions (summary). Alias for: @positions status:open detail:2"""
-        res = R.dispatch(eng, "@positions status:open detail:2")
+        res = R.dispatch(eng, f"{AT_KEY}positions status:open detail:2")
         return res if isinstance(res, CO) else _txt(str(res))
 
     # ----------------------- POSITIONS (detail levels) -----------------------
@@ -495,9 +520,9 @@ def build_registry() -> CommandRegistry:
                 4 = level 2 + list every leg (timestamp, entry, last, qty, PnL)
 
         Examples:
-          @positions detail:1
-          @positions status:closed detail:2
-          @positions pair:STRK/ETH detail:3 limit:20
+          ?positions detail:1
+          ?positions status:closed detail:2
+          ?positions pair:STRK/ETH detail:3 limit:20
         """
         store = eng.store
         cfg = eng.store.get_config()
@@ -580,7 +605,7 @@ def build_registry() -> CommandRegistry:
                 break
             pid = r["position_id"]
             opened_ms = r["user_ts"] or r["created_ts"]
-            opened_str = _ts_human(opened_ms)
+            opened_str = ts_human(opened_ms)
             signed_target = _position_signed_target(r)
 
             # compute position pnl and missing flag
@@ -646,7 +671,7 @@ def build_registry() -> CommandRegistry:
             if detail == 4:
                 for lg in store.get_legs(pid):
                     ts = lg["entry_price_ts"]
-                    ts_h = _ts_human(ts)
+                    ts_h = ts_human(ts)
                     last = marks.get(lg["symbol"])
                     pnl = _leg_pnl(lg["entry_price"], lg["qty"], last)
                     pnl_pct_leg = _fmt_pct(_pct_of(pnl, ref_balance), show_sign=True)
@@ -1124,7 +1149,7 @@ def build_registry() -> CommandRegistry:
 
         return _txt(
             f"Leg #{leg_id} ({symbol}) updated: entry_price={price} "
-            f"at {_ts_human(ts)} (path={','.join(path)}, manual_touch)."
+            f"at {ts_human(ts)} (path={','.join(path)}, manual_touch)."
         )
 
     # ----------------------- PNL PER SYMBOL (LEGS) -----------------------
@@ -1240,19 +1265,6 @@ def build_registry() -> CommandRegistry:
     return R
 
 # === helpers (local to build_registry) ====================================
-# TODO this is all so horrible, but if it works for the moment, it is fine
-
-
-def _ts_human(ms: int | None) -> str:
-    """Human timestamp from ms (UTC ISO seconds)."""
-    if not ms:
-        return "?"
-    try:
-        return datetime.fromtimestamp(int(ms)/1000, tz=timezone.utc).isoformat(timespec="seconds")
-    except Exception:
-        return "?"
-
-# TODO make a klinescache facility last_prices(symbols) --> {symbol: {"price": price, "timestamp": ..., "timeframe": ..., "ok": ...}, ...}
 def _last_cached_price(eng: BotEngine, symbol: str) -> Optional[float]:
     """Latest cached close from KlinesCache (first configured timeframe)."""
     kc = eng.kc
@@ -1512,3 +1524,26 @@ def _find_price_touch_ts(
     frac = dist_o / denom
     ts = open_ts + (close_ts - open_ts) * frac
     return int(round(ts))
+
+
+def _remove_indent(docstring: str) -> List:
+    if not docstring:
+        return ""
+    lines = docstring.splitlines()
+
+    # compute common indent from lines after the first
+    rest = [ln for ln in lines[1:] if ln.strip()]
+    if rest:
+        indents = [len(ln) - len(ln.lstrip(" ")) for ln in rest]
+        common = min(indents)
+    else:
+        common = 0
+
+    def strip_prefix(ln: str) -> str:
+        if common <= 0:
+            return ln
+        # remove up to 'common' leading spaces if they are present
+        return ln[common:] if ln.startswith(" " * common) else ln
+
+    stripped = [strip_prefix(ln) for ln in lines]
+    return stripped
