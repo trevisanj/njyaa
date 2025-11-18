@@ -8,6 +8,12 @@ from contextlib import contextmanager
 from typing import List, Optional
 from common import Clock, log
 
+DEFAULT_CONFIG = {
+    "reference_balance": 10_000.0,
+    "leverage": 1.0,
+    "default_risk": 0.02,
+}
+
 
 # =======================
 # ====== STORAGE ========
@@ -50,6 +56,7 @@ class Storage:
           den           TEXT,                    -- NULL => single-leg
           dir_sign      INTEGER NOT NULL,        -- +1 long, -1 short (meaning for single-leg)
           target_usd    REAL    NOT NULL,
+          risk          REAL    NOT NULL DEFAULT 0.02,
           user_ts       INTEGER NOT NULL,        -- user-declared timestamp (ms)
           status        TEXT    NOT NULL DEFAULT 'OPEN',
           note          TEXT,
@@ -120,8 +127,23 @@ class Storage:
           payload_json TEXT,
           FOREIGN KEY(thinker_id) REFERENCES thinkers(id) ON DELETE CASCADE
         );
+
+        -- ============= config (singleton) ==========
+        CREATE TABLE IF NOT EXISTS config (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          reference_balance REAL NOT NULL,
+          leverage          REAL NOT NULL,
+          default_risk      REAL NOT NULL,
+          updated_ts        INTEGER NOT NULL,
+          updated_by        TEXT
+        );
         """)
+
         self.con.commit()
+
+        # lightweight migrations for new columns/tables
+        self._ensure_column("positions", "risk", "REAL NOT NULL DEFAULT 0.02")
+        self._ensure_config_row()
 
     # -------- transaction manager --------
     @contextmanager
@@ -150,17 +172,87 @@ class Storage:
                 # no commit needed
                 pass
 
+    # -------- schema helpers --------
+    def _ensure_column(self, table: str, column: str, definition: str):
+        """Add column if missing (idempotent)."""
+        try:
+            cur = self.con.execute(f"PRAGMA table_info({table});")
+            cols = [r[1] for r in cur.fetchall()]
+            if column in cols:
+                return
+            self.con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition};")
+            self.con.commit()
+        except Exception as e:
+            log().exc(e, where="storage.ensure_column", table=table, column=column)
+
+    def _ensure_config_row(self):
+        """Create singleton config row with defaults if missing."""
+        try:
+            row = self.con.execute("SELECT id FROM config WHERE id=1").fetchone()
+            if row:
+                return
+            ts = Clock.now_utc_ms()
+            self.con.execute(
+                "INSERT INTO config(id,reference_balance,leverage,default_risk,updated_ts,updated_by)"
+                " VALUES(1,?,?,?,?,?)",
+                (DEFAULT_CONFIG["reference_balance"], DEFAULT_CONFIG["leverage"],
+                 DEFAULT_CONFIG["default_risk"], int(ts), "bootstrap")
+            )
+            self.con.commit()
+        except Exception as e:
+            log().exc(e, where="storage.ensure_config_row")
+
+    def get_config(self) -> dict:
+        """Return singleton config (expects row to exist)."""
+        row = self.con.execute(
+            "SELECT reference_balance, leverage, default_risk, updated_ts, updated_by FROM config WHERE id=1"
+        ).fetchone()
+        if not row:
+            self._ensure_config_row()
+            row = self.con.execute(
+                "SELECT reference_balance, leverage, default_risk, updated_ts, updated_by FROM config WHERE id=1"
+            ).fetchone()
+        if not row:
+            raise RuntimeError("config row missing")
+        return {
+            "reference_balance": float(row["reference_balance"]),
+            "leverage": float(row["leverage"]),
+            "default_risk": float(row["default_risk"]),
+            "updated_ts": int(row["updated_ts"]) if row["updated_ts"] is not None else None,
+            "updated_by": row["updated_by"],
+        }
+
+    def update_config(self, fields: dict) -> int:
+        """Update singleton config row. Returns number of columns updated (0 if none)."""
+        allowed = {"reference_balance", "leverage", "default_risk", "updated_by"}
+        cols = {k: v for k, v in fields.items() if k in allowed}
+        if not cols:
+            return 0
+        sets = ", ".join(f"{k}=?" for k in cols.keys())
+        params = list(cols.values())
+        params.append(Clock.now_utc_ms())
+        try:
+            with self.txn(write=True) as cur:
+                cur.execute(f"UPDATE config SET {sets}, updated_ts=? WHERE id=1", params)
+                if cur.rowcount == 0:
+                    self._ensure_config_row()
+                    cur.execute(f"UPDATE config SET {sets}, updated_ts=? WHERE id=1", params)
+            return len(cols)
+        except Exception as e:
+            log().exc(e, where="storage.update_config")
+            return 0
+
     # --- positions (auto-increment, unique signature) ---
     def get_or_create_position(self, num: str, den: Optional[str], dir_sign: int,
-                               target_usd: float, user_ts: int,
+                               target_usd: float, risk: float, user_ts: int,
                                status: str = "OPEN", note: Optional[str] = None) -> int:
         ts = Clock.now_utc_ms()
         with self.txn(write=True) as cur:
             try:
                 cur.execute("""
-                    INSERT INTO positions (num,den,dir_sign,target_usd,user_ts,status,note,created_ts)
-                    VALUES (?,?,?,?,?,?,?,?)
-                """, (num, den, int(dir_sign), float(target_usd), int(user_ts), status, note, ts))
+                    INSERT INTO positions (num,den,dir_sign,target_usd,risk,user_ts,status,note,created_ts)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                """, (num, den, int(dir_sign), float(target_usd), float(risk), int(user_ts), status, note, ts))
                 return int(cur.lastrowid)
             except sqlite3.IntegrityError:
                 # already exists per UX index; fetch id
@@ -207,8 +299,8 @@ class Storage:
 
     # --- positions upsert (kept) ---
     def upsert_position(self, row: dict):
-        q = """INSERT OR IGNORE INTO positions(position_id,num,den,dir_sign,target_usd,user_ts,status,note,created_ts)
-               VALUES(:position_id,:num,:den,:dir_sign,:target_usd,:user_ts,:status,:note,:created_ts)"""
+        q = """INSERT OR IGNORE INTO positions(position_id,num,den,dir_sign,target_usd,risk,user_ts,status,note,created_ts)
+               VALUES(:position_id,:num,:den,:dir_sign,:target_usd,:risk,:user_ts,:status,:note,:created_ts)"""
         with self.txn(write=True) as cur:
             cur.execute(q, row)
 

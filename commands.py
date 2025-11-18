@@ -29,6 +29,7 @@ DEFAULT_MD_STYLES = {
     "bullet_text": "",               # optional wrapper for bullet text
 }
 
+
 # ============== UI OUTPUT MODEL ==============
 
 # OutputKind = Literal["text", "markdown", "photo", "table"]
@@ -374,6 +375,35 @@ def build_registry() -> CommandRegistry:
         """Show this help."""
         return R._help_text()
 
+    # ----------------------- CONFIG SET -----------------------
+    @R.bang("config-set", options=["reference_balance", "leverage", "default_risk", "updated_by"])
+    def _bang_config_set(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Update global risk config.
+
+        Usage:
+          !config-set reference_balance:12000 leverage:2.0 default_risk:0.015
+        """
+        provided = {k: v for k, v in args.items()
+                    if k in {"reference_balance", "leverage", "default_risk", "updated_by"} and v is not None}
+        if not provided:
+            return _txt("Usage: !config-set reference_balance:<usd> leverage:<mult> default_risk:<0-1> [updated_by:you]")
+        try:
+            fields = _coerce_config_fields(provided)
+        except Exception as e:
+            return _txt(f"Error: {e}")
+
+        n = eng.store.update_config(fields)
+        if n <= 0:
+            return _txt("No config fields updated.")
+        changed = ", ".join(f"{k}={fields[k]}" for k in sorted(fields.keys()))
+        cfg = eng.store.get_config()
+        summary = (f"Config updated ({n} field(s)). "
+                   f"balance=${_fmt_num(cfg['reference_balance'],2)} "
+                   f"leverage={_fmt_num(cfg['leverage'],2)} "
+                   f"default_risk={_fmt_pct(cfg['default_risk'])}")
+        return _txt(f"{summary} ({changed})")
+
     # ----------------------- OPEN (alias) -----------------------
     @R.at("open")
     def _at_open(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -398,6 +428,8 @@ def build_registry() -> CommandRegistry:
           @positions pair:STRK/ETH detail:3 limit:20
         """
         store = eng.store
+        cfg = eng.store.get_config()
+        ref_balance = cfg["reference_balance"]
 
         status = args.get("status", "open")
         # Back-compat: map what: to detail
@@ -459,9 +491,11 @@ def build_registry() -> CommandRegistry:
 
         md_lines: List[str] = [f"# Positions ({status})"]
         lines: List[str] = []
+        total_pnl_pct = _fmt_pct(_pct_of(total_pnl, ref_balance), show_sign=True)
+        bal_str = _fmt_num(ref_balance, 2)
         lines.append(
             f"Positions: {len(rows)} | Target ≈ ${_fmt_num(total_target, 2)} | "
-            f"PNL ≈ ${_fmt_num(total_pnl, 2)}"
+            f"PNL ≈ ${_fmt_num(total_pnl, 2)} ({total_pnl_pct} of balance ${bal_str})"
             + (f" (PnL incomplete for {pnl_missing_count} position(s))" if pnl_missing_count else "")
         )
         if detail == 1:
@@ -488,14 +522,15 @@ def build_registry() -> CommandRegistry:
                 else:
                     pos_pnl += pnl
 
-            pnl_str = _fmt_num(pos_pnl, 2)
-            if any_missing:
-                pnl_str += " (incomplete)"
+            risk_pct = _fmt_pct(r["risk"], show_sign=False)
+            pnl_pct = _fmt_pct(_pct_of(pos_pnl, ref_balance), show_sign=True)
+            pnl_str = f"${_fmt_num(pos_pnl, 2)}" + (" (incomplete)" if any_missing else "")
 
             lines.append(
                 f"{pid} {r['num']} / {r['den'] or '-'} "
                 f"status={r['status']} opened={opened_str} "
-                f"signed_target=${_fmt_num(signed_target, 2)} PNL=${pnl_str}"
+                f"signed_target=${_fmt_num(signed_target, 2)} "
+                f"risk={risk_pct} pnl={pnl_str} pnl%={pnl_pct}"
             )
 
             # ---------- detail 3: per-symbol leg summary ----------
@@ -526,12 +561,13 @@ def build_registry() -> CommandRegistry:
                 for s, acc in by_sym.items():
                     wap = (acc["wap_num"] / acc["wap_den"]) if acc["wap_den"] > 0 else None
                     last = marks.get(s)
+                    pnl_pct_leg = _fmt_pct(_pct_of(acc["pnl"], ref_balance), show_sign=True)
                     pnl_s = _fmt_num(acc["pnl"], 2)
                     if missing_map.get(s):
                         pnl_s += " (incomplete)"
                     lines.append(
                         f"  - {s}  qty={_fmt_qty(acc['qty'])}  entry≈{_fmt_num(wap, 6)}  "
-                        f"last={_fmt_num(last, 6)}  pnl=${pnl_s}"
+                        f"last={_fmt_num(last, 6)}  pnl=${pnl_s} pnl%={pnl_pct_leg} risk={risk_pct}"
                     )
 
             # ---------- detail 4: list every leg ----------
@@ -541,26 +577,124 @@ def build_registry() -> CommandRegistry:
                     ts_h = _ts_human(ts)
                     last = marks.get(lg["symbol"])
                     pnl = _leg_pnl(lg["entry_price"], lg["qty"], last)
+                    pnl_pct_leg = _fmt_pct(_pct_of(pnl, ref_balance), show_sign=True)
                     pnl_str = _fmt_num(pnl, 2)
                     if pnl is None:
                         pnl_str = "? (missing price/entry/qty)"
                     lines.append(
                         f"  - {lg['leg_id']} {lg['symbol']}  t={ts_h}  qty={_fmt_qty(lg['qty'])}  "
-                        f"entry={_fmt_num(lg['entry_price'], 6)}  last={_fmt_num(last, 6)}  pnl=${pnl_str}"
+                        f"entry={_fmt_num(lg['entry_price'], 6)}  last={_fmt_num(last, 6)}  "
+                        f"pnl=${pnl_str} pnl%={pnl_pct_leg} risk={risk_pct}"
                     )
 
             count += 1
 
         return _md("\n".join(md_lines + [""] + lines))
 
+    # ----------------------- RISK SNAPSHOT -----------------------
+    @R.at("risk")
+    def _at_risk(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Show risk/exposure snapshot."""
+        cfg = eng.store.get_config()
+        ref_balance = cfg["reference_balance"]
+        leverage = cfg["leverage"]
+
+        rows = eng.store.list_open_positions()
+        if not rows:
+            txt = (
+                f"# Risk\n"
+                f"- Balance=${_fmt_num(ref_balance,2)} leverage={_fmt_num(leverage,2)} "
+                f"default_risk={_fmt_pct(cfg['default_risk'])}\n"
+                f"- No open positions."
+            )
+            return _md(txt)
+
+        involved_syms = set()
+        for r in rows:
+            for lg in eng.store.get_legs(r["position_id"]):
+                if lg["symbol"]:
+                    involved_syms.add(lg["symbol"])
+        marks: Dict[str, Optional[float]] = {s: _last_cached_price(eng, s) for s in involved_syms}
+
+        total_exposure = 0.0
+        exposure_missing = False
+        total_pnl = 0.0
+        table_rows: List[Sequence[Any]] = []
+
+        for r in rows:
+            pid = int(r["position_id"])
+            legs = eng.store.get_legs(pid)
+            risk_val = float(r["risk"])
+            risk_budget = ref_balance * risk_val if ref_balance else None
+            pos_pnl = 0.0
+            pnl_missing = False
+            notional = 0.0
+            notional_missing = False
+
+            for lg in legs:
+                mk = marks.get(lg["symbol"])
+                pnl = _leg_pnl(lg["entry_price"], lg["qty"], mk)
+                if pnl is None:
+                    pnl_missing = True
+                else:
+                    pos_pnl += pnl
+                if lg["qty"] is None or mk is None:
+                    notional_missing = True
+                else:
+                    notional += abs(float(lg["qty"])) * float(mk)
+
+            if not notional_missing:
+                total_exposure += notional
+            else:
+                exposure_missing = True
+                notional = None
+
+            if not pnl_missing:
+                total_pnl += pos_pnl
+
+            pnl_pct = _pct_of(pos_pnl, ref_balance)
+            r_multiple = (pos_pnl / risk_budget) if risk_budget else None
+            tp_2r = 2 * risk_budget if risk_budget is not None else None
+            tp_3r = 3 * risk_budget if risk_budget is not None else None
+
+            table_rows.append([
+                pid,
+                f"{r['num']}/{r['den'] or '-'}",
+                _fmt_pct(risk_val),
+                _fmt_num(risk_budget, 2),
+                _fmt_num(notional, 2),
+                _fmt_num(pos_pnl, 2) + (" (incomplete)" if pnl_missing else ""),
+                _fmt_pct(pnl_pct, show_sign=True),
+                _fmt_num(r_multiple, 2),
+                f"{_fmt_num(tp_2r, 2)}/{_fmt_num(tp_3r, 2)}"
+            ])
+
+        max_exposure = ref_balance * leverage if ref_balance and leverage else None
+        available = (max_exposure - total_exposure) if (max_exposure is not None) else None
+        exposure_used = _pct_of(total_exposure, max_exposure) if max_exposure else None
+        total_pnl_pct = _pct_of(total_pnl, ref_balance)
+
+        md_lines = [
+            "# Risk",
+            f"- Balance=${_fmt_num(ref_balance,2)} leverage={_fmt_num(leverage,2)} "
+            f"default_risk={_fmt_pct(cfg['default_risk'])}",
+            f"- Exposure: ${_fmt_num(total_exposure,2)} / ${_fmt_num(max_exposure,2)} "
+            f"(used {_fmt_pct(exposure_used)}; available=${_fmt_num(available,2)})"
+            + (" (exposure incomplete)" if exposure_missing else ""),
+            f"- PnL: ${_fmt_num(total_pnl,2)} ({_fmt_pct(total_pnl_pct, show_sign=True)})"
+        ]
+
+        headers = ["id", "pair", "risk%", "budget$", "notional$", "pnl$", "pnl%", "R", "2R/3R$"]
+        return CO([OCMarkDown("\n".join(md_lines)), OCTable(headers=headers, rows=table_rows)])
+
     # ----------------------- !OPEN POSITION -----------------------
-    @R.bang("open", argspec=["pair", "ts", "usd"], options=["note"])
+    @R.bang("open", argspec=["pair", "ts", "usd"], options=["note", "risk"])
     def _bang_open(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Open/add an RV position.
 
         Usage:
-          !open <ISO|epoch_ms> <NUM/DEN|SYMBOL> <±usd> [note:...]
+          !open <ISO|epoch_ms> <NUM/DEN|SYMBOL> <±usd> [risk:0.02] [note:...]
         Examples:
           !open STRK/ETH 2025-11-10T13:44:05  -5000 note:rv test
           !open ETHUSDT  2025-11-10T13:44:05 +3000
@@ -569,9 +703,19 @@ def build_registry() -> CommandRegistry:
         num, den = eh.parse_pair_or_single(eng, args["pair"])
         usd = int(float(args["usd"]))
         note = args.get("note", "")
+        cfg = eng.store.get_config()
+        risk_raw = args.get("risk")
+        risk_val = cfg["default_risk"]
+        if risk_raw is not None:
+            risk_val = float(risk_raw)
+        if risk_val <= 0:
+            return _txt("risk must be > 0 (fraction, e.g., 0.02)")
 
-        pid = eng.positionbook.open_position(num, den, usd, ts_ms, note=note)
-        return _txt(f"Opened pair {pid}: {num}/{den} target=${abs(usd):.0f} (queued price backfill).")
+        pid = eng.positionbook.open_position(num, den, usd, ts_ms, note=note, risk=risk_val)
+        return _txt(
+            f"Opened pair {pid}: {num}/{den} target=${abs(usd):.0f} "
+            f"risk={_fmt_pct(risk_val)} (queued price backfill)."
+        )
 
     # ----------------------- THINKERS LIST -----------------------
     @R.at("thinkers")
@@ -769,13 +913,13 @@ def build_registry() -> CommandRegistry:
     # ======================= POSITION EDIT =======================
     @R.bang("position-set",
             argspec=["position_id"],
-            options=["num", "den", "dir_sign", "target_usd", "user_ts", "status", "note", "created_ts"])
+            options=["num", "den", "dir_sign", "target_usd", "risk", "user_ts", "status", "note", "created_ts"])
     def _bang_position_set(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Update fields in a position row (by position_id).
         Usage:
           !position-set <position_id> [num:ETHUSDT] [den:STRKUSDT|-] [dir_sign:-1|+1]
-                          [target_usd:5000] [user_ts:<when>] [status:OPEN|CLOSED]
+                          [target_usd:5000] [risk:0.02] [user_ts:<when>] [status:OPEN|CLOSED]
                           [note:...] [created_ts:<when>]
         Notes:
           - user_ts/created_ts accept ISO or epoch via parse_when().
@@ -788,7 +932,7 @@ def build_registry() -> CommandRegistry:
 
         # capture only provided (recognized) option keys
         provided = {k: v for k, v in args.items()
-                    if k in {"num", "den", "dir_sign", "target_usd", "user_ts", "status", "note",
+                    if k in {"num", "den", "dir_sign", "target_usd", "risk", "user_ts", "status", "note",
                              "created_ts"} and v is not None}
 
         if not provided:
@@ -1047,6 +1191,26 @@ def _fmt_num(x: Any, nd=2) -> str:
     except Exception:
         return "?"
 
+def _pct_of(val: Any, base: Any) -> Optional[float]:
+    try:
+        if val is None or base is None:
+            return None
+        base_f = float(base)
+        if base_f == 0.0:
+            return None
+        return float(val) / base_f
+    except Exception:
+        return None
+
+def _fmt_pct(frac: Any, nd=2, show_sign: bool = False) -> str:
+    if frac is None:
+        return "?"
+    try:
+        sign = "+" if show_sign else ""
+        return f"{float(frac)*100:{sign}.{nd}f}%"
+    except Exception:
+        return "?"
+
 def _fmt_qty(x: Any) -> str:
     # show up to 6 decimals but trim zeros
     if x is None: return "?"
@@ -1098,6 +1262,11 @@ def _coerce_position_fields(raw: dict) -> dict:
         if ds not in (-1, 1):
             raise ValueError("dir_sign must be -1 or +1")
         out["dir_sign"] = ds
+    if "risk" in raw:
+        rv = float(raw["risk"])
+        if rv <= 0:
+            raise ValueError("risk must be > 0")
+        out["risk"] = rv
     if "target_usd" in raw: out["target_usd"] = float(raw["target_usd"])
     if "user_ts" in raw: out["user_ts"] = parse_when(str(raw["user_ts"]))
     if "created_ts" in raw: out["created_ts"] = parse_when(str(raw["created_ts"]))
@@ -1117,6 +1286,28 @@ def _coerce_leg_fields(raw: dict) -> dict:
     if "price_method" in raw: out["price_method"] = str(raw["price_method"])
     if "need_backfill" in raw: out["need_backfill"] = _boolish_to_int(raw["need_backfill"])
     if "note" in raw: out["note"] = str(raw["note"])
+    return out
+
+def _coerce_config_fields(raw: dict) -> dict:
+    """Coerce incoming config fields."""
+    out: Dict[str, Any] = {}
+    if "reference_balance" in raw:
+        rb = float(raw["reference_balance"])
+        if rb <= 0:
+            raise ValueError("reference_balance must be > 0")
+        out["reference_balance"] = rb
+    if "leverage" in raw:
+        lv = float(raw["leverage"])
+        if lv <= 0:
+            raise ValueError("leverage must be > 0")
+        out["leverage"] = lv
+    if "default_risk" in raw:
+        dr = float(raw["default_risk"])
+        if dr <= 0 or dr >= 1:
+            raise ValueError("default_risk must be between 0 and 1")
+        out["default_risk"] = dr
+    if "updated_by" in raw:
+        out["updated_by"] = str(raw["updated_by"])
     return out
 
 

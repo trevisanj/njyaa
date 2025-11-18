@@ -1,34 +1,33 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `run_bot.py` bootstraps config (`cfg_maker.py`), logging, and launches `BotEngine` (`bot_api.py`).
-- Trading logic and orchestration live in `engclasses.py`/`enghelpers.py`; Binance REST client is in `binance_um.py`; command parsing is in `commands.py`.
-- Data is persisted via `storage.py` (SQLite) and cached candles in `klines_cache.py`. Runtime databases (`rv.sqlite*`, `rv_cache.sqlite*`) reside in the root—keep them local.
-- Utilities and shared types are in `common.py`; console REPL helpers live in `console_ui.py`.
-
-## Setup & Configuration
-- Python 3.10+ recommended; create a venv and install deps (`pip install requests tabulate`; pin new libs you add).
-- Secrets are loaded from `/home/j/yp/saccakeys` in `make_cfg`; never commit keys. Env vars override defaults: `RV_SQLITE`, `RV_CACHE_SQLITE`, `RV_LOG`, `RV_KLINES_POLL_SEC`, `RV_KLINES_TFS`.
-- Binance requires `BINANCE_KEY`/`BINANCE_SEC`; Telegram alerts need `TELEGRAM_TOKEN`/`TELEGRAM_CHAT_ID`. Prefer env exports or the private key store.
+- `run_bot.py` boots config/logging and starts `BotEngine` (`bot_api.py`); commands live in `commands.py`.
+- Trading and risk logic live in `engclasses.py` (position book, reconciler) and `enghelpers.py` (helpers the engine calls); periodic thinkers reside in `thinkers1.py`/`thinkers2.py`.
+- Persistence is through `storage.py` (SQLite with `config` singleton holding balance/leverage/default_risk) and cached candles in `klines_cache.py`; runtime DB files (`rv*.sqlite*`) stay in the repo root.
+- External connectivity: `binance_um.py` (REST), Telegram plumbing in `bot_api.py`, console helpers in `console_ui.py`, and type contracts in `contracts.py`.
+- Shared utilities and logging live in `common.py`; market helpers and charting tweaks are in `enghelpers.py`.
 
 ## Build, Test, and Development Commands
-- `python -m venv .venv && source .venv/bin/activate` — isolate dependencies.
-- `python run_bot.py` — start the engine; use `RV_LOG=DEBUG` to raise verbosity and watch scheduler, polling, and commands.
-- `python -m compileall .` — fast syntax/import sanity check without hitting external services.
+- `python -m venv .venv && source .venv/bin/activate` — create/enter a virtualenv.
+- `python run_bot.py` — start the engine; set `RV_LOG=DEBUG` to inspect schedulers, commands, and thinker ticks.
+- `python -m compileall .` — quick syntax/import sanity check without hitting external APIs.
 
 ## Coding Style & Naming Conventions
-- PEP 8, 4-space indents, snake_case for funcs/vars, PascalCase for classes; keep type hints consistent.
-- Use `common.Log`/`log()` for structured logging; include context (e.g., `job`, `symbol`).
-- When adding commands, register via `CommandRegistry.at/bang` and provide a one-line docstring for auto-help.
+- PEP 8, 4-space indents, snake_case for functions/vars, PascalCase for classes; keep type hints consistent.
+- Use `log()` for structured logging with context keys (`position_id`, `symbol`, `job`).
+- Register new commands via `CommandRegistry.at` (read-only) or `CommandRegistry.bang` (writes) and keep docstrings concise for auto-help.
+- Prefer explicit errors over silent fallbacks; fail fast on missing config or schema.
 
 ## Testing Guidelines
-- No formal suite yet; place new tests under `tests/test_*.py` (pytest or unittest). Mock Binance HTTP calls and point SQLite to temp files to avoid mutating real data.
-- Manual smoke: `python run_bot.py`, issue `@help` in the console, and verify price polling and cache refreshes occur without errors.
+- No unit-test suite is maintained; rely on manual smoke checks instead of adding tests.
+- Smoke checklist: run `python run_bot.py`, issue `@help`, and confirm price polling, cache refresh, and Telegram/console outputs behave without tracebacks.
 
 ## Commit & Pull Request Guidelines
-- Commit messages are short and present-tense (history shows terse labels). Prefer clear imperatives (e.g., "add funding watcher").
-- PRs should summarize the change, list config/env impacts, include manual test notes, and attach screenshots/log snippets for visible behavior. Mask secrets and avoid committing SQLite artifacts.
+- Commit messages: short, present-tense imperatives (e.g., “add funding watcher”).
+- PRs: summarize intent, config/env impacts (e.g., DB schema changes like `config` or `positions.risk`), and manual test steps; include screenshots/log snippets when behavior is visible.
+- Never commit generated SQLite/cache artifacts or secrets.
 
-## Security & Data Handling
-- Treat API keys, chat IDs, and signed URLs as sensitive—never log or store in repo history. Scrub logs before sharing.
-- Keep generated databases/cache files local or add them to `.gitignore` if new ones appear; avoid leaking account identifiers in examples.
+## Security & Configuration Tips
+- Keep secrets out of logs: Binance keys, Telegram tokens, chat IDs, and account identifiers.
+- Runtime DB paths are configurable via env (`RV_SQLITE`, `RV_CACHE_SQLITE`); keep them local or gitignored.
+- Validate config updates (`!config-set`) carefully: positive balances/leverage, risk as decimal (e.g., 0.02 for 2%).

@@ -6,8 +6,8 @@ from bot_api import BotEngine
 
 def main():
     cfg = make_cfg()
-    cfg.TELEGRAM_ENABLED = True
-    cfg.CONSOLE_ENABLED = False
+    cfg.TELEGRAM_ENABLED = False
+    cfg.CONSOLE_ENABLED = True
 
     lg = Log(level=cfg.LOG_LEVEL, name="rv", json_mode=False)
     set_global_logger(lg)

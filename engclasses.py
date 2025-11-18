@@ -205,14 +205,21 @@ class PositionBook:
         self.store, self.mc, self.oracle = store, mc, oracle
 
     def open_position(self, num_tok: str, den_tok: Optional[str],
-                      usd_notional: int, user_ts: int, note: str = "") -> int:
+                      usd_notional: int, user_ts: int, note: str = "",
+                      risk: Optional[float] = None) -> int:
         num = self.mc.normalize(num_tok)
         den = self.mc.normalize(den_tok) if den_tok else None
         dir_sign = 1 if usd_notional >= 0 else -1
         target = abs(float(usd_notional))
+        cfg = self.store.get_config()
+        risk_val = cfg["default_risk"] if risk is None else float(risk)
+        if risk_val <= 0:
+            raise ValueError("risk must be > 0")
 
         # 1) get/create position (auto-increment id)
-        pid = self.store.get_or_create_position(num, den, dir_sign, target, user_ts, status="OPEN", note=note)
+        pid = self.store.get_or_create_position(
+            num, den, dir_sign, target, risk_val, user_ts, status="OPEN", note=note
+        )
 
         # 2) create leg stubs (single or pair) — qty/price will be filled by backfill job
         self.store.ensure_leg_stub(pid, num)
@@ -224,7 +231,7 @@ class PositionBook:
                                {"position_id": pid, "user_ts": user_ts}, position_id=pid)
 
         log().info("Position opened (queued price backfill)", position_id=pid, num=num, den=den,
-                 dir=("LONG" if dir_sign > 0 else "SHORT"), usd=target)
+                 dir=("LONG" if dir_sign > 0 else "SHORT"), usd=target, risk=risk_val)
         return pid
 
     def size_leg_from_price(self, symbol:str, usd:float, price:float) -> float:

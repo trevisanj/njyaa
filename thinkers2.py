@@ -220,3 +220,153 @@ class PSARStopThinker(ThinkerBase):
         )]
 
 
+def _leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float]) -> Optional[float]:
+    if entry is None or qty is None or mark is None:
+        return None
+    return (float(mark) - float(entry)) * float(qty)
+
+
+def _last_cached_price(ctx: ThinkerContext, symbol: str) -> Optional[float]:
+    kc = ctx.kc
+    if kc is None:
+        return None
+    tfs = getattr(ctx.cfg, "KLINES_TIMEFRAMES", None) or ["1m"]
+    for tf in tfs:
+        try:
+            r = kc.last_row(symbol, tf)
+            if r and r["close"] is not None:
+                return float(r["close"])
+        except Exception:
+            continue
+    return None
+
+
+class RiskThinker(ThinkerBase):
+    """
+    Monitors exposure vs leverage and per-position drawdowns vs risk budget.
+
+    config = {
+      "warn_exposure_ratio": 1.0,    # alert if exposure > ratio * max_exposure
+      "warn_loss_mult": 1.0,         # alert if pnl < -loss_mult * risk_budget
+      "min_alert_interval_ms": 300000
+    }
+    """
+    kind = "RISK_MONITOR"
+
+    def __init__(self):
+        self._cfg: Dict[str, Any] = {}
+        self._last_alert_ms: int = 0
+
+    def init(self, config: Dict[str, Any]) -> None:
+        self._cfg = dict(config or {})
+        for k in ("warn_exposure_ratio", "warn_loss_mult", "min_alert_interval_ms"):
+            if k not in self._cfg:
+                raise ValueError(f"RiskThinker missing '{k}'")
+        self._cfg["warn_exposure_ratio"] = float(self._cfg["warn_exposure_ratio"])
+        self._cfg["warn_loss_mult"] = float(self._cfg["warn_loss_mult"])
+        self._cfg["min_alert_interval_ms"] = int(self._cfg["min_alert_interval_ms"])
+
+    def tick(self, ctx: ThinkerContext, now_ms: int) -> List[ThinkerAction]:
+        cfg = ctx.store.get_config()
+        ref_balance = cfg["reference_balance"]
+        leverage = cfg["leverage"]
+        max_exposure = ref_balance * leverage if ref_balance and leverage else None
+
+        rows = ctx.store.list_open_positions()
+        if not rows:
+            return []
+
+        involved_syms = set()
+        for r in rows:
+            for lg in ctx.store.get_legs(r["position_id"]):
+                if lg["symbol"]:
+                    involved_syms.add(lg["symbol"])
+        marks = {s: _last_cached_price(ctx, s) for s in involved_syms}
+
+        total_exposure = 0.0
+        exposure_missing = False
+        alerts: List[str] = []
+        payload_positions: List[Dict[str, Any]] = []
+
+        for r in rows:
+            pid = int(r["position_id"])
+            legs = ctx.store.get_legs(pid)
+            notional = 0.0
+            notional_missing = False
+            pos_pnl = 0.0
+            pnl_missing = False
+            risk_val = float(r["risk"])
+            risk_budget = ref_balance * risk_val if ref_balance else None
+
+            for lg in legs:
+                mk = marks.get(lg["symbol"])
+                pnl = _leg_pnl(lg["entry_price"], lg["qty"], mk)
+                if pnl is None:
+                    pnl_missing = True
+                else:
+                    pos_pnl += pnl
+                if lg["qty"] is None or mk is None:
+                    notional_missing = True
+                else:
+                    notional += abs(float(lg["qty"])) * float(mk)
+
+            if not notional_missing:
+                total_exposure += notional
+            else:
+                exposure_missing = True
+                notional = None
+
+            hit_loss = False
+            if risk_budget and not pnl_missing:
+                if pos_pnl <= -self._cfg["warn_loss_mult"] * risk_budget:
+                    hit_loss = True
+                    alerts.append(
+                        f"#{pid} drawdown {pos_pnl:.2f} <= -{self._cfg['warn_loss_mult']}R "
+                        f"(risk={risk_val:.3f}, budget={risk_budget:.2f})"
+                    )
+
+            payload_positions.append({
+                "position_id": pid,
+                "risk": risk_val,
+                "risk_budget": risk_budget,
+                "pnl": pos_pnl if not pnl_missing else None,
+                "pnl_missing": pnl_missing,
+                "notional": notional,
+                "notional_missing": notional_missing,
+                "loss_hit": hit_loss,
+            })
+
+        if max_exposure and total_exposure > self._cfg["warn_exposure_ratio"] * max_exposure:
+            alerts.append(
+                f"Exposure {total_exposure:.2f} exceeds "
+                f"{self._cfg['warn_exposure_ratio']*100:.0f}% of max {max_exposure:.2f}"
+                + (" (incomplete)" if exposure_missing else "")
+            )
+
+        if not alerts:
+            return []
+
+        if now_ms - self._last_alert_ms < self._cfg["min_alert_interval_ms"]:
+            return [ThinkerAction(
+                type="LOG",
+                level="DEBUG",
+                text="[risk] alerts suppressed (cooldown)",
+                payload={"alerts": alerts, "cooldown_ms": self._cfg["min_alert_interval_ms"]}
+            )]
+
+        self._last_alert_ms = now_ms
+        payload = {
+            "alerts": alerts,
+            "exposure": total_exposure,
+            "max_exposure": max_exposure,
+            "ref_balance": ref_balance,
+            "leverage": leverage,
+            "positions": payload_positions,
+            "_runtime": {"last_alert_ms": now_ms},
+        }
+        return [ThinkerAction(
+            type="ALERT",
+            level="WARN",
+            text="[risk] " + "; ".join(alerts),
+            payload=payload
+        )]
