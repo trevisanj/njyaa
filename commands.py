@@ -20,13 +20,14 @@ __all__ = ["OC", "OCText", "OCMarkDown", "OCPhoto", "OCTable", "CO", "CommandReg
 # Simple global style switches (can be overridden at runtime).
 DEFAULT_MD_STYLES = {
     "reset": "\033[0m",
-    "title": "\033[1m\033[4m",       # bold + underline
-    "subtitle": "\033[1m",           # bold
-    "bold": "\033[1m",
+    "text": "\033[37m\033[2m",       # slightly dimmed light gray
+    "title": "\033[92m\033[1m",      # bright green + bold
+    "subtitle": "\033[32m\033[1m",   # darker green + bold
+    "bold": "\033[97m\033[1m",       # bright white bold
     "italic": "\033[3m",
     "bullet": "• ",
     "bullet_indent": "  ",           # used when leading spaces are absent
-    "bullet_text": "",               # optional wrapper for bullet text
+    "bullet_text": "\033[37m\033[2m",# body color for bullets (dimmed)
 }
 
 
@@ -89,6 +90,12 @@ class OCMarkDown(OC):
                 txt = re.sub(r"_(.+?)_", lambda m: _wrap("italic", m.group(1)), txt)
             return txt
 
+        def _body(txt: str) -> str:
+            base = styles.get("text", "")
+            if not base:
+                return txt
+            return f"{base}{txt}{reset}" if reset else f"{base}{txt}"
+
         rendered: List[str] = []
         for raw in self.text.splitlines():
             stripped = raw.lstrip()
@@ -109,10 +116,10 @@ class OCMarkDown(OC):
                 indent_len = len(raw) - len(stripped)
                 indent = raw[:indent_len] if indent_len else styles.get("bullet_indent", "")
                 bullet_text = _wrap("bullet_text", body)
-                rendered.append(f"{indent}{bullet_sym}{bullet_text}")
+                rendered.append(_body(f"{indent}{bullet_sym}{bullet_text}"))
                 continue
 
-            rendered.append(_inline(raw))
+            rendered.append(_body(_inline(raw)))
 
         return "\n".join(rendered)
 
@@ -250,6 +257,8 @@ class CommandRegistry:
                 "summary": summary,
                 "name": key[1],
                 "prefix": key[0],
+                "doc": doc,
+                "allow_missing": (key == ('@', 'help')),
             }
             return fn
         return deco
@@ -280,7 +289,7 @@ class CommandRegistry:
         # Parse args according to argspec/options
         args = self._parse_args(tail, meta)
         missing = [a for a in meta["argspec"] if a not in args]
-        if missing:
+        if missing and not meta.get("allow_missing"):
             return self._usage_line(meta, reason=f"Missing: {', '.join(missing)}")
 
         log().debug("dispatch.call", cmd=head, prefix=prefix, args=args)
@@ -302,10 +311,14 @@ class CommandRegistry:
 
         # Fill positionals
         for name in argspec:
-            if toks:
-                result[name] = toks.pop(0)
-            else:
+            if not toks:
                 break
+            # If the next token looks like an option and the key is known, don't consume it as positional
+            if ":" in toks[0]:
+                k = toks[0].split(":", 1)[0].strip().lower()
+                if not options or k in options:
+                    break
+            result[name] = toks.pop(0)
 
         # Remaining tokens as key:value (only declared options)
         for tok in toks:
@@ -329,27 +342,76 @@ class CommandRegistry:
         if meta["options"]:
             opt_items = " ".join(f"[{o}:…]" for o in sorted(meta["options"]))
             opt = (" " + opt_items) if opt_items else ""
-        line = f"{pre}{nm}" + (f" {pos}" if pos else "") + opt
+        line = f"**{pre}{nm}**" + (f" {pos}" if pos else "") + opt
         if reason:
             return f"{reason}\n{line}"
         return line
 
-    def _help_text(self) -> CO:
-        """
-        Build a help listing from registered commands.
-        Shows: @name/!name — usage — first doc line (if any).
-        """
-        lines: List[str] = ["# Commands"]
-        # sort by prefix then name
+    def _help_text(self, detail: int = 1, command: Optional[str] = None) -> CO:
+        """Build a help listing from registered commands."""
+        metas = []
+        cmd_filter = (command or "").strip().lower()
+        want_prefix = None
+        if cmd_filter.startswith("@") or cmd_filter.startswith("!"):
+            want_prefix = cmd_filter[0]
+            cmd_filter = cmd_filter[1:]
+
         for (prefix, name) in sorted(self._handlers.keys()):
-            meta = self._meta.get((prefix, name), {})
-            usage = self._usage_line(meta)
-            summary = meta.get("summary") or ""
-            bullet = f"- `{usage}`"
-            if summary:
-                bullet += f": {summary}"
-            lines.append(bullet)
-        return CO(OCMarkDown("\n".join(lines)))
+            if cmd_filter and name != cmd_filter:
+                continue
+            if want_prefix and prefix != want_prefix:
+                continue
+            metas.append(self._meta[(prefix, name)])
+
+        if detail == 1:
+            parts = [f"**{m['prefix']}{m['name']}**" for m in metas]
+            body = "  ".join(parts) if parts else "(none)"
+            return CO(OCMarkDown(f"# Commands\n{body}"))
+
+        if detail in (2, 3):
+            lines: List[str] = ["# Commands"]
+            for m in metas:
+                usage = self._usage_line(m)
+                bullet = f"- {usage}"
+                if detail == 3 and m["summary"]:
+                    bullet += f": {m['summary']}"
+                lines.append(bullet)
+            return CO(OCMarkDown("\n".join(lines)))
+
+        # detail 4: full docs for all matched commands
+        if not metas:
+            return CO(OCMarkDown("# Commands\n(no match)"))
+
+        blocks: List[str] = []
+        multi = len(metas) > 1
+        if multi:
+            blocks.append("# Commands")
+        for m in metas:
+            usage = self._usage_line(m)
+            doc = m.get("doc", "")
+            doc_lines = doc.splitlines()
+            first_para: List[str] = []
+            rest_lines: List[str] = []
+            collecting_rest = False
+            for line in doc_lines:
+                if not collecting_rest and line.strip() == "":
+                    collecting_rest = True
+                    continue
+                if collecting_rest:
+                    rest_lines.append(line)
+                else:
+                    first_para.append(line)
+            first_para_text = " ".join(lp.strip() for lp in first_para).strip()
+            rest_text = "\n".join(rest_lines).strip()
+
+            block_parts = [usage]
+            if first_para_text:
+                block_parts.append(f"*{first_para_text}*")
+            if rest_text:
+                block_parts.append(rest_text)
+            blocks.append("\n".join(block_parts))
+
+        return CO(OCMarkDown("\n\n".join(blocks)))
 
 
 def build_registry() -> CommandRegistry:
@@ -370,10 +432,13 @@ def build_registry() -> CommandRegistry:
 
     # ----------------------- HELP -----------------------
     # TODO improve help formatting
-    @R.at("help")
+    @R.at("help", argspec=["command"], options=["detail"])
     def _help(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Show this help."""
-        return R._help_text()
+        cmd = args.get("command")
+        # default detail: 4 if a specific command was passed; otherwise 1
+        detail = int(args.get("detail", "4" if cmd else "1"))
+        return R._help_text(detail=detail, command=cmd)
 
     # ----------------------- CONFIG SET -----------------------
     @R.bang("config-set", options=["reference_balance", "leverage", "default_risk", "updated_by"])
