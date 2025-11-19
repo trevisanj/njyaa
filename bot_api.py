@@ -369,22 +369,11 @@ class BotEngine:
 
     def _send_text_telegram(self, text: str) -> None:
         """Telegram sink for alerts/heartbeats."""
-        if not self.cfg.TELEGRAM_ENABLED:
-            return
-        if not self._app:
-            return
-        try:
-            loop = getattr(self._app, "loop", None)
-            if loop and loop.is_running():
-                loop.call_soon_threadsafe(asyncio.create_task, self._app.bot.send_message(
-                    chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=text
-                ))
-            else:
-                asyncio.run(self._app.bot.send_message(
-                    chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=text
-                ))
-        except Exception as e:
-            log().exc(e, where="engine.send_text.telegram")
+        coro = self._app.bot.send_message(
+            chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=text
+        )
+        # asyncio.create_task(coro)
+        self._app.create_task(coro)
 
     # ---------- interface ----------
     def send_text(self, text: str) -> None:
@@ -432,10 +421,8 @@ class BotEngine:
 
     def _send_photo_telegram(self, path: str, caption: str | None = None) -> None:
         """Telegram sink for photos."""
-        if not self.cfg.TELEGRAM_ENABLED:
-            raise RuntimeError("Telegram disabled (TELEGRAM_ENABLED=False)")
-        if self._app is None:
-            raise RuntimeError("Telegram Application not initialized")
+        assert self.cfg.TELEGRAM_ENABLED, "Telegram disabled (TELEGRAM_ENABLED=False)"
+        assert self._app is not None, "Telegram Application not initialized"
 
         # Read into memory so the coroutine can consume after we exit this call.
         data = None
@@ -470,6 +457,7 @@ class BotEngine:
                 log().warn(
                     "engine.klines.refresh.fail", symbol=s, err=str(e)
                 )
+                log().exc(e)
 
     def _refresh_symbol(self, symbol: str, timeframes=None):
         """Fetch new candles, upsert, then prune."""
