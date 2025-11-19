@@ -10,6 +10,7 @@ import time
 import os
 import atexit
 import signal
+import logging
 from typing import Callable, List, Optional, Dict, TYPE_CHECKING
 
 from common import *  # Clock, log, AppConfig, tf_ms, etc.
@@ -26,6 +27,46 @@ except ImportError:
 
 if TYPE_CHECKING:
     from commands import CommandRegistry, CO, OCText  # only for type hints
+
+# =======================
+# Telegram logging tweaks
+# =======================
+# Rich PTB stacktraces on transient network hiccups spam the console.
+# These switches let you quickly tone them down without hunting through PTB internals.
+PTB_LOGGERS = [
+    "telegram.ext._utils.networkloop",
+    "telegram.ext._updater",
+    "telegram.request",
+]
+PTB_LOG_LEVEL = logging.WARNING
+PTB_STRIP_TRACEBACK = True  # keep the message but drop the multi-line traceback
+
+
+class _PTBDropTraceback(logging.Filter):
+    """Scrubs exc_info so PTB logs print a single line instead of full tracebacks."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if PTB_STRIP_TRACEBACK and record.exc_info:
+            record.exc_info = None
+            record.exc_text = None
+        return True
+
+
+_PTB_LOG_CONFIGURED = False
+
+
+def _configure_ptb_logging():
+    """Apply minimal formatting to PTB loggers (idempotent)."""
+    global _PTB_LOG_CONFIGURED
+    if _PTB_LOG_CONFIGURED:
+        return
+    filt = _PTBDropTraceback()
+    for name in PTB_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.setLevel(PTB_LOG_LEVEL)
+        if PTB_STRIP_TRACEBACK:
+            logger.addFilter(filt)
+    _PTB_LOG_CONFIGURED = True
 
 
 # =======================
@@ -103,7 +144,6 @@ class ConsoleUI:
     def __init__(self, eng: "BotEngine"):
         self.eng = eng
         self._alive = True
-        self._printer_lock = threading.Lock()
         self._hist_file = os.path.expanduser("~/.rv_console_history")
         self._setup_readline()
 
@@ -149,9 +189,7 @@ class ConsoleUI:
 
     # ----- I/O -----
     def _print(self, msg: str):
-        with self._printer_lock:
-            sys.stdout.write(msg + "\n")
-            sys.stdout.flush()
+        self.eng._send_text_console(msg)
 
     # ----- main loop -----
     def run(self):
@@ -166,8 +204,7 @@ class ConsoleUI:
             if line in (":q", ":quit", ":exit"):
                 break
             try:
-                out = self.eng.dispatch_command(line, chat_id=0, origin="console")
-                self._print(out or "⏳ thinking…")
+                self.eng.dispatch_command(line, chat_id=0, origin="console")
             except Exception as e:
                 log().exc(e, where="console.dispatch")
                 self._print(f"Error: {e}")
@@ -210,6 +247,7 @@ class BotEngine:
     """
 
     def __init__(self, cfg: AppConfig):
+        _configure_ptb_logging()
         # keep imports local to avoid cycles when possible
         from thinkers1 import ThinkerManager
         from commands import CommandRegistry
@@ -234,8 +272,9 @@ class BotEngine:
         self._app = None
         self._tg_thread: Optional[threading.Thread] = None
 
-        # fan-out sinks for send_text()
-        self._text_sinks: List[Callable[[str], None]] = []
+        # rendering sinks
+        self._sinks: List[str] = []
+        self._console_lock = threading.Lock()
 
         # book-keeping
         self._excepthook_installed = False
@@ -275,6 +314,9 @@ class BotEngine:
         # Registry (commands) — single canonical instance
         self._registry = build_registry()
 
+        # reset sinks
+        self._sinks = []
+
         # Telegram (optional)
         if self.cfg.TELEGRAM_ENABLED:
             try:
@@ -295,17 +337,15 @@ class BotEngine:
                 log().info("Telegram: application prepared")
 
                 # Register Telegram as a text sink for alerts/heartbeats/etc.
-                self._text_sinks.append(self._send_text_telegram)
+                self._sinks.append("telegram")
             except Exception as e:
                 log().exc(e, where="engine.telegram.init")
                 log().warn("Telegram disabled due to initialization error")
                 self._app = None
 
         # Console sink (for alerts etc.), independent of whether ConsoleUI is actually run
-        if getattr(self.cfg, "CONSOLE_ENABLED", False):
-            self._text_sinks.append(self._send_text_console)
-
-        # If no sinks at all, we still fall back to logs in send_text()
+        if self.cfg.CONSOLE_ENABLED and "console" not in self._sinks:
+            self._sinks.append("console")
 
         # Schedule periodic jobs (always via our own scheduler)
         tick_sec = int(self.cfg.THINKING_SEC or 15)
@@ -322,12 +362,13 @@ class BotEngine:
     # ---------- text sinks ----------
     def _send_text_console(self, text: str) -> None:
         """Basic console sink for alerts/heartbeats."""
-        sys.stdout.write(text + "\n")
-        sys.stdout.flush()
+        with self._console_lock:
+            sys.stdout.write(text + "\n")
+            sys.stdout.flush()
 
     def _send_text_telegram(self, text: str) -> None:
         """Telegram sink for alerts/heartbeats."""
-        if not getattr(self.cfg, "TELEGRAM_ENABLED", False):
+        if not self.cfg.TELEGRAM_ENABLED:
             return
         if not self._app:
             return
@@ -346,15 +387,7 @@ class BotEngine:
         Fan-out text to all configured sinks (console, Telegram, etc.).
         Used for alerts, heartbeats, thinker messages, etc.
         """
-        sinks = self._text_sinks or []
-        if not sinks:
-            log().info("ALERT", text=text)
-            return
-        for fn in sinks:
-            try:
-                fn(text)
-            except Exception as e:
-                log().exc(e, where="send_text.sink")
+        self._render_co(text)
 
     # def send_photo(self, path: str, caption: str | None = None):
     #     """
@@ -365,7 +398,7 @@ class BotEngine:
     #         log().warn("engine.send_photo.missing", path=path)
     #         return
     #
-    #     if getattr(self.cfg, "TELEGRAM_ENABLED", False) and self._app is not None:
+    #     if self.cfg.TELEGRAM_ENABLED and self._app is not None:
     #         try:
     #             with open(path, "rb") as f:
     #                 self._app.create_task(
@@ -394,7 +427,7 @@ class BotEngine:
 
     def _send_photo_telegram(self, path: str, caption: str | None = None) -> None:
         """Telegram sink for photos."""
-        if not getattr(self.cfg, "TELEGRAM_ENABLED", False):
+        if not self.cfg.TELEGRAM_ENABLED:
             raise RuntimeError("Telegram disabled (TELEGRAM_ENABLED=False)")
         if self._app is None:
             raise RuntimeError("Telegram Application not initialized")
@@ -575,7 +608,7 @@ class BotEngine:
           - else: idle loop until Ctrl+C
         """
         self.start()
-        console_enabled = bool(getattr(self.cfg, "CONSOLE_ENABLED", False))
+        console_enabled = bool(self.cfg.CONSOLE_ENABLED)
 
         # simple signal-aware loop
         def _sig_handler(_sig, _frm):
@@ -618,9 +651,8 @@ class BotEngine:
         try:
             log().debug("Gonna think ...")
             self.refresh_klines_cache()
-            n = self.tm.run_once()
-            if n:
-                log().debug("thinkers.cycle", actions=n)
+            n_ok, n_fail = self.tm.run_once()
+            log().debug("thinkers.cycle", n_ok=n_ok, n_fail=n_fail)
         except Exception as e:
             log().exc(e, where="job.thinkers")
 
@@ -631,38 +663,30 @@ class BotEngine:
         assert isinstance(result, CO)
         return result
 
-    def _render_command_result(self, result: List["CO", str], origin: str, chat_id: int = 0, ) -> str:
-        """
-        - console: return a printable string
-        - telegram: components send their own messages/photos;
-          returned string is mostly for tests/logging.
-        """
-
+    def _render_co(self, result: object, sinks: Optional[List[str]] = None) -> None:
         co = self._normalize_command_output(result)
-        lines: list[str] = []
-
-        for c in co.components:  # type: ignore[attr-defined]
-            if origin == "telegram":
-                out = c.render_telegram(self)
-                if out:
-                    # For Telegram, text lines are sent as generated, because render_telegram() may send photos, which
-                    # must stay in sync with the messages
-                    self._send_text_telegram(out)
-            else:
-                out = c.render_console(self)
-
-            if out:
-                lines.append(str(out))
-
-        return "\n".join(lines).strip()
+        targets = list(sinks) if sinks else list(self._sinks)
+        if not targets:
+            log().info("render_co.no_sinks", text="; ".join(str(c) for c in co.components))
+            return
+        for sink in targets:
+            for comp in co.components:  # type: ignore[attr-defined]
+                try:
+                    if sink == "telegram":
+                        comp.render_telegram(self)
+                    elif sink == "console":
+                        comp.render_console(self)
+                    else:
+                        log().warn("render_co.unknown_sink", sink=sink)
+                except Exception as e:
+                    log().exc(e, where="render_co", sink=sink, component=comp.__class__.__name__)
 
     def dispatch_command(self, text: str, chat_id: int = 0, origin: str = "console") -> str:
         """Build context and route through the registry, then render per-origin."""
-        if not self._registry:
-            raise RuntimeError("Command registry not initialized")
+        assert self._registry
         raw = self._registry.dispatch(self, text)
-        ret = self._render_command_result(raw, origin=origin, chat_id=chat_id)
-        return ret
+        self._render_co(raw, sinks=[origin])
+        return ""
 
     # ---------- telegram handlers ----------
     async def _cmd_start(self, update, context):

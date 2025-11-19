@@ -98,9 +98,11 @@ class OCText(OC):
             raise ValueError("TextComponent requires 'text'")
 
     def render_console(self, eng: BotEngine) -> str:
+        eng._send_text_console(self.text)
         return self.text
 
     def render_telegram(self, eng: BotEngine) -> str:
+        eng._send_text_telegram(self.text)
         return self.text
 
 
@@ -114,6 +116,7 @@ class OCMarkDown(OC):
 
     def render_console(self, eng: BotEngine) -> str:
         if not RENDER_MARKDOWN:
+            eng._send_text_console(self.text)
             return self.text
         console = Console(
             theme=RICH_MD_THEME,
@@ -126,10 +129,11 @@ class OCMarkDown(OC):
         rendered = cap.get()
         # Collapse excessive blank lines that can appear between markdown blocks
         rendered = re.sub(r"\n{2,}", "\n\n", rendered)
+        eng._send_text_console(rendered)
         return rendered
 
     def render_telegram(self, eng: BotEngine) -> str:
-        # send as-is; Telegram can deal with some markdown if you later enable parse_mode
+        eng._send_text_telegram(self.text)
         return self.text
 
 
@@ -147,8 +151,12 @@ class OCPhoto(OC):
             eng._send_photo_console(self.path, caption=self.caption)
         except Exception as e:
             log().exc(e, where="PhotoComponent.render_console", path=self.path)
-            return f"[photo error: {e}]"
-        return f"[photo: {self.path}]"
+            msg = f"[photo error: {e}]"
+            eng._send_text_console(msg)
+            return msg
+        placeholder = f"[photo: {self.path}]"
+        eng._send_text_console(placeholder)
+        return placeholder
 
     def render_telegram(self, eng: BotEngine) -> str:
         try:
@@ -156,7 +164,10 @@ class OCPhoto(OC):
         except Exception as e:
             log().exc(e, where="OCPhoto.render_telegram", path=self.path)
             msg = f"[photo error: {e}]"
+            eng._send_text_telegram(msg)
             return msg
+        if self.caption:
+            eng._send_text_telegram(self.caption)
         return self.caption or ""
 
 
@@ -173,28 +184,26 @@ class OCTable(OC):
 
     def render_console(self, eng: BotEngine) -> str:
         if not self.rows:
+            eng._send_text_console("(empty)")
             return "(empty)"
-        return tabulate.tabulate(self.rows, headers=self.headers, tablefmt="github")
-        #     except Exception as e:
-        #         log().exc(e, where="TableComponent.render_console.tabulate")
-        # # Fallback formatting
-        # lines: List[str] = []
-        # for row in self.rows:
-        #     parts = [f"{h}: {v}" for h, v in zip(self.headers, row)]
-        #     lines.append("; ".join(parts) if parts else "(empty row)")
-        # return "\n".join(lines)
+        text = tabulate.tabulate(self.rows, headers=self.headers, tablefmt="github")
+        eng._send_text_console(text)
+        return text
 
     def render_telegram(self, eng: BotEngine) -> str:
         if not self.rows:
             msg = "(empty)"
+            eng._send_text_telegram(msg)
             return msg
-        
-        ret = []
+
+        lines = []
         for row in self.rows:
             parts = [f"{h}: {v}" for h, v in zip(self.headers, row)]
             line = "; ".join(parts) if parts else "(empty row)"
-            ret.append(line)
-        return line
+            lines.append(line)
+        body = "\n".join(lines)
+        eng._send_text_telegram(body)
+        return body
 
 
 class CO:
@@ -833,17 +842,17 @@ def build_registry() -> CommandRegistry:
     @R.at("thinker-kinds")
     def _at_thinker_kinds(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List available thinker kinds (from factory auto-discovery)."""
-        try:
-            kinds = list(eng.thinkers.factory.kinds())
-        except Exception:
-            kinds = []
-        body = "\n".join(f"- {k}" for k in sorted(kinds)) if kinds else "(none)"
-        return _md("# Thinker kinds\n" + body)
+        kinds = list(eng.tm.factory.kinds())
+        ndigits = len(str(len(kinds)-1))
+        body = "\n".join(f"- [{i:0{ndigits}d}] {k}" for i, k in enumerate(kinds))
+        return _md("# Thinker kinds\n" + body + "\n\n*Use either index or kind name to create new thinkers")
 
     # ----------------------- THINKER ENABLE -----------------------
     @R.bang("thinker-enable", argspec=["id"])
     def _bang_thinker_enable(eng: BotEngine, args: Dict[str, str]) -> CO:
-        """Enable a thinker by ID. Usage: !thinker-enable <id>"""
+        """Enable a thinker by ID.
+
+        Usage:: !thinker-enable <id>"""
         tid = args["id"].strip()
         if not tid.isdigit():
             return _txt("Usage: !thinker-enable <id>")
@@ -874,6 +883,39 @@ def build_registry() -> CommandRegistry:
             return _txt("Usage: !thinker-rm <id>")
         eng.store.delete_thinker(int(tid))
         return _txt(f"Thinker #{tid} deleted.")
+
+    # ----------------------- THINKER NEW -----------------------
+    @R.bang("thinker-new", argspec=["kind"], options=["enabled"])
+    def _bang_thinker_new(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Create a new thinker row.
+
+        Usage:
+          !thinker-new <kind|index> [enabled:0|1]
+        """
+        kind_arg = args["kind"].strip()
+        factory = eng.tm.factory
+        kinds = list(factory.kinds())
+        kind: str
+        if kind_arg.isdigit():
+            idx = int(kind_arg)
+            if idx < 0 or idx >= len(kinds):
+                return _txt(f"Kind index out of range (0-{len(kinds)-1}).")
+            kind = kinds[idx]
+        else:
+            kind = kind_arg.upper()
+            if kind not in kinds:
+                return _txt(f"Unknown thinker kind '{kind}'. Use @thinker-kinds for a list.")
+
+        enabled_opt = args.get("enabled")
+        enabled_val = 1
+        if enabled_opt is not None:
+            enabled_val = 1 if enabled_opt.strip() not in ("0", "false", "False") else 0
+
+        tid = eng.store.insert_thinker(kind, config={})
+        if not enabled_val:
+            eng.store.update_thinker_enabled(tid, False)
+        return _txt(f"Thinker #{tid} created (kind={kind}, enabled={bool(enabled_val)}).")
 
     # ----------------------- ALERT -----------------------
     @R.bang("alert", argspec=["symbol", "op", "price"], options=["msg"])
@@ -1270,16 +1312,11 @@ def build_registry() -> CommandRegistry:
 def _last_cached_price(eng: BotEngine, symbol: str) -> Optional[float]:
     """Latest cached close from KlinesCache (first configured timeframe)."""
     kc = eng.kc
-    if kc is None:
-        return None
-    tfs = getattr(eng.cfg, "KLINES_TIMEFRAMES", None) or ["1m"]
+    tfs = eng.cfg.KLINES_TIMEFRAMES or ["1m"]
     for tf in tfs:
-        try:
-            r = kc.last_row(symbol, tf)
-            if r and r["close"] is not None:
-                return float(r["close"])
-        except Exception:
-            pass
+        r = kc.last_row(symbol, tf)
+        if r and r["close"] is not None:
+            return float(r["close"])
     return None
 
 def _fmt_num(x: Any, nd=2) -> str:

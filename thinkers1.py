@@ -4,15 +4,19 @@
 from __future__ import annotations
 import json, math, sqlite3, time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, Union, TYPE_CHECKING
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle, PositionBook
 from klines_cache import KlinesCache
 from common import log, Clock, AppConfig
-from contracts import EngineServices
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 from common import Log, sublog
+import common
+
+if TYPE_CHECKING:
+    from commands import CO
+    from bot_api import BotEngine
 
 # -----------------------------
 # Thinker Registry/Factory
@@ -21,7 +25,10 @@ from common import Log, sublog
 import sys, inspect
 
 def _parse_json(blob: Optional[str]) -> Dict[str, Any]:
-    return json.loads(blob or "{}")
+    try:
+        return json.loads(blob or "{}")
+    except Exception:
+        return {}
 
 # -----------------------------
 # Manager (DB + wiring + loop)
@@ -35,14 +42,13 @@ class ThinkerManager:
     You own the 'emit_alert' function (e.g., Telegram send).
     """
 
-    def __init__(self, eng: EngineServices):
+    def __init__(self, eng: BotEngine):
         self.eng = eng
         self.store = eng.store
         self._instances: Dict[int, ThinkerBase] = {}    # id -> instance
         self._configs: Dict[int, Dict[str, Any]] = {}  # id -> config dict
         self.log = sublog("thinking")
-
-        self.factory = ThinkerFactory()
+        self.factory = ThinkerFactory(self, eng)
 
     # --- load/instantiate
     # TODO what when thinkers are activated/deactivated/deleted when the system is running?
@@ -56,6 +62,8 @@ class ThinkerManager:
         inst = self.factory.create(tr["kind"])
         config = _parse_json(tr["config_json"])
         inst.init(config)
+        runtime = _parse_json(tr["runtime_json"])
+        inst.attach_runtime(tid, self.store, runtime, self.eng)
         self._instances[tid] = inst
         self._configs[tid] = config
         self.log.info("thinker.ready", id=tid, kind=tr["kind"])
@@ -68,7 +76,7 @@ class ThinkerManager:
         """
         now = now_ms or Clock.now_utc_ms()
 
-        actions = 0
+        n_ok, n_fail = 0, 0
         rows = self._load()
         self.log.debug(f"Thinking ... {len(rows)} thinkers ...")
         for tr in rows:
@@ -76,61 +84,65 @@ class ThinkerManager:
             tid = int(tr["id"])
             inst = self._instances[tid]
             try:
-                out = inst.tick(self.eng, now)
+                msg = inst.tick(now)
+                if msg:
+                    self.log_event(tid, "INFO", msg)
+                n_ok += 1
             except Exception as e:
                 log().exc(e, where="thinker.tick", thinker_id=tid, kind=tr["kind"])
                 self.store.log_thinker_event(tid, "ERROR", f"tick failed: {e}", {})
-                continue
+                n_fail += 1
 
-            if not out:
-                continue
+        return n_ok, n_fail
 
-            for act in out:
-                actions += 1
-                # Persist to state log
-                self.store.log_thinker_event(tid, act.level, act.text, act.payload)
+    def log_event(self, tid, level, message, **kwargs):
+        assert level in common.LV
+        self.store.log_thinker_event(tid, level, message, payload=kwargs)
+        log()._emit(level, message, **kwargs)
 
-                # Emit alerts externally
-                if act.type == "ALERT":
-                    try:
-                        self.eng.emit_alert(f"{act.text}")
-                    except Exception as e:
-                        log().exc(e, where="thinker.emit_alert", thinker_id=tid)
-
-            # Optional: allow thinkers to persist small runtime snapshots (e.g. last psar)
-            # Convention: if action payload has "_runtime", we persist it.
-            # (Lightweight pattern to avoid deep couplings.)
-            _rts = [a.payload.get("_runtime") for a in out if isinstance(a.payload, dict) and a.payload.get("_runtime")]
-            if _rts:
-                try:
-                    rt = _parse_json(tr["runtime_json"])
-                    rt.update(_rts[-1])  # last wins
-                    self.store.con.execute("UPDATE thinkers SET runtime_json=?, updated_ts=? WHERE id=?",
-                                           (json.dumps(rt, ensure_ascii=False), now, tid))
-                    self.store.con.commit()
-                except Exception as e:
-                    log().exc(e, where="thinker.persist_runtime", thinker_id=tr.id)
-
-        return actions
 
 # -----------------------------
 # Thinker Factory
 # -----------------------------
 
 class ThinkerFactory:
-    def __init__(self):
+    def __init__(self, tm: ThinkerManager, eng: BotEngine):
         self._map = {}
+        self._kinds = []
+        self.tm = tm
+        self.eng = eng
         import thinkers2
         module = sys.modules["thinkers2"]  # self reference
-        for _, obj in inspect.getmembers(module, inspect.isclass):
-            if hasattr(obj, "kind") and getattr(obj, "kind", None):
-                self._map[obj.kind] = obj
+        for _, cls in inspect.getmembers(module, inspect.isclass):
+            if issubclass(cls, ThinkerBase) and cls != ThinkerBase:
+                assert cls.kind, f"Please be kind enough to specify {cls.__name__}.kind"
+                self._map[cls.kind] = cls
+                self._kinds.append(cls.kind)
+        assert self._map, "No thinkers found, this must be a bug"
 
-    def create(self, kind: str) -> ThinkerBase:
+    def create(self, kind: Union[str, int]) -> ThinkerBase:
+        """
+        Create new thinker identified by kind
+
+        Arguments:
+            kind: thinker kind or index within self._kinds
+
+        Returns:
+            new thinker
+        """
+        if isinstance(kind, int):
+            n = len(self._kinds)
+            if kind >= n:
+                raise ValueError(f"Invalid kind index: {kind} (maximum: {n})")
+            kind = self._kinds[kind]
+
         cls = self._map.get(kind)
         if not cls:
             raise ValueError(f"Unknown thinker kind: {kind}")
-        return cls()
+        return cls(self.tm, self.eng)
+
+    def kinds(self):
+        return self._kinds
 
 
 # -----------------------------
@@ -138,27 +150,43 @@ class ThinkerFactory:
 # -----------------------------
 
 class ThinkerBase(ABC):
-    kind: str  # e.g. "THRESHOLD_ALERT", "PSAR_STOP"
+    kind: str = None  # e.g. "THRESHOLD_ALERT", "PSAR_STOP"
+    required_fields: Tuple[str, ...] = ()
+
+    def __init__(self, tm: ThinkerManager, eng: BotEngine):
+        self.tm = tm
+        self.eng = eng
+        self._cfg: Dict[str, Any] = {}
+        self._runtime: Dict[str, Any] = {}
+        self._thinker_id: Optional[int] = None
+
+    def init(self, config: Dict[str, Any]) -> None:
+        self._cfg = dict(config or {})
+        self._runtime = {}
+        missing = [k for k in self.required_fields if k not in self._cfg]
+        if missing:
+            raise ValueError(f"{self.__class__.__name__} missing {', '.join(missing)}")
+        self.on_init()
+
+    def attach_runtime(self, thinker_id: int, store: Storage, runtime: Dict[str, Any]):
+        self._thinker_id = int(thinker_id)
+        self._store = store
+        self._runtime = dict(runtime or {})
+
+    def runtime(self) -> Dict[str, Any]:
+        return self._runtime
+
+    def save_runtime(self):
+        if self._store is None or self._thinker_id is None:
+            return
+        self.eng.store.update_thinker_runtime(self._thinker_id, self._runtime)
+
+    def notify(self, level: str, message: str, **kwargs) -> None:
+        self.tm.log_event(self._thinker_id, level, message, **kwargs)
+
+    def on_init(self) -> None:
+        """Hook for subclasses after config validation."""
+        return
 
     @abstractmethod
-    def init(self, config: Dict[str, Any]) -> None: ...
-
-    @abstractmethod
-    def tick(self, eng: EngineServices, now_ms: int) -> List["ThinkerAction"]: ...
-
-
-@dataclass
-class ThinkerAction:
-    """
-    Unified action envelope emitted by thinkers.
-
-    type: "ALERT" | "LOG" | (future: "ORDER")
-    level: freeform ("INFO","WARN","CRIT") for ALERT/LOG convenience
-    text: human-readable message
-    payload: structured dict (for logs, state, or downstream integrations)
-    """
-    type: str
-    level: str
-    text: str
-    payload: Dict[str, Any]
-
+    def tick(self, now_ms: int) -> int: ...

@@ -10,7 +10,10 @@ import threading
 from typing import Optional, Union
 
 
-__all__ = ["AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when", "ts_human"]
+__all__ = ["AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when", "ts_human", "LV"]
+
+
+LV = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 
 # =======================
 # ====== CONFIG =========
@@ -158,11 +161,10 @@ def ts_human(ms: int | datetime | None) -> str:
 # =======================
 
 class Log:
-    LV = {"DEBUG":10, "INFO":20, "WARN":30, "ERROR":40}
-
     def __init__(self, level="INFO", stream=None, json_mode=False, name=None, context=None):
+        assert level in LV
         self.stream = stream or sys.stdout
-        self.level  = self.LV.get(str(level).upper(), 20)
+        self.level  = LV[level]
         self.json_mode = bool(json_mode)
         self.name   = name  # e.g., 'rv.worker'
         self.ctx    = dict(context or {})

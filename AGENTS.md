@@ -17,6 +17,11 @@
 - Use `log()` for structured logging with context keys (`position_id`, `symbol`, `job`).
 - Register new commands via `CommandRegistry.at` (read-only) or `CommandRegistry.bang` (writes) and keep docstrings concise for auto-help.
 - Prefer explicit errors over silent fallbacks; fail fast on missing config or schema.
+- Dont do things like `getattr(eng, "BLAH", None)`, go for eng["BLAH"] (fail early!)
+- Don't suppress exceptions silently, ever!
+- Don't catch exceptions to provide fallback values, ever!
+- Use assertions if you fear sth may be subject to coder's error
+- I don't care about backwards compatibility, I would rather refactor all my code to comply to newly devised standard and keep it as compact as possible, OK?
 
 ## Testing Guidelines
 - No unit-test suite is maintained; rely on manual smoke checks instead of adding tests.

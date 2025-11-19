@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 import sqlite3, time, math
-from typing import Iterable, List, Tuple, Optional, Dict, Any
+from typing import Iterable, List, Tuple, Optional, Dict, Any, TYPE_CHECKING
 from dataclasses import dataclass
 import threading
-
-from contracts import EngineServices
 from common import tf_ms
+
+if TYPE_CHECKING:
+    from bot_api import BotEngine
 
 @dataclass
 class KlineRow:
@@ -57,20 +58,14 @@ class KlinesCache:
         rows = cache.last_n("ETHUSDT", "1m", n=500, include_live=False)  # returns list[sqlite3.Row]-like
     """
 
-    def __init__(self, eng: EngineServices):
-        """
-        Open/create the SQLite cache.
-
-        Args:
-            eng: EngineServices providing cfg (with KLINES_CACHE_DB_PATH) and api.
-        """
+    def __init__(self, eng: BotEngine):
+        """Open/create the SQLite cache."""
+        path_ = eng.cfg.KLINES_CACHE_DB_PATH
+        assert path_, "AppConfig must define KLINES_CACHE_DB_PATH"
         self.eng = eng
         self.cfg = eng.cfg
         self.api = eng.api
-
-        self.db_path = self.cfg.KLINES_CACHE_DB_PATH
-        if not self.db_path:
-            raise ValueError("AppConfig must define KLINES_CACHE_DB_PATH")
+        self.db_path = path_
 
         self.con = sqlite3.connect(self.db_path, check_same_thread=False)
         self.con.row_factory = sqlite3.Row

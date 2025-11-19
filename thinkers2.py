@@ -3,22 +3,20 @@
 # FILE: thinkers1.py
 
 from __future__ import annotations
-import json, math, sqlite3, time
+import json, math, sqlite3, time, random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
-from contracts import EngineServices
 from common import log, Clock, AppConfig
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, TYPE_CHECKING
 from thinkers1 import ThinkerBase, ThinkerAction
+import random
 
-# -----------------------------
-# Thinker Registry/Factory
-# -----------------------------
+if TYPE_CHECKING:
+    from bot_api import BotEngine
 
-import inspect, sys
 
 
 # --------------------------------
@@ -40,23 +38,16 @@ class ThresholdAlertThinker(ThinkerBase):
     """
     kind = "THRESHOLD_ALERT"
 
-    def __init__(self):
-        self._cfg: Dict[str, Any] = {}
+    required_fields = ("symbol", "direction", "price")
 
-    def init(self, config: Dict[str, Any]) -> None:
-        self._cfg = dict(config or {})
-        mandatory = ("symbol", "direction", "price")
-        for k in mandatory:
-            if k not in self._cfg:
-                raise ValueError(f"ThresholdAlertThinker missing '{k}'")
-
+    def on_init(self) -> None:
         d = self._cfg["direction"].upper()
         if d not in ("ABOVE", "BELOW"):
             raise ValueError("direction must be ABOVE or BELOW")
         self._cfg["direction"] = d
         self._cfg["price"] = float(self._cfg["price"])
 
-    def tick(self, eng: EngineServices, now_ms: int) -> List[ThinkerAction]:
+    def tick(self, eng: BotEngine, now_ms: int) -> List[ThinkerAction]:
         sym = self._cfg["symbol"]
         pr = _mark_close_now(eng, sym)
         if pr is None:
@@ -104,14 +95,9 @@ class PSARStopThinker(ThinkerBase):
     """
     kind = "PSAR_STOP"
 
-    def __init__(self):
-        self._cfg: Dict[str, Any] = {}
+    required_fields = ("position_id", "symbol", "direction")
 
-    def init(self, config: Dict[str, Any]) -> None:
-        self._cfg = dict(config or {})
-        for k in ("position_id", "symbol", "direction"):
-            if k not in self._cfg:
-                raise ValueError(f"PSAR missing '{k}'")
+    def on_init(self) -> None:
         self._cfg["af"] = float(self._cfg.get("af", 0.02))
         self._cfg["max_af"] = float(self._cfg.get("max_af", 0.2))
         self._cfg["window_min"] = int(self._cfg.get("window_min", 200))
@@ -181,7 +167,7 @@ class PSARStopThinker(ThinkerBase):
 
         return psar, ep, af, ("UP" if up else "DOWN")
 
-    def tick(self, eng: EngineServices, now_ms: int) -> List[ThinkerAction]:
+    def tick(self, eng: BotEngine, now_ms: int) -> List[ThinkerAction]:
         sym = self._cfg["symbol"]
         mins = self._cfg["window_min"]
         rows = _minute_klines(eng, sym, mins)
@@ -226,34 +212,22 @@ def _leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float]
     return (float(mark) - float(entry)) * float(qty)
 
 
-def _last_cached_price(eng, symbol: str) -> Optional[float]:
-    kc = getattr(eng, "kc", None)
-    if kc is None:
-        return None
-    cfg = getattr(eng, "cfg", None)
-    tfs = getattr(cfg, "KLINES_TIMEFRAMES", None) or ["1m"]
+def _last_cached_price(eng: BotEngine, symbol: str) -> Optional[float]:
+    kc = eng.kc
+    tfs = eng.cfg.KLINES_TIMEFRAMES or ["1m"]
     for tf in tfs:
-        try:
-            r = kc.last_row(symbol, tf)
-            if r and r["close"] is not None:
-                return float(r["close"])
-        except Exception:
-            continue
+        r = kc.last_row(symbol, tf)
+        if r and r["close"] is not None:
+            return float(r["close"])
     return None
 
 
-def _mark_close_now(eng, symbol: str) -> Optional[float]:
+def _mark_close_now(eng: BotEngine, symbol: str) -> Optional[float]:
     return _last_cached_price(eng, symbol)
 
 
-def _minute_klines(eng, symbol: str, mins: int) -> List:
-    kc = getattr(eng, "kc", None)
-    if kc is None:
-        return []
-    try:
-        return kc.last_n(symbol, "1m", mins, include_live=True, asc=True)
-    except Exception:
-        return []
+def _minute_klines(eng: BotEngine, symbol: str, mins: int) -> List:
+    return eng.kc.last_n(symbol, "1m", mins, include_live=True, asc=True)
 
 
 class RiskThinker(ThinkerBase):
@@ -268,20 +242,17 @@ class RiskThinker(ThinkerBase):
     """
     kind = "RISK_MONITOR"
 
-    def __init__(self):
-        self._cfg: Dict[str, Any] = {}
+    def __init__(self, eng: BotEngine):
+        self._last_alert_ms: int = 0
+        super().__init__(eng)
         self._last_alert_ms: int = 0
 
-    def init(self, config: Dict[str, Any]) -> None:
-        self._cfg = dict(config or {})
-        for k in ("warn_exposure_ratio", "warn_loss_mult", "min_alert_interval_ms"):
-            if k not in self._cfg:
-                raise ValueError(f"RiskThinker missing '{k}'")
-        self._cfg["warn_exposure_ratio"] = float(self._cfg["warn_exposure_ratio"])
-        self._cfg["warn_loss_mult"] = float(self._cfg["warn_loss_mult"])
-        self._cfg["min_alert_interval_ms"] = int(self._cfg["min_alert_interval_ms"])
+    def on_init(self) -> None:
+        self._cfg["warn_exposure_ratio"] = float(self._cfg.get("warn_exposure_ratio", 1.0))
+        self._cfg["warn_loss_mult"] = float(self._cfg.get("warn_loss_mult", 1.0))
+        self._cfg["min_alert_interval_ms"] = int(self._cfg.get("min_alert_interval_ms", 300_000))
 
-    def tick(self, eng: EngineServices, now_ms: int) -> List[ThinkerAction]:
+    def tick(self, eng: BotEngine, now_ms: int) -> List[ThinkerAction]:
         cfg = eng.store.get_config()
         ref_balance = cfg["reference_balance"]
         leverage = cfg["leverage"]
@@ -385,3 +356,47 @@ class RiskThinker(ThinkerBase):
             text="[risk] " + "; ".join(alerts),
             payload=payload
         )]
+
+class HorseWithNoName(ThinkerBase):
+    """Proof-of-concept thinker"""
+    kind = "HORSE_WITH_NO_NAME"
+    required_fields: Tuple[str, ...] = ()
+
+    LYRICS = [
+"On the first part of the journey",
+"I was looking at all the life",
+"There were plants and birds and rocks and things",
+"There was sand and hills and rings",
+"The first thing I met was a fly with a buzz",
+"And the sky with no clouds",
+"The heat was hot, and the ground was dry",
+"But the air was full of sound",
+"I've been through the desert",
+"On a horse with no name",
+"It felt good to be out of the rain",
+"In the desert, you can remember your name",
+"'Cause there ain't no one for to give you no pain",
+"After two days in the desert sun",
+"My skin began to turn red",
+"After three days in the desert fun",
+"I was looking at a river bed",
+"And the story it told of a river that flowed",
+"Made me sad to think it was dead",
+"After nine days, I let the horse run free",
+"'Cause the desert had turned to sea",
+"There were plants and birds and rocks and things",
+"There was sand and hills and rings",
+"The ocean is a desert with it's life underground",
+"And a perfect disguise above",
+"Under the cities lies a heart made of ground",
+"But the humans will give no love",
+    ]
+
+    def on_init(self):
+        self._cfg["prob"] = float(self._cfg.get("prob") or 0.1)
+
+    def tick(self, eng: BotEngine, now_ms: int) -> List[ThinkerAction]:
+        if random.random() < self._cfg["prob"]:
+            line = random.choice(self.LYRICS)
+
+        return []

@@ -426,6 +426,11 @@ class Storage:
     def list_thinkers(self) -> List[sqlite3.Row]:
         return self.con.execute("SELECT * FROM thinkers ORDER BY id").fetchall()
 
+    def update_thinker_runtime(self, thinker_id: int, runtime: dict) -> None:
+        with self.txn(write=True) as cur:
+            cur.execute("""UPDATE thinkers SET runtime_json=?, updated_ts=? WHERE id=?""",
+                        (json.dumps(runtime or {}, ensure_ascii=False), Clock.now_utc_ms(), int(thinker_id)))
+
     def log_thinker_event(self, thinker_id: int, level: str, message: str, payload: dict | None = None):
         with self.txn(write=True) as cur:
             cur.execute("""INSERT INTO thinker_state_log(thinker_id, ts, level, message, payload_json)
