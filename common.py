@@ -172,7 +172,7 @@ class Log:
 
     # ---- composition ----
     def set_level(self, level:str):
-        self.level = self.LV.get(str(level).upper(), self.level)
+        self.level = LV.get(str(level).upper(), self.level)
         return self
 
     def child(self, name:str):
@@ -187,13 +187,13 @@ class Log:
     # ---- emitters ----
     @property
     def level_name(self):
-        for k,v in self.LV.items():
+        for k,v in LV.items():
             if v == self.level: return k
         # not found (custom), return numeric
         return str(self.level)
 
     def _emit(self, lvname:str, msg:str, **fields):
-        if self.LV[lvname] < self.level:
+        if LV[lvname] < self.level:
             return
         ts = ts_human(Clock.now_utc_ms())
         merged = {**self.ctx, **fields} if (fields or self.ctx) else None

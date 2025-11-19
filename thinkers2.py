@@ -5,18 +5,15 @@
 from __future__ import annotations
 import json, math, sqlite3, time, random
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CHECKING
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
+from commands import OCMarkDown
 from common import log, Clock, AppConfig
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, TYPE_CHECKING
-from thinkers1 import ThinkerBase, ThinkerAction
-import random
+from thinkers1 import ThinkerBase
 
 if TYPE_CHECKING:
     from bot_api import BotEngine
-
 
 
 # --------------------------------
@@ -47,25 +44,24 @@ class ThresholdAlertThinker(ThinkerBase):
         self._cfg["direction"] = d
         self._cfg["price"] = float(self._cfg["price"])
 
-    def tick(self, eng: BotEngine, now_ms: int) -> List[ThinkerAction]:
+    def tick(self, now_ms: int) -> Any:
         sym = self._cfg["symbol"]
-        pr = _mark_close_now(eng, sym)
+        pr = _mark_close_now(self.eng, sym)
         if pr is None:
-            return []
+            return
 
         msg = self._cfg.get("message") or f"{sym} {self._cfg['direction']} {self._cfg['price']}"
         thr = self._cfg["price"]; dir_ = self._cfg["direction"]
 
         hit = (pr >= thr) if dir_ == "ABOVE" else (pr <= thr)
         if not hit:
-            return [ThinkerAction("LOG", "DEBUG", f"[thr] {sym}={pr:.4f} vs {dir_} {thr}", {"symbol": sym, "price": pr})]
+            self.notify("DEBUG", f"[thr] {sym}={pr:.4f} vs {dir_} {thr}",
+                        send=True, symbol=sym, direction=dir_, price=pr)
+            return
 
-        return [ThinkerAction(
-            type="ALERT",
-            level="INFO",
-            text=f"{msg} | last={pr:.4f}",
-            payload={"symbol": sym, "price": pr, "threshold": thr, "direction": dir_}
-        )]
+        self.notify("INFO", f"{msg} | last={pr:.4f}", send=True,
+                    symbol=sym, direction=dir_, price=pr, threshold=thr)
+        return 1
 
 
 class PSARStopThinker(ThinkerBase):
@@ -167,12 +163,12 @@ class PSARStopThinker(ThinkerBase):
 
         return psar, ep, af, ("UP" if up else "DOWN")
 
-    def tick(self, eng: BotEngine, now_ms: int) -> List[ThinkerAction]:
+    def tick(self, now_ms: int):
         sym = self._cfg["symbol"]
         mins = self._cfg["window_min"]
-        rows = _minute_klines(eng, sym, mins)
+        rows = _minute_klines(self.eng, sym, mins)
         if not rows:
-            return []
+            return 0
 
         # Build OHLC tuples (using mark price klines)
         # rows: [open_time, open, high, low, close, volume, close_time, ...]
@@ -185,25 +181,15 @@ class PSARStopThinker(ThinkerBase):
         # - SHORT: stop triggers if close > psar
         hit = (last_close < psar) if self._cfg["direction"] == "LONG" else (last_close > psar)
 
-        payload = {
-            "symbol": sym, "psar": psar, "ep": ep, "af": af, "trend": trend,
-            "last_close": last_close, "direction": self._cfg["direction"]
-        }
-
         if hit:
-            return [ThinkerAction(
-                type="ALERT",
-                level="WARN",
-                text=f"[PSAR] {sym} {self._cfg['direction']} stop hit: close={last_close:.4f} vs psar={psar:.4f}",
-                payload=payload
-            )]
-
-        return [ThinkerAction(
-            type="LOG",
-            level="DEBUG",
-            text=f"[PSAR] {sym} {self._cfg['direction']} ok: close={last_close:.4f} psar={psar:.4f} trend={trend}",
-            payload=payload
-        )]
+            self.notify("WARN", f"[PSAR] {sym} {self._cfg['direction']} stop hit: close={last_close:.4f} vs psar={psar:.4f}",
+                        symbol=sym, psar=psar, ep=ep, af=af, trend=trend, last_close=last_close,
+                        direction=self._cfg["direction"])
+        else:
+            self.notify("DEBUG", f"[PSAR] {sym} {self._cfg['direction']} ok: close={last_close:.4f} psar={psar:.4f} trend={trend}",
+                        symbol=sym, psar=psar, ep=ep, af=af, trend=trend, last_close=last_close,
+                        direction=self._cfg["direction"])
+        return 1
 
 
 def _leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float]) -> Optional[float]:
@@ -252,22 +238,22 @@ class RiskThinker(ThinkerBase):
         self._cfg["warn_loss_mult"] = float(self._cfg.get("warn_loss_mult", 1.0))
         self._cfg["min_alert_interval_ms"] = int(self._cfg.get("min_alert_interval_ms", 300_000))
 
-    def tick(self, eng: BotEngine, now_ms: int) -> List[ThinkerAction]:
-        cfg = eng.store.get_config()
+    def tick(self, now_ms: int):
+        cfg = self.eng.store.get_config()
         ref_balance = cfg["reference_balance"]
         leverage = cfg["leverage"]
         max_exposure = ref_balance * leverage if ref_balance and leverage else None
 
-        rows = eng.store.list_open_positions()
+        rows = self.eng.store.list_open_positions()
         if not rows:
-            return []
+            return 0
 
         involved_syms = set()
         for r in rows:
-            for lg in eng.store.get_legs(r["position_id"]):
+            for lg in self.eng.store.get_legs(r["position_id"]):
                 if lg["symbol"]:
                     involved_syms.add(lg["symbol"])
-        marks = {s: _last_cached_price(eng, s) for s in involved_syms}
+        marks = {s: _last_cached_price(self.eng, s) for s in involved_syms}
 
         total_exposure = 0.0
         exposure_missing = False
@@ -276,7 +262,7 @@ class RiskThinker(ThinkerBase):
 
         for r in rows:
             pid = int(r["position_id"])
-            legs = eng.store.get_legs(pid)
+            legs = self.eng.store.get_legs(pid)
             notional = 0.0
             notional_missing = False
             pos_pnl = 0.0
@@ -330,32 +316,18 @@ class RiskThinker(ThinkerBase):
             )
 
         if not alerts:
-            return []
+            return 0
 
         if now_ms - self._last_alert_ms < self._cfg["min_alert_interval_ms"]:
-            return [ThinkerAction(
-                type="LOG",
-                level="DEBUG",
-                text="[risk] alerts suppressed (cooldown)",
-                payload={"alerts": alerts, "cooldown_ms": self._cfg["min_alert_interval_ms"]}
-            )]
+            self.notify("DEBUG", "[risk] alerts suppressed (cooldown)",
+                        alerts=alerts, cooldown_ms=self._cfg["min_alert_interval_ms"])
+            return len(alerts)
 
         self._last_alert_ms = now_ms
-        payload = {
-            "alerts": alerts,
-            "exposure": total_exposure,
-            "max_exposure": max_exposure,
-            "ref_balance": ref_balance,
-            "leverage": leverage,
-            "positions": payload_positions,
-            "_runtime": {"last_alert_ms": now_ms},
-        }
-        return [ThinkerAction(
-            type="ALERT",
-            level="WARN",
-            text="[risk] " + "; ".join(alerts),
-            payload=payload
-        )]
+        self.notify("WARN", "[risk] " + "; ".join(alerts), send=True,
+                    exposure=total_exposure, max_exposure=max_exposure,
+                    ref_balance=ref_balance, leverage=leverage, positions=payload_positions)
+        return len(alerts)
 
 class HorseWithNoName(ThinkerBase):
     """Proof-of-concept thinker"""
@@ -393,10 +365,9 @@ class HorseWithNoName(ThinkerBase):
     ]
 
     def on_init(self):
-        self._cfg["prob"] = float(self._cfg.get("prob") or 0.1)
+        self._cfg["prob"] = float(self._cfg.get("prob") or 0.99)
 
-    def tick(self, eng: BotEngine, now_ms: int) -> List[ThinkerAction]:
+    def tick(self, now_ms: int):
         if random.random() < self._cfg["prob"]:
             line = random.choice(self.LYRICS)
-
-        return []
+            self.eng._render_co(OCMarkDown(f"> {line}"))

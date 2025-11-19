@@ -6,6 +6,8 @@ import json, math, sqlite3, time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, Union, TYPE_CHECKING
 
+from setuptools.msvc import msvc14_get_vc_env
+
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle, PositionBook
 from klines_cache import KlinesCache
 from common import log, Clock, AppConfig
@@ -63,13 +65,13 @@ class ThinkerManager:
         config = _parse_json(tr["config_json"])
         inst.init(config)
         runtime = _parse_json(tr["runtime_json"])
-        inst.attach_runtime(tid, self.store, runtime, self.eng)
+        inst.attach_runtime(tid, runtime)
         self._instances[tid] = inst
         self._configs[tid] = config
         self.log.info("thinker.ready", id=tid, kind=tr["kind"])
 
     # --- run one cycle
-    def run_once(self, now_ms: Optional[int] = None) -> int:
+    def run_once(self, now_ms: Optional[int] = None) -> Tuple[int, int]:
         """
         Execute one full pass of enabled thinkers.
         Returns number of actions emitted.
@@ -86,7 +88,7 @@ class ThinkerManager:
             try:
                 msg = inst.tick(now)
                 if msg:
-                    self.log_event(tid, "INFO", msg)
+                    self.log_event(tid, "INFO", str(msg))
                 n_ok += 1
             except Exception as e:
                 log().exc(e, where="thinker.tick", thinker_id=tid, kind=tr["kind"])
@@ -168,9 +170,8 @@ class ThinkerBase(ABC):
             raise ValueError(f"{self.__class__.__name__} missing {', '.join(missing)}")
         self.on_init()
 
-    def attach_runtime(self, thinker_id: int, store: Storage, runtime: Dict[str, Any]):
+    def attach_runtime(self, thinker_id: int, runtime: Dict[str, Any]):
         self._thinker_id = int(thinker_id)
-        self._store = store
         self._runtime = dict(runtime or {})
 
     def runtime(self) -> Dict[str, Any]:
@@ -181,12 +182,14 @@ class ThinkerBase(ABC):
             return
         self.eng.store.update_thinker_runtime(self._thinker_id, self._runtime)
 
-    def notify(self, level: str, message: str, **kwargs) -> None:
-        self.tm.log_event(self._thinker_id, level, message, **kwargs)
+    def notify(self, level: str, msg: str, send=False, **kwargs) -> None:
+        self.tm.log_event(self._thinker_id, level, msg, **kwargs)
+        if send:
+            self.eng.send_text(msg)
 
     def on_init(self) -> None:
         """Hook for subclasses after config validation."""
         return
 
     @abstractmethod
-    def tick(self, now_ms: int) -> int: ...
+    def tick(self, now_ms: int): ...

@@ -658,8 +658,8 @@ class BotEngine:
 
     # ---- core output processor ----
     def _normalize_command_output(self, result: object) -> "CO":
-        from commands import CO
-        result = CO(result) if isinstance(result, str) else result
+        from commands import CO, OC
+        result = CO(result) if isinstance(result, (str, OC)) else result
         assert isinstance(result, CO)
         return result
 
