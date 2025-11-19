@@ -514,6 +514,8 @@ def build_registry() -> CommandRegistry:
         """
         Positions report with detail levels.
 
+        status: open/closed/all
+
         detail: 1 = summary
                 2 = summary + per-position overview (with opened datetime & signed target)
                 3 = level 2 + per-symbol leg summary (agg qty, WAP, last price, PnL)

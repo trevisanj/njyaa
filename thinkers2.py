@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
+from contracts import EngineServices
 from common import log, Clock, AppConfig
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
-from thinkers1 import ThinkerBase, ThinkerAction, ThinkerContext
+from thinkers1 import ThinkerBase, ThinkerAction
 
 # -----------------------------
 # Thinker Registry/Factory
@@ -55,10 +56,9 @@ class ThresholdAlertThinker(ThinkerBase):
         self._cfg["direction"] = d
         self._cfg["price"] = float(self._cfg["price"])
 
-    def tick(self, ctx: ThinkerContext, now_ms: int) -> List[ThinkerAction]:
-        ctx.log.info("ASDKASJUKHDASJKSDHFAJKHFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+    def tick(self, eng: EngineServices, now_ms: int) -> List[ThinkerAction]:
         sym = self._cfg["symbol"]
-        pr = ctx.mark_close_now(sym)
+        pr = _mark_close_now(eng, sym)
         if pr is None:
             return []
 
@@ -181,10 +181,10 @@ class PSARStopThinker(ThinkerBase):
 
         return psar, ep, af, ("UP" if up else "DOWN")
 
-    def tick(self, ctx: ThinkerContext, now_ms: int) -> List[ThinkerAction]:
+    def tick(self, eng: EngineServices, now_ms: int) -> List[ThinkerAction]:
         sym = self._cfg["symbol"]
         mins = self._cfg["window_min"]
-        rows = ctx.minute_klines(sym, mins)
+        rows = _minute_klines(eng, sym, mins)
         if not rows:
             return []
 
@@ -226,11 +226,12 @@ def _leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float]
     return (float(mark) - float(entry)) * float(qty)
 
 
-def _last_cached_price(ctx: ThinkerContext, symbol: str) -> Optional[float]:
-    kc = ctx.kc
+def _last_cached_price(eng, symbol: str) -> Optional[float]:
+    kc = getattr(eng, "kc", None)
     if kc is None:
         return None
-    tfs = getattr(ctx.cfg, "KLINES_TIMEFRAMES", None) or ["1m"]
+    cfg = getattr(eng, "cfg", None)
+    tfs = getattr(cfg, "KLINES_TIMEFRAMES", None) or ["1m"]
     for tf in tfs:
         try:
             r = kc.last_row(symbol, tf)
@@ -239,6 +240,20 @@ def _last_cached_price(ctx: ThinkerContext, symbol: str) -> Optional[float]:
         except Exception:
             continue
     return None
+
+
+def _mark_close_now(eng, symbol: str) -> Optional[float]:
+    return _last_cached_price(eng, symbol)
+
+
+def _minute_klines(eng, symbol: str, mins: int) -> List:
+    kc = getattr(eng, "kc", None)
+    if kc is None:
+        return []
+    try:
+        return kc.last_n(symbol, "1m", mins, include_live=True, asc=True)
+    except Exception:
+        return []
 
 
 class RiskThinker(ThinkerBase):
@@ -266,22 +281,22 @@ class RiskThinker(ThinkerBase):
         self._cfg["warn_loss_mult"] = float(self._cfg["warn_loss_mult"])
         self._cfg["min_alert_interval_ms"] = int(self._cfg["min_alert_interval_ms"])
 
-    def tick(self, ctx: ThinkerContext, now_ms: int) -> List[ThinkerAction]:
-        cfg = ctx.store.get_config()
+    def tick(self, eng: EngineServices, now_ms: int) -> List[ThinkerAction]:
+        cfg = eng.store.get_config()
         ref_balance = cfg["reference_balance"]
         leverage = cfg["leverage"]
         max_exposure = ref_balance * leverage if ref_balance and leverage else None
 
-        rows = ctx.store.list_open_positions()
+        rows = eng.store.list_open_positions()
         if not rows:
             return []
 
         involved_syms = set()
         for r in rows:
-            for lg in ctx.store.get_legs(r["position_id"]):
+            for lg in eng.store.get_legs(r["position_id"]):
                 if lg["symbol"]:
                     involved_syms.add(lg["symbol"])
-        marks = {s: _last_cached_price(ctx, s) for s in involved_syms}
+        marks = {s: _last_cached_price(eng, s) for s in involved_syms}
 
         total_exposure = 0.0
         exposure_missing = False
@@ -290,7 +305,7 @@ class RiskThinker(ThinkerBase):
 
         for r in rows:
             pid = int(r["position_id"])
-            legs = ctx.store.get_legs(pid)
+            legs = eng.store.get_legs(pid)
             notional = 0.0
             notional_missing = False
             pos_pnl = 0.0

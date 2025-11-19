@@ -20,6 +20,9 @@ from common import Log, sublog
 
 import sys, inspect
 
+def _parse_json(blob: Optional[str]) -> Dict[str, Any]:
+    return json.loads(blob or "{}")
+
 # -----------------------------
 # Manager (DB + wiring + loop)
 # -----------------------------
@@ -39,34 +42,23 @@ class ThinkerManager:
         self._configs: Dict[int, Dict[str, Any]] = {}  # id -> config dict
         self.log = sublog("thinking")
 
-        self.ctx = ThinkerContext(
-            log=self.log,
-            cfg=eng.cfg, store=eng.store, mc=eng.mc, oracle=eng.oracle,
-            positionbook=eng.positionbook, kc=eng.kc,)
-
         self.factory = ThinkerFactory()
 
     # --- load/instantiate
     # TODO what when thinkers are activated/deactivated/deleted when the system is running?
-    def _load(self) -> List[ThinkerRow]:
-        rows = self.store.con.execute("SELECT * FROM thinkers WHERE enabled=1 ORDER BY id").fetchall()
-        out: List[ThinkerRow] = []
-        for r in rows:
-            out.append(ThinkerRow(
-                id=int(r["id"]), kind=r["kind"], enabled=int(r["enabled"]),
-                config_json=r["config_json"] or "{}", runtime_json=r["runtime_json"] or "{}",
-                created_ts=int(r["created_ts"]), updated_ts=int(r["updated_ts"])
-            ))
-        return out
+    def _load(self) -> List[sqlite3.Row]:
+        return self.store.con.execute("SELECT * FROM thinkers WHERE enabled=1 ORDER BY id").fetchall()
 
-    def _ensure_instantiated(self, tr: ThinkerRow):
-        if tr.id in self._instances:
+    def _ensure_instantiated(self, tr: sqlite3.Row):
+        tid = int(tr["id"])
+        if tid in self._instances:
             return
-        inst = self.factory.create(tr.kind)
-        inst.init(tr.config())
-        self._instances[tr.id] = inst
-        self._configs[tr.id] = tr.config()
-        self.log.info("thinker.ready", id=tr.id, kind=tr.kind)
+        inst = self.factory.create(tr["kind"])
+        config = _parse_json(tr["config_json"])
+        inst.init(config)
+        self._instances[tid] = inst
+        self._configs[tid] = config
+        self.log.info("thinker.ready", id=tid, kind=tr["kind"])
 
     # --- run one cycle
     def run_once(self, now_ms: Optional[int] = None) -> int:
@@ -81,12 +73,13 @@ class ThinkerManager:
         self.log.debug(f"Thinking ... {len(rows)} thinkers ...")
         for tr in rows:
             self._ensure_instantiated(tr)
-            inst = self._instances[tr.id]
+            tid = int(tr["id"])
+            inst = self._instances[tid]
             try:
-                out = inst.tick(self.ctx, now)
+                out = inst.tick(self.eng, now)
             except Exception as e:
-                log().exc(e, where="thinker.tick", thinker_id=tr.id, kind=tr.kind)
-                self._log_state(tr.id, now, "ERROR", f"tick failed: {e}", {})
+                log().exc(e, where="thinker.tick", thinker_id=tid, kind=tr["kind"])
+                self.store.log_thinker_event(tid, "ERROR", f"tick failed: {e}", {})
                 continue
 
             if not out:
@@ -95,14 +88,14 @@ class ThinkerManager:
             for act in out:
                 actions += 1
                 # Persist to state log
-                self._log_state(tr.id, now, act.level, act.text, act.payload)
+                self.store.log_thinker_event(tid, act.level, act.text, act.payload)
 
                 # Emit alerts externally
                 if act.type == "ALERT":
                     try:
                         self.eng.emit_alert(f"{act.text}")
                     except Exception as e:
-                        log().exc(e, where="thinker.emit_alert", thinker_id=tr.id)
+                        log().exc(e, where="thinker.emit_alert", thinker_id=tid)
 
             # Optional: allow thinkers to persist small runtime snapshots (e.g. last psar)
             # Convention: if action payload has "_runtime", we persist it.
@@ -110,43 +103,15 @@ class ThinkerManager:
             _rts = [a.payload.get("_runtime") for a in out if isinstance(a.payload, dict) and a.payload.get("_runtime")]
             if _rts:
                 try:
-                    rt = tr.runtime()
+                    rt = _parse_json(tr["runtime_json"])
                     rt.update(_rts[-1])  # last wins
                     self.store.con.execute("UPDATE thinkers SET runtime_json=?, updated_ts=? WHERE id=?",
-                                           (json.dumps(rt, ensure_ascii=False), now, tr.id))
+                                           (json.dumps(rt, ensure_ascii=False), now, tid))
                     self.store.con.commit()
                 except Exception as e:
                     log().exc(e, where="thinker.persist_runtime", thinker_id=tr.id)
 
         return actions
-
-    def _log_state(self, thinker_id: int, ts: int, level: str, message: str, payload: Dict[str, Any]):
-        try:
-            self.store.con.execute("""INSERT INTO thinker_state_log(thinker_id, ts, level, message, payload_json)
-                                      VALUES(?,?,?,?,?)""",
-                                   (thinker_id, ts, level, message, json.dumps(payload or {}, ensure_ascii=False)))
-            self.store.con.commit()
-        except Exception as e:
-            self.log.exc(e, where="thinker_state_log.insert", thinker_id=thinker_id)
-
-
-# -----------------------------
-# Thinker Context
-# -----------------------------
-
-@dataclass
-class ThinkerContext:
-    """
-    Shared lightweight read-only view of the trading environment
-    accessible by all Thinkers each tick.
-    """
-    log: Log
-    cfg: AppConfig
-    store: Storage
-    mc: MarketCatalog
-    oracle: PriceOracle
-    positionbook: PositionBook
-    kc: KlinesCache
 
 # -----------------------------
 # Thinker Factory
@@ -179,7 +144,7 @@ class ThinkerBase(ABC):
     def init(self, config: Dict[str, Any]) -> None: ...
 
     @abstractmethod
-    def tick(self, ctx: ThinkerContext, now_ms: int) -> List["ThinkerAction"]: ...
+    def tick(self, eng: EngineServices, now_ms: int) -> List["ThinkerAction"]: ...
 
 
 @dataclass
@@ -197,28 +162,3 @@ class ThinkerAction:
     text: str
     payload: Dict[str, Any]
 
-
-@dataclass
-class ThinkerRow:
-    """
-    DB materialization of a thinker.
-    """
-    id: int
-    kind: str
-    enabled: int
-    config_json: str
-    runtime_json: str
-    created_ts: int
-    updated_ts: int
-
-    def config(self) -> Dict[str, Any]:
-        try:
-            return json.loads(self.config_json or "{}")
-        except Exception:
-            return {}
-
-    def runtime(self) -> Dict[str, Any]:
-        try:
-            return json.loads(self.runtime_json or "{}")
-        except Exception:
-            return {}
