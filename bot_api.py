@@ -19,6 +19,7 @@ from binance_um import BinanceUM
 from klines_cache import KlinesCache
 from engclasses import *  # MarketCatalog, PriceOracle, PositionBook, Worker, Reporter, ThinkerManager, etc.
 import tabulate
+import asyncio
 
 try:
     import readline  # optional; console-only nicety
@@ -373,11 +374,15 @@ class BotEngine:
         if not self._app:
             return
         try:
-            self._app.create_task(
-                self._app.bot.send_message(
+            loop = getattr(self._app, "loop", None)
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(asyncio.create_task, self._app.bot.send_message(
                     chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=text
-                )
-            )
+                ))
+            else:
+                asyncio.run(self._app.bot.send_message(
+                    chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=text
+                ))
         except Exception as e:
             log().exc(e, where="engine.send_text.telegram")
 
