@@ -10,6 +10,7 @@ import time
 import os
 import signal
 import logging
+import io
 from queue import Queue, Empty
 from typing import Callable, List, Optional, Dict, TYPE_CHECKING
 
@@ -21,10 +22,17 @@ from engclasses import *  # MarketCatalog, PriceOracle, PositionBook, Worker, Re
 import tabulate
 import asyncio
 
-from prompt_toolkit import PromptSession
+from collections import deque
+from prompt_toolkit.application import Application
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.formatted_text import ANSI, merge_formatted_text
 from prompt_toolkit.history import FileHistory
-import ctypes
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, VSplit, Layout, Window
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.dimension import Dimension
+from rich.console import Console
 
 
 class _CommandCompleter(Completer):
@@ -42,6 +50,19 @@ class _CommandCompleter(Completer):
                 yield Completion(word, start_position=-len(text))
 
 
+class _EngineLogStream:
+    """Bridge standard Log writes into BotEngine-managed sinks."""
+
+    def __init__(self, engine: "BotEngine"):
+        self.engine = engine
+
+    def write(self, data: str):
+        self.engine._handle_log_stream_write(data)
+
+    def flush(self):
+        self.engine._flush_log_stream()
+
+
 if TYPE_CHECKING:
     from commands import CommandRegistry, CO, OCText  # only for type hints
 
@@ -57,6 +78,11 @@ PTB_LOGGERS = [
 ]
 PTB_LOG_LEVEL = logging.WARNING
 PTB_STRIP_TRACEBACK = True  # keep the message but drop the multi-line traceback
+
+
+CONSOLE_THEME = {
+    "command_echo": "bold deep_sky_blue1",  # style for echoed commands in console log pane
+}
 
 
 class _PTBDropTraceback(logging.Filter):
@@ -154,18 +180,42 @@ class InternalScheduler:
 
 class ConsoleUI:
     """
-    Simple blocking REPL that dispatches the same @ / ! commands.
-    - History persisted to ~/.rv_console_history (prompt_toolkit FileHistory).
-    - TAB completes @/! commands; completions update as registry changes.
+    prompt_toolkit-based console with a scrolling log pane above the prompt.
+    All console output accumulates in the log so user input never gets clobbered.
     """
 
     def __init__(self, eng: "BotEngine"):
         self.eng = eng
         self._alive = True
         self._stop_notified = False
-        self._thread_ident: Optional[int] = None
         self._hist_file = os.path.expanduser("~/.rv_console_history")
-        self._session = self._build_session()
+        self._ensure_history_file()
+        self._history = FileHistory(self._hist_file)
+        self._completer = _CommandCompleter(self)
+        self._log_lines: deque[str] = deque(maxlen=1000)
+        self._input_buffer = Buffer(
+            history=self._history,
+            completer=self._completer,
+            complete_while_typing=True,
+            multiline=False,
+        )
+        self._input_buffer.accept_handler = self._handle_submit
+        self._log_control = FormattedTextControl(self._render_log, focusable=False)
+        self._input_control = BufferControl(buffer=self._input_buffer, focus_on_click=True)
+        self._app = self._build_application()
+
+    def _ensure_history_file(self):
+        hist_dir = os.path.dirname(self._hist_file)
+        if hist_dir:
+            try:
+                os.makedirs(hist_dir, exist_ok=True)
+            except Exception:
+                pass
+        try:
+            with open(self._hist_file, "a", encoding="utf-8"):
+                pass
+        except Exception:
+            pass
 
     def _command_words(self):
         words = {":q", ":quit", ":exit"}
@@ -175,60 +225,109 @@ class ConsoleUI:
                 words.add(f"{prefix}{name}")
         return sorted(words)
 
-    def _build_session(self):
-        history = FileHistory(self._hist_file)
-        completer = _CommandCompleter(self)
-        return PromptSession(
-            history=history,
-            completer=completer,
-            complete_while_typing=True,
+    def _render_log(self):
+        if not self._log_lines:
+            return ""
+        fragments = []
+        for line in self._log_lines:
+            text = line if line.endswith("\n") else line + "\n"
+            fragments.append(ANSI(text))
+        return merge_formatted_text(fragments)
+
+    def _build_application(self) -> Application:
+        kb = KeyBindings()
+
+        @kb.add("c-c")
+        @kb.add("c-d")
+        def _(event):
+            self._on_exit_requested()
+
+        prompt_row = VSplit(
+            [
+                Window(
+                    content=FormattedTextControl(lambda: "> "),
+                    width=4,
+                    dont_extend_width=True,
+                ),
+                Window(content=self._input_control, height=1),
+            ],
+            height=1,
         )
 
-    def _interrupt_input(self):
-        ident = self._thread_ident
-        if not ident:
+        root = HSplit(
+            [
+                Window(
+                    content=self._log_control,
+                    wrap_lines=True,
+                    height=Dimension(weight=1),
+                ),
+                Window(height=1, char="─"),
+                prompt_row,
+            ]
+        )
+
+        layout = Layout(root, focused_element=self._input_control)
+        return Application(
+            layout=layout,
+            key_bindings=kb,
+            full_screen=True,
+            mouse_support=False,
+            refresh_interval=0.1,
+        )
+
+    def _handle_submit(self, buff: Buffer) -> bool:
+        line = buff.text.strip()
+        buff.reset()
+        if not line:
+            return False
+        if line in (":q", ":quit", ":exit"):
+            self._on_exit_requested()
+            return False
+        self._history.append_string(line)
+        try:
+            self.eng.dispatch_command(line, chat_id=0, origin="console")
+        except Exception as e:
+            log().exc(e, where="console.dispatch")
+            self.append_output(f"Error: {e}")
+        return False
+
+    def _on_exit_requested(self):
+        if self._stop_notified:
             return
-        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_long(ident), ctypes.py_object(KeyboardInterrupt)
-        )
-        if res > 1:
-            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(ident), None)
+        self._stop_notified = True
+        self._alive = False
+        self.eng.request_stop()
+        if self._app and self._app.is_running:
+            self._app.exit()
 
-    # ----- I/O -----
-    def _print(self, msg: str):
-        self.eng._send_text_console(msg)
+    def append_output(self, text: str):
+        if text is None:
+            return
+        lines = text.split("\n")
+        if not lines:
+            lines = [""]
+        for idx, line in enumerate(lines):
+            self._log_lines.append(line)
+        if self._app:
+            try:
+                self._app.invalidate()
+            except Exception:
+                pass
 
-    # ----- main loop -----
     def run(self):
-        self._print("RV console ready. Type @help, or :quit to exit. (TAB completes; ↑↓ recall history)")
-        self._thread_ident = threading.get_ident()
-        while self._alive:
-            try:
-                line = self._session.prompt("> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                break
-            if not line:
-                continue
-            if line in (":q", "quit", "exit"):
-                break
-            try:
-                self.eng.dispatch_command(line, chat_id=0, origin="console")
-            except Exception as e:
-                log().exc(e, where="console.dispatch")
-                self._print(f"Error: {e}")
-        self._print("ConsoleUI.run(): Shutting down…")
-        if not self._stop_notified:
-            self._stop_notified = True
-            self.eng.request_stop()
-        self._thread_ident = None
+        self.append_output("RV console ready. Type @help, or :quit to exit. (TAB completes; ↑↓ recall history)")
+        try:
+            self._app.run()
+        finally:
+            if not self._stop_notified:
+                self._stop_notified = True
+                self.eng.request_stop()
 
     def stop(self):
         self._alive = False
-        self._interrupt_input()
-        try:
-            os.write(sys.stdin.fileno(), b"\n")
-        except Exception:
-            pass
+        self._stop_notified = True
+        if self._app and self._app.is_running:
+            self._app.exit()
 
 
 # =========================
@@ -294,11 +393,23 @@ class BotEngine:
         self._console_thread: Optional[threading.Thread] = None
         self._console_ui: Optional["ConsoleUI"] = None
         self._telegram_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._rich_console = Console(force_terminal=True, color_system="truecolor", soft_wrap=True)
 
         # rendering sinks
         self._sinks: List[str] = []
         self._console_lock = threading.Lock()
+        self._log_stream_lock = threading.Lock()
         self._send_queue: Queue = Queue()
+        self._log_stream_buffer = ""
+        self._log_stream = _EngineLogStream(self)
+        set_global_logger(
+            Log(
+                level=cfg.LOG_LEVEL or "INFO",
+                stream=self._log_stream,
+                name="rv",
+                json_mode=False,
+            )
+        )
 
         # book-keeping
         self._excepthook_installed = False
@@ -385,10 +496,65 @@ class BotEngine:
     def set_registry(self, registry: "CommandRegistry"):
         self._registry = registry
 
+    # ---------- logging plumbing ----------
+    def _handle_log_stream_write(self, data: str):
+        if not data:
+            return
+        with self._log_stream_lock:
+            self._log_stream_buffer += data
+            while True:
+                idx = self._log_stream_buffer.find("\n")
+                if idx == -1:
+                    break
+                line = self._log_stream_buffer[:idx]
+                self._log_stream_buffer = self._log_stream_buffer[idx + 1 :]
+                self._emit_log_line(line)
+
+    def _flush_log_stream(self):
+        with self._log_stream_lock:
+            if not self._log_stream_buffer:
+                return
+            line = self._log_stream_buffer
+            self._log_stream_buffer = ""
+            self._emit_log_line(line)
+
+    def _emit_log_line(self, line: str):
+        text = line or ""
+        ui = getattr(self, "_console_ui", None)
+        if ui is not None:
+            try:
+                ui.append_output(text)
+                return
+            except Exception:
+                pass
+        with self._console_lock:
+            sys.stdout.write(text + "\n")
+            sys.stdout.flush()
+
+    def _render_console_line(self, text: str, style: str) -> str:
+        if not text:
+            return ""
+        with self._rich_console.capture() as capture:
+            self._rich_console.print(text, style=style, highlight=False, markup=False)
+        return capture.get().rstrip("\n")
+
+    def _echo_console_command(self, text: str) -> None:
+        if not text:
+            return
+        style = CONSOLE_THEME.get("command_echo", "bold cyan")
+        rendered = self._render_console_line(text, style)
+        if rendered:
+            self._send_text_console(rendered)
+
     # ---------- text sinks ----------
     def _send_text_console(self, text: str) -> None:
         """Basic console sink for alerts/heartbeats."""
-        if self._stopping: return
+        if self._stopping:
+            return
+        ui = getattr(self, "_console_ui", None)
+        if ui is not None:
+            ui.append_output(text)
+            return
         with self._console_lock:
             sys.stdout.write(text + "\n")
             sys.stdout.flush()
@@ -778,6 +944,8 @@ class BotEngine:
     def dispatch_command(self, text: str, chat_id: int = 0, origin: str = "console") -> str:
         """Build context and route through the registry, then render per-origin."""
         assert self._registry
+        if origin == "console":
+            self._echo_console_command(text)
         raw = self._registry.dispatch(self, text)
         self._render_co(raw, sinks=[origin])
         return ""

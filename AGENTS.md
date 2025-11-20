@@ -4,8 +4,9 @@
 - `run_bot.py` boots config/logging and starts `BotEngine` (`bot_api.py`); commands live in `commands.py`.
 - Trading and risk logic live in `engclasses.py` (position book, reconciler) and `enghelpers.py` (helpers the engine calls); periodic thinkers reside in `thinkers1.py`/`thinkers2.py`.
 - Persistence is through `storage.py` (SQLite with `config` singleton holding balance/leverage/default_risk) and cached candles in `klines_cache.py`; runtime DB files (`rv*.sqlite*`) stay in the repo root.
-- External connectivity: `binance_um.py` (REST), Telegram plumbing in `bot_api.py`, console helpers in `console_ui.py`, and type contracts in `contracts.py`.
+- External connectivity: `binance_um.py` (REST), Telegram plumbing in `bot_api.py`
 - Shared utilities and logging live in `common.py`; market helpers and charting tweaks are in `enghelpers.py`.
+- `ConsoleUI` class and `prompt_toolkit`'s console application in `console_ui.py` 
 
 ## Build, Test, and Development Commands
 - `python -m venv .venv && source .venv/bin/activate` — create/enter a virtualenv.
