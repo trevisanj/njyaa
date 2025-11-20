@@ -370,4 +370,4 @@ class HorseWithNoName(ThinkerBase):
     def tick(self, now_ms: int):
         if random.random() < self._cfg["prob"]:
             line = random.choice(self.LYRICS)
-            self.eng._render_co(OCMarkDown(f"> {line}"))
+            # self.eng._render_co(OCMarkDown(f"> {line}"))

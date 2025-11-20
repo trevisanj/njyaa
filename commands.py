@@ -102,7 +102,7 @@ class OCText(OC):
         return self.text
 
     def render_telegram(self, eng: BotEngine) -> str:
-        eng._send_text_telegram(self.text)
+        eng._tsafe_text_telegram(self.text)
         return self.text
 
 
@@ -133,7 +133,7 @@ class OCMarkDown(OC):
         return rendered
 
     def render_telegram(self, eng: BotEngine) -> str:
-        eng._send_text_telegram(self.text)
+        eng._tsafe_text_telegram(self.text)
         return self.text
 
 
@@ -160,14 +160,14 @@ class OCPhoto(OC):
 
     def render_telegram(self, eng: BotEngine) -> str:
         try:
-            eng._send_photo_telegram(self.path, caption=self.caption)
+            eng._tsafe_photo_telegram(self.path, caption=self.caption)
         except Exception as e:
             log().exc(e, where="OCPhoto.render_telegram", path=self.path)
             msg = f"[photo error: {e}]"
-            eng._send_text_telegram(msg)
+            eng._tsafe_text_telegram(msg)
             return msg
         if self.caption:
-            eng._send_text_telegram(self.caption)
+            eng._tsafe_text_telegram(self.caption)
         return self.caption or ""
 
 
@@ -193,7 +193,7 @@ class OCTable(OC):
     def render_telegram(self, eng: BotEngine) -> str:
         if not self.rows:
             msg = "(empty)"
-            eng._send_text_telegram(msg)
+            eng._tsafe_text_telegram(msg)
             return msg
 
         lines = []
@@ -202,7 +202,7 @@ class OCTable(OC):
             line = "; ".join(parts) if parts else "(empty row)"
             lines.append(line)
         body = "\n".join(lines)
-        eng._send_text_telegram(body)
+        eng._tsafe_text_telegram(body)
         return body
 
 

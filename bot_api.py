@@ -11,6 +11,7 @@ import os
 import atexit
 import signal
 import logging
+from queue import Queue, Empty
 from typing import Callable, List, Optional, Dict, TYPE_CHECKING
 
 from common import *  # Clock, log, AppConfig, tf_ms, etc.
@@ -211,6 +212,7 @@ class ConsoleUI:
                 self._print(f"Error: {e}")
         self._print("Shutting down…")
         self._alive = False
+        self.eng.request_stop()
 
 
 # =========================
@@ -272,10 +274,12 @@ class BotEngine:
         # PTB application (only if Telegram is enabled)
         self._app = None
         self._tg_thread: Optional[threading.Thread] = None
+        self._console_thread: Optional[threading.Thread] = None
 
         # rendering sinks
         self._sinks: List[str] = []
         self._console_lock = threading.Lock()
+        self._send_queue: Queue = Queue()
 
         # book-keeping
         self._excepthook_installed = False
@@ -382,6 +386,17 @@ class BotEngine:
         Used for alerts, heartbeats, thinker messages, etc.
         """
         self._render_co(text)
+
+# TODO check which thread is calling and no need to enqueue if it is the main thread
+    def _tsafe_text_telegram(self, text: str) -> None:
+        if not self.cfg.TELEGRAM_ENABLED or not self._app:
+            return
+        self._send_queue.put(("telegram_text", text))
+
+    def _tsafe_photo_telegram(self, path: str, caption: str | None = None) -> None:
+        if not self.cfg.TELEGRAM_ENABLED or not self._app:
+            return
+        self._send_queue.put(("telegram_photo", (path, caption)))
 
     # def send_photo(self, path: str, caption: str | None = None):
     #     """
@@ -577,10 +592,12 @@ class BotEngine:
                 daemon=False,
             )
             self._tg_thread.start()
+
         else:
             log().info("Engine running without Telegram")
 
     def stop(self):
+        self.request_stop()
         try:
             if self._app:
                 self._app.stop()
@@ -612,14 +629,28 @@ class BotEngine:
 
         try:
             if console_enabled:
-                ui = ConsoleUI(self)
-                ui.run()
+                console_ui = ConsoleUI(self)
+                self._console_thread = threading.Thread(
+                    target=console_ui.run, name="rv-console", daemon=True
+                )
+                self._console_thread.start()
             else:
                 log().info(
                     "BotEngine.run: no console; idle loop. Press Ctrl+C to exit."
                 )
-                while True:
-                    time.sleep(1)
+            running = True
+            while running:
+                try:
+                    target, payload = self._send_queue.get(timeout=0.5)
+                except Empty:
+                    continue
+                if target == "telegram_text":
+                    self._send_text_telegram(payload)
+                elif target == "telegram_photo":
+                    path, caption = payload
+                    self._send_photo_telegram(path, caption)
+                elif target == "stop":
+                    running = False
         except KeyboardInterrupt:
             log().info("KeyboardInterrupt: shutting down…")
         finally:
@@ -629,6 +660,9 @@ class BotEngine:
     def emit_alert(self, msg: str):
         """Emit alert to all configured sinks."""
         self.send_text(msg)
+
+    def request_stop(self):
+        self._send_queue.put(("stop", None))
 
     # --------------------------------
     # Scheduled jobs (driven by InternalScheduler)
