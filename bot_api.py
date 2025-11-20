@@ -555,11 +555,15 @@ class BotEngine:
         try:
             assert self._app is not None
             log().info("Telegram polling thread starting ...")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._telegram_loop = loop
             self._app.run_polling(stop_signals=None, close_loop=False)
             log().info("Telegram polling stopped cleanly")
         except Exception as e:
             log().exc(e, where="telegram.thread")
         finally:
+            self._telegram_loop = None
             log().warn("Telegram thread exiting")
 
     # --------------------------------
@@ -600,7 +604,12 @@ class BotEngine:
         self.request_stop()
         try:
             if self._app:
-                self._app.stop()
+                loop = getattr(self._app, "loop", None)
+                if loop and loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(self._app.stop(), loop)
+                    fut.result()
+                else:
+                    log().warn("telegram.stop.loop_missing")
         except Exception as e:
             log().exc(e, where="engine.stop.telegram")
         try:
