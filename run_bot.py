@@ -6,15 +6,28 @@ from bot_api import BotEngine
 
 def main():
     cfg = make_cfg()
-    if False:
-        cfg.TELEGRAM_ENABLED = False
-        cfg.CONSOLE_ENABLED = True
-    elif False:
-        cfg.TELEGRAM_ENABLED = True
-        cfg.CONSOLE_ENABLED = False
-    else:
-        cfg.TELEGRAM_ENABLED = True
-        cfg.CONSOLE_ENABLED = True
+
+    mode = 2  # 0..3
+
+    match mode:
+        case 0:  # console only
+            cfg.TELEGRAM_ENABLED = False
+            cfg.CONSOLE_ENABLED = True
+
+        case 1:  # telegram only
+            cfg.TELEGRAM_ENABLED = True
+            cfg.CONSOLE_ENABLED = False
+
+        case 2:  # both
+            cfg.TELEGRAM_ENABLED = True
+            cfg.CONSOLE_ENABLED = True
+
+        case 3:  # none
+            cfg.TELEGRAM_ENABLED = False
+            cfg.CONSOLE_ENABLED = False
+
+        case _:
+            raise ValueError(f"Invalid mode: {mode}")
 
     lg = Log(level=cfg.LOG_LEVEL, name="rv", json_mode=False)
     set_global_logger(lg)

@@ -113,7 +113,8 @@ class InternalScheduler:
     def stop(self):
         self._stop.set()
         if self._thr:
-            self._thr.join(timeout=3)
+            self._thr.join()
+            log().info("InternalScheduler: thread joined")
 
     def _run(self):
         while not self._stop.is_set():
@@ -146,6 +147,7 @@ class ConsoleUI:
     def __init__(self, eng: "BotEngine"):
         self.eng = eng
         self._alive = True
+        self._stop_notified = False
         self._hist_file = os.path.expanduser("~/.rv_console_history")
         self._setup_readline()
 
@@ -203,16 +205,24 @@ class ConsoleUI:
                 break
             if not line:
                 continue
-            if line in (":q", ":quit", ":exit"):
+            if line in (":q", "quit", "exit"):
                 break
             try:
                 self.eng.dispatch_command(line, chat_id=0, origin="console")
             except Exception as e:
                 log().exc(e, where="console.dispatch")
                 self._print(f"Error: {e}")
-        self._print("Shutting down…")
+        self._print("ConsoleUI.run(): Shutting down…")
+        if not self._stop_notified:
+            self._stop_notified = True
+            self.eng.request_stop()
+
+    def stop(self):
         self._alive = False
-        self.eng.request_stop()
+        try:
+            os.write(sys.stdin.fileno(), b"\n")
+        except Exception:
+            pass
 
 
 # =========================
@@ -274,7 +284,10 @@ class BotEngine:
         # PTB application (only if Telegram is enabled)
         self._app = None
         self._tg_thread: Optional[threading.Thread] = None
+        self._worker_thread: Optional[threading.Thread] = None
         self._console_thread: Optional[threading.Thread] = None
+        self._console_ui: Optional["ConsoleUI"] = None
+        self._telegram_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # rendering sinks
         self._sinks: List[str] = []
@@ -283,6 +296,8 @@ class BotEngine:
 
         # book-keeping
         self._excepthook_installed = False
+
+        self._stopping = False
 
     # --------------------------------
     # Building + wiring (single place)
@@ -367,17 +382,19 @@ class BotEngine:
     # ---------- text sinks ----------
     def _send_text_console(self, text: str) -> None:
         """Basic console sink for alerts/heartbeats."""
+        if self._stopping: return
         with self._console_lock:
             sys.stdout.write(text + "\n")
             sys.stdout.flush()
 
     def _send_text_telegram(self, text: str) -> None:
         """Telegram sink for alerts/heartbeats."""
+        if self._stopping: return
+        loop = self._telegram_loop
         coro = self._app.bot.send_message(
             chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=text
         )
-        # asyncio.create_task(coro)
-        self._app.create_task(coro)
+        asyncio.run_coroutine_threadsafe(coro, loop)
 
     # ---------- interface ----------
     def send_text(self, text: str) -> None:
@@ -385,18 +402,8 @@ class BotEngine:
         Fan-out text to all configured sinks (console, Telegram, etc.).
         Used for alerts, heartbeats, thinker messages, etc.
         """
+        if self._stopping: return
         self._render_co(text)
-
-# TODO check which thread is calling and no need to enqueue if it is the main thread
-    def _tsafe_text_telegram(self, text: str) -> None:
-        if not self.cfg.TELEGRAM_ENABLED or not self._app:
-            return
-        self._send_queue.put(("telegram_text", text))
-
-    def _tsafe_photo_telegram(self, path: str, caption: str | None = None) -> None:
-        if not self.cfg.TELEGRAM_ENABLED or not self._app:
-            return
-        self._send_queue.put(("telegram_photo", (path, caption)))
 
     # def send_photo(self, path: str, caption: str | None = None):
     #     """
@@ -430,27 +437,25 @@ class BotEngine:
 
     def _send_photo_console(self, path: str, caption: str | None = None) -> None:
         """Open photo with local viewer (console path)."""
+        if self._stopping: return
         log().info("photo.local", path=path, caption=caption)
         # best-effort; if it fails, we log the exception in caller
         os.system(f"xdg-open '{path}' >/dev/null 2>&1 &")
 
     def _send_photo_telegram(self, path: str, caption: str | None = None) -> None:
         """Telegram sink for photos."""
-        assert self.cfg.TELEGRAM_ENABLED, "Telegram disabled (TELEGRAM_ENABLED=False)"
-        assert self._app is not None, "Telegram Application not initialized"
+        if self._stopping: return
+        loop = self._telegram_loop
 
-        # Read into memory so the coroutine can consume after we exit this call.
-        data = None
         with open(path, "rb") as f:
             data = f.read()
 
-        self._app.create_task(
-            self._app.bot.send_photo(
+        coro = self._app.bot.send_photo(
             chat_id=int(self.cfg.TELEGRAM_CHAT_ID),
             photo=data,
             caption=caption or "",
-            )
         )
+        asyncio.run_coroutine_threadsafe(coro, loop)
 
     def refresh_klines_cache(self):
         """Pull recent klines for all relevant symbols."""
@@ -558,7 +563,7 @@ class BotEngine:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             self._telegram_loop = loop
-            self._app.run_polling(stop_signals=None, close_loop=False)
+            self._app.run_polling(stop_signals=None, close_loop=True)
             log().info("Telegram polling stopped cleanly")
         except Exception as e:
             log().exc(e, where="telegram.thread")
@@ -578,10 +583,10 @@ class BotEngine:
         self._install_thread_excepthook_once()
 
         # Start worker
-        wt = threading.Thread(
+        self._worker_thread = threading.Thread(
             target=self.worker.run_forever, name="rv-worker", daemon=False
         )
-        wt.start()
+        self._worker_thread.start()
         log().info("Worker thread started")
 
         # Start scheduler
@@ -593,7 +598,7 @@ class BotEngine:
             self._tg_thread = threading.Thread(
                 target=self._telegram_thread_main,
                 name="rv-telegram",
-                daemon=False,
+                daemon=True,
             )
             self._tg_thread.start()
 
@@ -601,23 +606,60 @@ class BotEngine:
             log().info("Engine running without Telegram")
 
     def stop(self):
+        log().info("Engine stopping …")
+        # self._stopping = True
         self.request_stop()
         try:
+            if self._console_ui and self._console_thread:
+                log().info("Console: stopping UI thread")
+                self._console_ui.stop()
+                self._console_thread.join()
+                log().info("Console: thread joined")
+                self._console_ui = None
+        except Exception as e:
+            log().exc(e, where="engine.stop.console")
+
+        try:
+            if self.scheduler:
+                log().info("Scheduler: stopping")
+                self.scheduler.stop()
+                log().info("Scheduler: stopped")
+        except Exception as e:
+            log().exc(e, where="engine.stop.scheduler")
+
+        try:
+            if self.worker:
+                log().info("Worker: stopping thread")
+                self.worker.stop()
+                log().info("Worker: stopped")
+                if self._worker_thread and self._worker_thread.is_alive():
+                    self._worker_thread.join()
+                    log().info("Worker: thread joined")
+        except Exception as e:
+            log().exc(e, where="engine.stop.worker")
+
+        try:
             if self._app:
-                loop = getattr(self._app, "loop", None)
+                log().info("Telegram: stopping application")
+                loop = self._telegram_loop
                 if loop and loop.is_running():
                     fut = asyncio.run_coroutine_threadsafe(self._app.stop(), loop)
                     fut.result()
+                    log().info("Telegram: application stopped")
+                    log().info("Telling self._telegram_loop to stop now")
+                    self._telegram_loop.stop()
                 else:
-                    log().warn("telegram.stop.loop_missing")
+                    log().warn("Telegram loop missing while stopping")
+
+                if self._tg_thread and self._tg_thread.is_alive():
+                    log().info("Telegram: waiting for polling thread")
+                    self._tg_thread.join()
+                    log().info("Telegram: polling thread joined")
         except Exception as e:
             log().exc(e, where="engine.stop.telegram")
-        try:
-            if self.worker:
-                self.worker.stop()
-        finally:
-            if self.scheduler:
-                self.scheduler.stop()
+
+
+        self._print_threads_until_clear()
 
     def run(self):
         """
@@ -630,15 +672,20 @@ class BotEngine:
         console_enabled = bool(self.cfg.CONSOLE_ENABLED)
 
         # simple signal-aware loop
-        def _sig_handler(_sig, _frm):
+        def _sig_handler(sig, _frm):
+            self._send_queue.put(('stop', None))
             raise KeyboardInterrupt()
 
+        prev_sigint = signal.getsignal(signal.SIGINT)
+        prev_sigterm = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGINT, _sig_handler)
         signal.signal(signal.SIGTERM, _sig_handler)
 
+        console_ui = None
         try:
             if console_enabled:
                 console_ui = ConsoleUI(self)
+                self._console_ui = console_ui
                 self._console_thread = threading.Thread(
                     target=console_ui.run, name="rv-console", daemon=True
                 )
@@ -647,23 +694,28 @@ class BotEngine:
                 log().info(
                     "BotEngine.run: no console; idle loop. Press Ctrl+C to exit."
                 )
-            running = True
-            while running:
+            while True:
                 try:
                     target, payload = self._send_queue.get(timeout=0.5)
                 except Empty:
                     continue
-                if target == "telegram_text":
-                    self._send_text_telegram(payload)
-                elif target == "telegram_photo":
-                    path, caption = payload
-                    self._send_photo_telegram(path, caption)
-                elif target == "stop":
-                    running = False
+                if target == "stop":
+                    log().info("Main loop: stop signal received")
+                    break
         except KeyboardInterrupt:
             log().info("KeyboardInterrupt: shutting down…")
         finally:
             self.stop()
+        log().info("Engine stopped cleanly")
+
+    def _print_threads_until_clear(self, interval: float = 1., max_checks: int = 10):
+        for _ in range(max_checks):
+            threads = [(t.name, t.ident, t.daemon) for t in threading.enumerate()]
+            print("Threads alive:", threads)
+            if len(threads) <= 1:
+                return
+            time.sleep(interval)
+        log().warn("Threads still alive after shutdown", threads=threads)
 
     # ---------- alerts / dispatch ----------
     def emit_alert(self, msg: str):

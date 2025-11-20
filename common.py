@@ -54,6 +54,7 @@ class AppConfig:
     # --- Telegram alerts ---
     # Enable or disable Telegram integration.
     TELEGRAM_ENABLED: Optional[bool] = False
+    CONSOLE_ENABLED: Optional[bool] = False
 
     # Telegram bot token.
     TELEGRAM_TOKEN: Optional[str] = None
@@ -199,13 +200,14 @@ class Log:
         merged = {**self.ctx, **fields} if (fields or self.ctx) else None
         with self._lock:
             if self.json_mode:
-                payload = {"ts": ts, "level": lvname, "name": self.name, "msg": msg}
+                payload = {"ts": ts, "level": lvname, "name": self.name, "thread": threading.current_thread().name, "msg": msg}
                 if merged: payload.update(merged)
                 self.stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
             else:
                 name_part = f" {self.name}" if self.name else ""
+                thread_part = f" [{threading.current_thread().name}]"
                 ctx_part = (" " + json.dumps(merged, ensure_ascii=False)) if merged else ""
-                self.stream.write(f"[{ts}] {lvname}{name_part} {msg}{ctx_part}\n")
+                self.stream.write(f"[{ts}] {lvname}{name_part}{thread_part} {msg}{ctx_part}\n")
             self.stream.flush()
 
     def debug(self, m, **k): self._emit("DEBUG", m, **k)

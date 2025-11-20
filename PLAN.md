@@ -8,6 +8,8 @@ I intend to establish a thinker that will analyse risk
 ## Prompts
 
 
+OK after the shutdown sequence I want you to create a loop where you will probe all the thread states and print all. Then wait a few seconds and do it again until all threads are gone
+
 
 I would like to have a command to generate a (100%+%pnl) chart for all my positions. each position draws a line. x-axis is time and y-axis is %, with 100% in the middle. each line has
   painted circle marker at first point of the position. if position is closed, last point is marked with "x" marker. If open, last point is marked with ">" marker. these markers have same

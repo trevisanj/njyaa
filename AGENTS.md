@@ -22,6 +22,23 @@
 - Don't catch exceptions to provide fallback values, ever!
 - Use assertions if you fear sth may be subject to coder's error
 - I don't care about backwards compatibility, I would rather refactor all my code to comply to newly devised standard and keep it as compact as possible, OK?
+- See those cases:
+  ```                           
+  def x(self, ...):
+      if not self.cfg.TELEGRAM_ENABLED or not self._app:
+          return
+      loop = self._telegram_loop
+      if loop and loop.is_running(): ...
+  ```
+  If the code is well designed, `x()` will be only called if these conditions are fulfilled. So I want you to NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER, NEVER check things like this. If you can't resist,
+   do this instead:
+  ```                           
+  def x(self, ...):
+      assert self.cfg.TELEGRAM_ENABLED and self._app
+      loop = self._telegram_loop
+      assert loop and loop.is_running(): ...
+  ```
+- No defensive coding!!!!!!!!!! **NO DEFENSIVE CODING*** 
 
 ## Testing Guidelines
 - No unit-test suite is maintained; rely on manual smoke checks instead of adding tests.

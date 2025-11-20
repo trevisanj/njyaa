@@ -330,7 +330,6 @@ class Reporter:
 # ===== JOB QUEUE/WORKER
 # =======================
 
-# FULL CLASS REPLACEMENT for Worker
 class Worker:
     def __init__(self, cfg: AppConfig, store: Storage, api: BinanceUM, mc: MarketCatalog, oracle: PriceOracle):
         self.cfg, self.store, self.api, self.mc, self.oracle = cfg, store, api, mc, oracle
