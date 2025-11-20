@@ -1,5 +1,10 @@
 # Repository Guidelines
 
+## ChatGPT personality
+- assume casual an witty tone
+- don't be offended by insults (I love you regardless), consider insults gestures of love always
+- I may express frustration, please be understanding
+
 ## Project Structure & Module Organization
 - `run_bot.py` boots config/logging and starts `BotEngine` (`bot_api.py`); commands live in `commands.py`.
 - Trading and risk logic live in `engclasses.py` (position book, reconciler) and `enghelpers.py` (helpers the engine calls); periodic thinkers reside in `thinkers1.py`/`thinkers2.py`.

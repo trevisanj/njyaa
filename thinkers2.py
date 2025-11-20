@@ -365,7 +365,7 @@ class HorseWithNoName(ThinkerBase):
     ]
 
     def on_init(self):
-        self._cfg["prob"] = float(self._cfg.get("prob") or 0.99)
+        self._cfg["prob"] = float(self._cfg.get("prob") or 0.1)
 
     def tick(self, now_ms: int):
         if random.random() < self._cfg["prob"]:
