@@ -8,7 +8,6 @@ import json
 import threading
 import time
 import os
-import atexit
 import signal
 import logging
 from queue import Queue, Empty
@@ -22,7 +21,25 @@ from engclasses import *  # MarketCatalog, PriceOracle, PositionBook, Worker, Re
 import tabulate
 import asyncio
 
-import readline  # console-only nicety
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.history import FileHistory
+import ctypes
+
+
+class _CommandCompleter(Completer):
+    """prompt_toolkit completer that mirrors the registry command names."""
+
+    def __init__(self, console: "ConsoleUI"):
+        self.console = console
+
+    def get_completions(self, document, complete_event):
+        text = (document.text_before_cursor or "").lstrip()
+        if " " in text:
+            return
+        for word in self.console._command_words():
+            if word.startswith(text):
+                yield Completion(word, start_position=-len(text))
 
 
 if TYPE_CHECKING:
@@ -138,61 +155,44 @@ class InternalScheduler:
 class ConsoleUI:
     """
     Simple blocking REPL that dispatches the same @ / ! commands.
-    - Up/Down history via readline (if available).
-    - TAB completes @/! commands; persists history to ~/.rv_console_history.
+    - History persisted to ~/.rv_console_history (prompt_toolkit FileHistory).
+    - TAB completes @/! commands; completions update as registry changes.
     """
 
     def __init__(self, eng: "BotEngine"):
         self.eng = eng
         self._alive = True
         self._stop_notified = False
+        self._thread_ident: Optional[int] = None
         self._hist_file = os.path.expanduser("~/.rv_console_history")
-        self._setup_readline()
-
-    # ----- readline / completion -----
-    def _setup_readline(self):
-        if not readline:
-            return
-        try:
-            readline.read_history_file(self._hist_file)
-        except FileNotFoundError:
-            pass
-        atexit.register(self._save_history)
-
-        readline.parse_and_bind("tab: complete")
-        readline.set_completer(self._completer)
-        readline.set_pre_input_hook(self._pre_input_hook)
-
-    def _save_history(self):
-        if not readline:
-            return
-        try:
-            readline.set_history_length(1000)
-            readline.write_history_file(self._hist_file)
-        except Exception:
-            pass
+        self._session = self._build_session()
 
     def _command_words(self):
         words = {":q", ":quit", ":exit"}
-        try:
-            reg = getattr(self.eng, "_registry", None)
-            if reg and hasattr(reg, "_handlers"):
-                for (prefix, name) in reg._handlers.keys():
-                    words.add(f"{prefix}{name}")
-        except Exception:
-            pass
+        reg = self.eng._registry
+        if reg:
+            for (prefix, name) in reg._handlers.keys():
+                words.add(f"{prefix}{name}")
         return sorted(words)
 
-    def _completer(self, text, state):
-        head = (readline.get_line_buffer() or "").lstrip()
-        if " " in head:
-            return None
-        matches = [w for w in self._command_words() if w.startswith(text)]
-        return matches[state] if state < len(matches) else None
+    def _build_session(self):
+        history = FileHistory(self._hist_file)
+        completer = _CommandCompleter(self)
+        return PromptSession(
+            history=history,
+            completer=completer,
+            complete_while_typing=True,
+        )
 
-    def _pre_input_hook(self):
-        if not self._alive:
-            raise KeyboardInterrupt()
+    def _interrupt_input(self):
+        ident = self._thread_ident
+        if not ident:
+            return
+        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_long(ident), ctypes.py_object(KeyboardInterrupt)
+        )
+        if res > 1:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(ident), None)
 
     # ----- I/O -----
     def _print(self, msg: str):
@@ -201,9 +201,10 @@ class ConsoleUI:
     # ----- main loop -----
     def run(self):
         self._print("RV console ready. Type @help, or :quit to exit. (TAB completes; ↑↓ recall history)")
+        self._thread_ident = threading.get_ident()
         while self._alive:
             try:
-                line = input("> ").strip()
+                line = self._session.prompt("> ").strip()
             except (EOFError, KeyboardInterrupt):
                 break
             if not line:
@@ -219,9 +220,11 @@ class ConsoleUI:
         if not self._stop_notified:
             self._stop_notified = True
             self.eng.request_stop()
+        self._thread_ident = None
 
     def stop(self):
         self._alive = False
+        self._interrupt_input()
         try:
             os.write(sys.stdin.fileno(), b"\n")
         except Exception:
