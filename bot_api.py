@@ -22,10 +22,8 @@ from engclasses import *  # MarketCatalog, PriceOracle, PositionBook, Worker, Re
 import tabulate
 import asyncio
 
-try:
-    import readline  # optional; console-only nicety
-except ImportError:
-    readline = None
+import readline  # console-only nicety
+
 
 if TYPE_CHECKING:
     from commands import CommandRegistry, CO, OCText  # only for type hints
@@ -163,6 +161,7 @@ class ConsoleUI:
 
         readline.parse_and_bind("tab: complete")
         readline.set_completer(self._completer)
+        readline.set_pre_input_hook(self._pre_input_hook)
 
     def _save_history(self):
         if not readline:
@@ -190,6 +189,10 @@ class ConsoleUI:
             return None
         matches = [w for w in self._command_words() if w.startswith(text)]
         return matches[state] if state < len(matches) else None
+
+    def _pre_input_hook(self):
+        if not self._alive:
+            raise KeyboardInterrupt()
 
     # ----- I/O -----
     def _print(self, msg: str):
