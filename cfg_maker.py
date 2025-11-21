@@ -11,9 +11,9 @@ from bot_api import (
 
 def _get_env(varname, default):
     env_varname = f"NJYAA_{varname}"
-    value = os.environ.get(varname)
+    value = os.environ.get(env_varname)
     if value:
-        print(f"njyaa: Read ({env_varname}: '{value!r}') --> cfg.{varname}")
+        log().info(f"njyaa: Read ({env_varname}: '{value!r}') --> cfg.{varname}")
         return value
     return default
 
@@ -56,7 +56,7 @@ def make_cfg():
         INCOME_POLL_SEC=60,
         REPORT_USD_DIGITS=2,
         TELEGRAM_ENABLED=_get_env_bool("TELEGRAM_ENABLED", False),
-        CONSOLE_ENABLED=_get_env_bool("CONSOLE_ENABLED", True),
+        CONSOLE_ENABLED=_get_env_bool("CONSOLE_ENABLED", False),
         TELEGRAM_TOKEN=T[0],
         TELEGRAM_CHAT_ID=T[1],
         BINANCE_KEY=B[0],
