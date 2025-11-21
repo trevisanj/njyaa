@@ -34,16 +34,14 @@ class ThresholdAlertThinker(ThinkerBase):
       { "fired": false, "last_price": 3981.2, "last_fire_ts": 0 }
     """
     kind = "THRESHOLD_ALERT"
-
-    required_fields = ("symbol", "direction", "price")
+    default_cfg = {
+        "symbol": "BTCUSDT",
+        "direction": "ABOVE",
+        "price": 100_000.0,
+        "message": "",
+    }
 
     def _on_init(self) -> None:
-        self._set_def_cfg({
-            "symbol": "BTCUSDT",
-            "direction": "ABOVE",
-            "price": 0.0,
-            "message": "",
-        })
         d = self._cfg["direction"].upper()
         if d not in ("ABOVE", "BELOW"):
             raise ValueError("direction must be ABOVE or BELOW")
@@ -90,24 +88,24 @@ class PSARStopThinker(ThinkerBase):
         "af": float,
         "trend": "UP"|"DOWN",
         "last_candle_open": int,
-        "last_alert_ts": int
+      "last_alert_ts": int
       }
 
     Fires ALERT when price crosses PSAR against trend.
     """
     kind = "PSAR_STOP"
+    default_cfg = {
+        "position_id": "0",
+        "symbol": "BTCUSDT",
+        "direction": "LONG",
+        "af": 0.02,
+        "max_af": 0.2,
+        "window_min": 200,
+    }
 
-    required_fields = ("position_id", "symbol", "direction")
+    required_cfg_fields = ("position_id", "symbol", "direction")
 
     def _on_init(self) -> None:
-        self._set_def_cfg({
-            "position_id": "0",
-            "symbol": "BTCUSDT",
-            "direction": "LONG",
-            "af": 0.02,
-            "max_af": 0.2,
-            "window_min": 200,
-        })
         self._cfg["af"] = float(self._cfg["af"])
         self._cfg["max_af"] = float(self._cfg["max_af"])
         self._cfg["window_min"] = int(self._cfg["window_min"])
@@ -241,6 +239,11 @@ class RiskThinker(ThinkerBase):
     }
     """
     kind = "RISK_MONITOR"
+    default_cfg = {
+        "warn_exposure_ratio": 1.0,
+        "warn_loss_mult": 1.0,
+        "min_alert_interval_ms": 300_000,
+    }
 
     def __init__(self, tm: "ThinkerManager", eng: BotEngine):
         self._last_alert_ms: int = 0
@@ -248,11 +251,6 @@ class RiskThinker(ThinkerBase):
         self._last_alert_ms: int = 0
 
     def _on_init(self) -> None:
-        self._set_def_cfg({
-            "warn_exposure_ratio": 1.0,
-            "warn_loss_mult": 1.0,
-            "min_alert_interval_ms": 300_000,
-        })
         self._cfg["warn_exposure_ratio"] = float(self._cfg["warn_exposure_ratio"])
         self._cfg["warn_loss_mult"] = float(self._cfg["warn_loss_mult"])
         self._cfg["min_alert_interval_ms"] = int(self._cfg["min_alert_interval_ms"])
@@ -351,7 +349,8 @@ class RiskThinker(ThinkerBase):
 class HorseWithNoName(ThinkerBase):
     """Proof-of-concept thinker"""
     kind = "HORSE_WITH_NO_NAME"
-    required_fields: Tuple[str, ...] = ()
+    required_cfg_fields: Tuple[str, ...] = ()
+    default_cfg = {"prob": 0.1}
 
     LYRICS = [
 "On the first part of the journey",
@@ -384,7 +383,6 @@ class HorseWithNoName(ThinkerBase):
     ]
 
     def _on_init(self):
-        self._set_def_cfg({"prob": 0.1})
         self._cfg["prob"] = float(self._cfg["prob"])
 
     def tick(self, now_ms: int):

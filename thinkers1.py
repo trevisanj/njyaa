@@ -62,12 +62,9 @@ class ThinkerManager:
         if tid in self._instances:
             return
         inst = self.factory.create(tr["kind"])
-        config = _parse_json(tr["config_json"])
-        inst.init(config)
-        runtime = _parse_json(tr["runtime_json"])
-        inst.attach_runtime(tid, runtime)
+        inst._init_from_row(tr)
         self._instances[tid] = inst
-        self._configs[tid] = config
+        self._configs[tid] = dict(inst._cfg)
         self.log.info("thinker.ready", id=tid, kind=tr["kind"])
 
     # --- run one cycle
@@ -153,7 +150,8 @@ class ThinkerFactory:
 
 class ThinkerBase(ABC):
     kind: str = None  # e.g. "THRESHOLD_ALERT", "PSAR_STOP"
-    required_fields: Tuple[str, ...] = ()
+    required_cfg_fields: Tuple[str, ...] = ()
+    default_cfg: Dict[str, Any] = {}
 
     def __init__(self, tm: ThinkerManager, eng: BotEngine):
         self.tm = tm
@@ -162,30 +160,31 @@ class ThinkerBase(ABC):
         self._runtime: Dict[str, Any] = {}
         self._thinker_id: Optional[int] = None
 
-    def init(self, config: Dict[str, Any]) -> None:
-        self._cfg = dict(config or {})
-        self._runtime = {}
-        self._on_init()
-        missing = [k for k in self.required_fields if k not in self._cfg]
-        if missing:
-            raise ValueError(f"{self.__class__.__name__} missing {', '.join(missing)}")
-
     def _set_def_cfg(self, cfg: Dict[str, Any]) -> None:
         assert isinstance(cfg, dict)
         for k, v in cfg.items():
             if k not in self._cfg:
                 self._cfg[k] = v
 
-    def attach_runtime(self, thinker_id: int, runtime: Dict[str, Any]):
-        self._thinker_id = int(thinker_id)
+    def _init_from_row(self, tr) -> None:
+        tid = int(tr["id"])
+        config = _parse_json(tr["config_json"])
+        runtime = _parse_json(tr["runtime_json"])
+        self._thinker_id = int(tid)
+        self._cfg = dict(config or {})
+        if self.default_cfg:
+            self._set_def_cfg(self.default_cfg)
         self._runtime = dict(runtime or {})
+        self._on_init()
+        missing = [k for k in self.required_cfg_fields if k not in self._cfg]
+        if missing:
+            raise ValueError(f"{self.__class__.__name__} missing {', '.join(missing)}")
 
     def runtime(self) -> Dict[str, Any]:
         return self._runtime
 
     def save_runtime(self):
-        if self._store is None or self._thinker_id is None:
-            return
+        assert self._thinker_id is not None
         self.eng.store.update_thinker_runtime(self._thinker_id, self._runtime)
 
     def notify(self, level: str, msg: str, send=False, **kwargs) -> None:
