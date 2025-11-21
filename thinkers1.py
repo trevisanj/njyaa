@@ -5,9 +5,6 @@ from __future__ import annotations
 import json, math, sqlite3, time, threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, Union, TYPE_CHECKING, get_type_hints, Literal
-
-from setuptools.msvc import msvc14_get_vc_env
-
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle, PositionBook
 from klines_cache import KlinesCache
 from common import log, Clock, AppConfig, coerce_to_type
