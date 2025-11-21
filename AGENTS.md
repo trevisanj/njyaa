@@ -8,18 +8,19 @@
 ## Project Structure & Module Organization
 - `run_bot.py` boots config/logging and starts `BotEngine` (`bot_api.py`); commands live in `commands.py`.
 - Trading and risk logic live in `engclasses.py` (position book, reconciler) and `enghelpers.py` (helpers the engine calls); periodic thinkers reside in `thinkers1.py`/`thinkers2.py`.
-- Persistence is through `storage.py` (SQLite with `config` singleton holding balance/leverage/default_risk) and cached candles in `klines_cache.py`; runtime DB files (`rv*.sqlite*`) stay in the repo root.
+- Persistence is through `storage.py` (SQLite with `config` singleton holding balance/leverage/default_risk) and cached candles in `klines_cache.py`; runtime DB files (`njyaa*.sqlite*`) stay in the repo root.
 - External connectivity: `binance_um.py` (REST), Telegram plumbing in `bot_api.py`
 - Shared utilities and logging live in `common.py`; market helpers and charting tweaks are in `enghelpers.py`.
 - `ConsoleUI` class and `prompt_toolkit`'s console application in `console_ui.py` 
 
 ## Build, Test, and Development Commands
 - `python -m venv .venv && source .venv/bin/activate` — create/enter a virtualenv.
-- `python run_bot.py` — start the engine; set `RV_LOG=DEBUG` to inspect schedulers, commands, and thinker ticks.
+- `python run_bot.py` — start the engine; set `NJYAA_LOG=DEBUG` to inspect schedulers, commands, and thinker ticks.
 - `python -m compileall .` — quick syntax/import sanity check without hitting external APIs.
 
 ## Coding Style & Naming Conventions
 - PEP 8, 4-space indents, snake_case for functions/vars, PascalCase for classes; keep type hints consistent.
+- Avoid code repetition: use control variables at will to control flux, assemble result parts aiming fewer lines of code 
 - Use `log()` for structured logging with context keys (`position_id`, `symbol`, `job`).
 - Register new commands via `CommandRegistry.at` (read-only) or `CommandRegistry.bang` (writes) and keep docstrings concise for auto-help.
 - Prefer explicit errors over silent fallbacks; fail fast on missing config or schema.
@@ -57,5 +58,5 @@
 
 ## Security & Configuration Tips
 - Keep secrets out of logs: Binance keys, Telegram tokens, chat IDs, and account identifiers.
-- Runtime DB paths are configurable via env (`RV_SQLITE`, `RV_CACHE_SQLITE`); keep them local or gitignored.
+- Runtime DB paths are configurable via env (`NJYAA_SQLITE`, `NJYAA_CACHE_SQLITE`); keep them local or gitignored.
 - Validate config updates (`!config-set`) carefully: positive balances/leverage, risk as decimal (e.g., 0.02 for 2%).

@@ -3,14 +3,14 @@ from __future__ import annotations
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 import sys, json
-from typing import List, Optional
+from typing import List, Optional, Any, Literal, Union
 import re
 from datetime import datetime, timezone, timedelta, tzinfo
 import threading
 from typing import Optional, Union
 
 
-__all__ = ["AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when", "ts_human", "LV"]
+__all__ = ["AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when", "ts_human", "LV", "coerce_to_type", "pct_of", "leg_pnl"]
 
 
 LV = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
@@ -167,7 +167,7 @@ class Log:
         self.stream = stream or sys.stdout
         self.level  = LV[level]
         self.json_mode = bool(json_mode)
-        self.name   = name  # e.g., 'rv.worker'
+        self.name   = name  # e.g., 'njyaa.worker'
         self.ctx    = dict(context or {})
         self._lock  = threading.Lock()
 
@@ -225,7 +225,7 @@ class Log:
 
 
 # ---- global logger + override hook ----
-_log = Log("DEBUG", name="rv")  # default singleton used across API
+_log = Log("INFO", name="njyaa")  # default singleton used across API
 
 def set_global_logger(new_log: Log):
     """Call this from your main to replace the API's global `log`."""
@@ -238,6 +238,67 @@ def log() -> Log:
 def sublog(name, **ctx) -> Log:
     """Create a child logger sharing global config."""
     return _log.child(name).bind(**ctx)
+
+
+def coerce_to_type(val: Any, typ: Any) -> Any:
+    """Best-effort coercion for thinker config fields based on type hints."""
+    origin = getattr(typ, "__origin__", None)
+    args = getattr(typ, "__args__", ())
+
+    # Literal[...] handling
+    if origin is Literal:
+        base_types = [type(a) for a in args if a is not None]
+        if base_types:
+            try:
+                val = coerce_to_type(val, base_types[0])
+            except Exception:
+                pass
+        if val not in args:
+            raise ValueError(f"Invalid literal {val} (allowed: {args})")
+        return val
+
+    # Optional[X] -> treat as Union[X,None]
+    if origin is Union and len(args) == 2 and type(None) in args:
+        other = args[0] if args[1] is type(None) else args[1]
+        if val in (None, "None", "none"):
+            return None
+        return coerce_to_type(val, other)
+
+    # Primitive coercions
+    if typ in (int, float, str, bool):
+        if typ is bool:
+            if isinstance(val, str):
+                if val.lower() in ("true", "1", "yes", "on"):
+                    return True
+                if val.lower() in ("false", "0", "no", "off"):
+                    return False
+            return bool(val)
+        try:
+            return typ(val)
+        except Exception:
+            raise ValueError(f"Expected {typ.__name__} got {val}")
+
+    return val
+
+
+def pct_of(val: Any, base: Any) -> Optional[float]:
+    """Return val/base as float percentage (0-1)."""
+    try:
+        if val is None or base is None:
+            return None
+        base_f = float(base)
+        if base_f == 0.0:
+            return None
+        return float(val) / base_f
+    except Exception:
+        return None
+
+
+def leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float]) -> Optional[float]:
+    """Return leg PnL in quote terms."""
+    if entry is None or qty is None or mark is None:
+        return None
+    return (float(mark) - float(entry)) * float(qty)
 
 
 # ---- tiny TF helpers ----

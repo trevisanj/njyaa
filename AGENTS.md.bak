@@ -3,17 +3,17 @@
 ## Project Structure & Module Organization
 - `run_bot.py` bootstraps config (`cfg_maker.py`), logging, and launches `BotEngine` (`bot_api.py`).
 - Trading logic and orchestration live in `engclasses.py` (classes dependent on BotEngine)/`enghelpers.py` (helpers that take eng:BotEngine as first argument); Binance REST client is in `binance_um.py`; command parsing is in `commands.py`; periodic "thinking" logic (every few seconds fetch market data -> "think") in `thinkers1.py`/`thinkers2.py`
-- Data is persisted via `storage.py` (SQLite) and cached candles in `klines_cache.py`. Runtime databases (`rv.sqlite*`, `rv_cache.sqlite*`) reside in the root—keep them local.
+- Data is persisted via `storage.py` (SQLite) and cached candles in `klines_cache.py`. Runtime databases (`njyaa.sqlite*`, `NJYAA_cache.sqlite*`) reside in the root—keep them local.
 - Utilities and shared types (not dependent on BotEngine) are in `common.py`; console REPL helpers live in `console_ui.py`.
 
 ## Setup & Configuration
 - Python 3.10+ recommended; create a venv and install deps (`pip install requests tabulate`; pin new libs you add).
-- Secrets are loaded from `/home/j/yp/saccakeys` in `make_cfg`; never commit keys. Env vars override defaults: `RV_SQLITE`, `RV_CACHE_SQLITE`, `RV_LOG`, `RV_KLINES_POLL_SEC`, `RV_KLINES_TFS`.
+- Secrets are loaded from `/home/j/yp/saccakeys` in `make_cfg`; never commit keys. Env vars override defaults: `NJYAA_SQLITE`, `NJYAA_CACHE_SQLITE`, `NJYAA_LOG`, `NJYAA_KLINES_POLL_SEC`, `NJYAA_KLINES_TFS`.
 - Binance requires `BINANCE_KEY`/`BINANCE_SEC`; Telegram alerts need `TELEGRAM_TOKEN`/`TELEGRAM_CHAT_ID`. Prefer env exports or the private key store.
 
 ## Build, Test, and Development Commands
 - `python -m venv .venv && source .venv/bin/activate` — isolate dependencies.
-- `python run_bot.py` — start the engine; use `RV_LOG=DEBUG` to raise verbosity and watch scheduler, polling, and commands.
+- `python run_bot.py` — start the engine; use `NJYAA_LOG=DEBUG` to raise verbosity and watch scheduler, polling, and commands.
 - `python -m compileall .` — fast syntax/import sanity check without hitting external services.
 
 ## Coding Style & Naming Conventions

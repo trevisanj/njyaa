@@ -112,7 +112,7 @@ class InternalScheduler:
         with self._lock:
             self._jobs.pop(name, None)
 
-    def start(self, thread_name: str = "rv-scheduler"):
+    def start(self, thread_name: str = "njyaa-scheduler"):
         if self._thr and self._thr.is_alive():
             return
         self._stop.clear()
@@ -169,7 +169,7 @@ class TelegramBot:
 
 class BotEngine:
     """
-    Core orchestrator for the RV system.
+    Core orchestrator for the NJYAA system.
 
     Responsibilities:
       - Build and wire domain services (BinanceUM, Storage, MarketCatalog, etc.)
@@ -220,7 +220,7 @@ class BotEngine:
             Log(
                 level=cfg.LOG_LEVEL or "INFO",
                 stream=self._log_stream,
-                name="rv",
+                name="njyaa",
                 json_mode=False,
             )
         )
@@ -366,12 +366,12 @@ class BotEngine:
         if self._stopping: return
         self._console_ui.append_output(text)
 
-    def _send_text_telegram(self, text: str) -> None:
+    def _send_text_telegram(self, text: str, parse_mode: Optional[str] = None) -> None:
         """Telegram sink for alerts/heartbeats."""
         if self._stopping: return
         loop = self._telegram_loop
         coro = self._app.bot.send_message(
-            chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=text
+            chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=text, parse_mode=parse_mode
         )
         asyncio.run_coroutine_threadsafe(coro, loop)
 
@@ -563,7 +563,7 @@ class BotEngine:
 
         # Start worker
         self._worker_thread = threading.Thread(
-            target=self.worker.run_forever, name="rv-worker", daemon=False
+            target=self.worker.run_forever, name="njyaa-worker", daemon=False
         )
         self._worker_thread.start()
         log().info("Worker thread started")
@@ -576,7 +576,7 @@ class BotEngine:
             log().info("Telegram polling…")
             self._tg_thread = threading.Thread(
                 target=self._telegram_thread_main,
-                name="rv-telegram",
+                name="njyaa-telegram",
                 daemon=True,
             )
             self._tg_thread.start()
@@ -668,7 +668,7 @@ class BotEngine:
                 console_ui = ConsoleUI(self)
                 self._console_ui = console_ui
                 self._console_thread = threading.Thread(
-                    target=console_ui.run, name="rv-console", daemon=True
+                    target=console_ui.run, name="njyaa-console", daemon=True
                 )
                 self._console_thread.start()
             else:
@@ -761,7 +761,7 @@ class BotEngine:
 
     # ---------- telegram handlers ----------
     async def _cmd_start(self, update, context):
-        await update.message.reply_text("RV bot ready. Try: @help")
+        await update.message.reply_text("NJYAA bot ready. Try: @help")
 
     async def _on_text(self, update, context):
         msg = (update.message.text or "").strip()

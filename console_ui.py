@@ -5,6 +5,7 @@ from typing import Optional
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.history import FileHistory
 from common import log
 import sys
 from threading import Lock
@@ -31,15 +32,25 @@ class ConsoleUI:
     rest of the program continues printing logs to stdout.
     """
 
+    class _History(FileHistory):
+        """Persisted history that skips quit commands and empties."""
+        def append_string(self, string: str) -> None:
+            s = (string or "").strip()
+            if not s or s in (":q", ":quit", ":exit"):
+                return
+            super().append_string(string)
+
     def __init__(self, eng: "BotEngine"):
         self.eng = eng
         self._alive = True
         self._stop_notified = False
-        self._hist_file = os.path.expanduser("~/.rv_console_history")
+        self._hist_file = os.path.expanduser("~/.NJYAA_console_history")
+        self._history = ConsoleUI._History(self._hist_file)
         self._completer = _CommandCompleter(self)
         self._session = PromptSession(
             completer=self._completer,
             complete_while_typing=False,
+            history=self._history,
         )
         self._complete_style = CompleteStyle.COLUMN
 

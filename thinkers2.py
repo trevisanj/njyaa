@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 import json, math, sqlite3, time, random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CHECKING
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
-from common import log, Clock, AppConfig
+from common import log, Clock, AppConfig, leg_pnl
 from thinkers1 import ThinkerBase
+import enghelpers as eh
+import risk_report
 
 if TYPE_CHECKING:
     from bot_api import BotEngine
@@ -34,12 +36,13 @@ class ThresholdAlertThinker(ThinkerBase):
       { "fired": false, "last_price": 3981.2, "last_fire_ts": 0 }
     """
     kind = "THRESHOLD_ALERT"
-    default_cfg = {
-        "symbol": "BTCUSDT",
-        "direction": "ABOVE",
-        "price": 100_000.0,
-        "message": "",
-    }
+
+    @dataclass
+    class Config:
+        symbol: str = field(default="BTCUSDT", metadata={"help": "Market symbol to watch"})
+        direction: Literal["ABOVE", "BELOW"] = field(default="ABOVE", metadata={"help": "Trigger when price is ABOVE or BELOW threshold"})
+        price: float = field(default=100_000.0, metadata={"help": "Trigger threshold price"})
+        message: str = field(default="", metadata={"help": "Optional custom alert message"})
 
     def _on_init(self) -> None:
         d = self._cfg["direction"].upper()
@@ -94,16 +97,14 @@ class PSARStopThinker(ThinkerBase):
     Fires ALERT when price crosses PSAR against trend.
     """
     kind = "PSAR_STOP"
-    default_cfg = {
-        "position_id": "0",
-        "symbol": "BTCUSDT",
-        "direction": "LONG",
-        "af": 0.02,
-        "max_af": 0.2,
-        "window_min": 200,
-    }
-
-    required_cfg_fields = ("position_id", "symbol", "direction")
+    @dataclass
+    class Config:
+        position_id: str = field(default="0", metadata={"help": "Target position id (string/hex)"})
+        symbol: str = field(default="BTCUSDT", metadata={"help": "Symbol to monitor for PSAR stops"})
+        direction: Literal["LONG", "SHORT"] = field(default="LONG", metadata={"help": "LONG triggers on close < psar; SHORT triggers on close > psar"})
+        af: float = field(default=0.02, metadata={"help": "Acceleration factor step"})
+        max_af: float = field(default=0.2, metadata={"help": "Maximum acceleration factor"})
+        window_min: int = field(default=200, metadata={"help": "Number of 1m bars to pull for PSAR"})
 
     def _on_init(self) -> None:
         self._cfg["af"] = float(self._cfg["af"])
@@ -204,24 +205,8 @@ class PSARStopThinker(ThinkerBase):
         return 1
 
 
-def _leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float]) -> Optional[float]:
-    if entry is None or qty is None or mark is None:
-        return None
-    return (float(mark) - float(entry)) * float(qty)
-
-
-def _last_cached_price(eng: BotEngine, symbol: str) -> Optional[float]:
-    kc = eng.kc
-    tfs = eng.cfg.KLINES_TIMEFRAMES or ["1m"]
-    for tf in tfs:
-        r = kc.last_row(symbol, tf)
-        if r and r["close"] is not None:
-            return float(r["close"])
-    return None
-
-
 def _mark_close_now(eng: BotEngine, symbol: str) -> Optional[float]:
-    return _last_cached_price(eng, symbol)
+    return eh.last_cached_price(eng, symbol)
 
 
 def _minute_klines(eng: BotEngine, symbol: str, mins: int) -> List:
@@ -239,118 +224,60 @@ class RiskThinker(ThinkerBase):
     }
     """
     kind = "RISK_MONITOR"
-    default_cfg = {
-        "warn_exposure_ratio": 1.0,
-        "warn_loss_mult": 1.0,
-        "min_alert_interval_ms": 300_000,
-    }
 
     def __init__(self, tm: "ThinkerManager", eng: BotEngine):
         self._last_alert_ms: int = 0
         super().__init__(tm, eng)
         self._last_alert_ms: int = 0
 
+    @dataclass
+    class Config:
+        warn_exposure_ratio: float = field(default=1.0, metadata={"help": "Alert when exposure exceeds ratio * max_exposure "})
+        warn_loss_mult: float = field(default=1.0, metadata={"help": "Alert when PnL <= -mult * risk_budget"})
+        min_alert_interval_ms: int = field(default=300_000, metadata={"help": "Cooldown between alerts (ms)"})
+
     def _on_init(self) -> None:
-        self._cfg["warn_exposure_ratio"] = float(self._cfg["warn_exposure_ratio"])
-        self._cfg["warn_loss_mult"] = float(self._cfg["warn_loss_mult"])
-        self._cfg["min_alert_interval_ms"] = int(self._cfg["min_alert_interval_ms"])
+        pass
 
     def tick(self, now_ms: int):
-        cfg = self.eng.store.get_config()
-        ref_balance = cfg["reference_balance"]
-        leverage = cfg["leverage"]
-        max_exposure = ref_balance * leverage if ref_balance and leverage else None
+        thresholds = risk_report.RiskThresholds(
+            warn_exposure_ratio=self._cfg["warn_exposure_ratio"],
+            warn_loss_mult=self._cfg["warn_loss_mult"],
+        )
+        report = risk_report.build_risk_report(self.eng, thresholds)
 
-        rows = self.eng.store.list_open_positions()
-        if not rows:
-            return 0
-
-        involved_syms = set()
-        for r in rows:
-            for lg in self.eng.store.get_legs(r["position_id"]):
-                if lg["symbol"]:
-                    involved_syms.add(lg["symbol"])
-        marks = {s: _last_cached_price(self.eng, s) for s in involved_syms}
-
-        total_exposure = 0.0
-        exposure_missing = False
-        alerts: List[str] = []
-        payload_positions: List[Dict[str, Any]] = []
-
-        for r in rows:
-            pid = int(r["position_id"])
-            legs = self.eng.store.get_legs(pid)
-            notional = 0.0
-            notional_missing = False
-            pos_pnl = 0.0
-            pnl_missing = False
-            risk_val = float(r["risk"])
-            risk_budget = ref_balance * risk_val if ref_balance else None
-
-            for lg in legs:
-                mk = marks.get(lg["symbol"])
-                pnl = _leg_pnl(lg["entry_price"], lg["qty"], mk)
-                if pnl is None:
-                    pnl_missing = True
-                else:
-                    pos_pnl += pnl
-                if lg["qty"] is None or mk is None:
-                    notional_missing = True
-                else:
-                    notional += abs(float(lg["qty"])) * float(mk)
-
-            if not notional_missing:
-                total_exposure += notional
-            else:
-                exposure_missing = True
-                notional = None
-
-            hit_loss = False
-            if risk_budget and not pnl_missing:
-                if pos_pnl <= -self._cfg["warn_loss_mult"] * risk_budget:
-                    hit_loss = True
-                    alerts.append(
-                        f"#{pid} drawdown {pos_pnl:.2f} <= -{self._cfg['warn_loss_mult']}R "
-                        f"(risk={risk_val:.3f}, budget={risk_budget:.2f})"
-                    )
-
-            payload_positions.append({
-                "position_id": pid,
-                "risk": risk_val,
-                "risk_budget": risk_budget,
-                "pnl": pos_pnl if not pnl_missing else None,
-                "pnl_missing": pnl_missing,
-                "notional": notional,
-                "notional_missing": notional_missing,
-                "loss_hit": hit_loss,
-            })
-
-        if max_exposure and total_exposure > self._cfg["warn_exposure_ratio"] * max_exposure:
-            alerts.append(
-                f"Exposure {total_exposure:.2f} exceeds "
-                f"{self._cfg['warn_exposure_ratio']*100:.0f}% of max {max_exposure:.2f}"
-                + (" (incomplete)" if exposure_missing else "")
-            )
-
-        if not alerts:
-            return 0
+        if not report.alerts:
+            return
 
         if now_ms - self._last_alert_ms < self._cfg["min_alert_interval_ms"]:
-            self.notify("DEBUG", "[risk] alerts suppressed (cooldown)",
-                        alerts=alerts, cooldown_ms=self._cfg["min_alert_interval_ms"])
-            return len(alerts)
+            self.notify(
+                "DEBUG",
+                "[risk] alerts suppressed (cooldown)",
+                alerts=[a.message for a in report.alerts],
+                cooldown_ms=self._cfg["min_alert_interval_ms"],
+            )
+            return None
 
         self._last_alert_ms = now_ms
-        self.notify("WARN", "[risk] " + "; ".join(alerts), send=True,
-                    exposure=total_exposure, max_exposure=max_exposure,
-                    ref_balance=ref_balance, leverage=leverage, positions=payload_positions)
-        return len(alerts)
+        self.notify(
+            "WARN",
+            "[risk] " + "; ".join(a.message for a in report.alerts),
+            send=True,
+            exposure=report.total_exposure,
+            max_exposure=report.max_exposure,
+            ref_balance=report.ref_balance,
+            leverage=report.leverage,
+            # positions=[p.__dict__ for p in report.positions],
+        )
+        return None
 
 class HorseWithNoName(ThinkerBase):
     """Proof-of-concept thinker"""
     kind = "HORSE_WITH_NO_NAME"
-    required_cfg_fields: Tuple[str, ...] = ()
-    default_cfg = {"prob": 0.1}
+
+    @dataclass
+    class Config:
+        prob: float = field(default=0.1, metadata={"help": "Probability of sending a lyric each tick (0-1)"})
 
     LYRICS = [
 "On the first part of the journey",
@@ -388,4 +315,10 @@ class HorseWithNoName(ThinkerBase):
     def tick(self, now_ms: int):
         if random.random() < self._cfg["prob"]:
             line = random.choice(self.LYRICS)
-            self.eng._render_co(OCMarkDown(f"> {line}"))
+
+            self.notify(
+                "WARN",
+                f"HORSE SAYS: ((({line})))",
+                send=True,
+            )
+            # self.eng._render_co(OCMarkDown(f"> {line}"))

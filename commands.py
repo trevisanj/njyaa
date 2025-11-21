@@ -1,7 +1,9 @@
 # commands.py
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, MISSING
 from typing import Any, Callable, Dict, Tuple, Optional, List, Sequence, Literal, TYPE_CHECKING
+import json
+import os
 
 from common import *
 from datetime import datetime, timezone, timedelta
@@ -10,12 +12,14 @@ from binance_um import BinanceUM
 import tabulate
 import enghelpers as eh
 import re
+import matplotlib.pyplot as plt
 from rich.console import Console
 from rich.markdown import Markdown, Heading
 from rich.theme import Theme
 from rich.text import Text
 from rich.rule import Rule
-from common import Clock
+from common import Clock, coerce_to_type, pct_of, leg_pnl
+from risk_report import build_risk_report, RiskThresholds, RiskReport, format_risk_report
 
 if TYPE_CHECKING:
     from bot_api import BotEngine
@@ -35,9 +39,9 @@ RICH_MD_THEME = Theme({
     "markdown.paragraph": T_NORMAL,
     "markdown.em": "italic light_sky_blue3",
     "markdown.strong": "bold grey93",
-    "markdown.h1": "bold grey100",
-    "markdown.h2": "bold grey93",
-    "markdown.h3": "bold grey85",
+    "heading.h1": "bold turquoise2",
+    "heading.h2": "bold dark_turquoise",
+    "heading.h3": "bold cyan3",
     "markdown.item": T_NORMAL,
     "markdown.item.bullet": T_NORMAL,
     "markdown.block_quote": "steel_blue",
@@ -52,6 +56,41 @@ RICH_MD_CONFIG = {
     "color_system": "truecolor",  # None|standard|256|truecolor
 }
 
+EGY_UPATS = [
+    ("██▓▒░", "◢◣", "░▒▓██"),   # h1
+    ("▓░", "▲", "░▓"),         # h2
+    ("▄▄", "◤◢", "▄▄"),        # h3
+    ("═", "✦", "═"),           # h4
+    ("·", "𓈖", "·"),           # h5
+]
+
+# EGY_UPATS = [
+#     ("◢", "■", "◣"),      # h1 solid pyramid cap
+#     ("◤", "▹", "◥"),      # h2 airy directional geometry
+#     ("◧", "●", "◨"),      # h3 circle-in-square aesthetic
+#     ("⌜", "∙", "⌝"),      # h4 minimalist sand glyphs
+#     ("˹", "·", "˺"),       # h5 soft dust brackets
+# ]
+
+
+def gen_uline_for(title: str, level: int) -> str:
+    if not title:
+        raise ValueError("Title must not be empty")
+
+    try:
+        left, mid, right = EGY_UPATS[level]
+    except IndexError:
+        raise ValueError(f"Invalid level {level}. Must be 0..{len(EGY_UPATS)-1}")
+
+    reps = len(title)
+    middle = (mid * reps)[:reps]
+    return f"{left}{middle}{right}"
+
+def fmt_uline(title: str, level: int) -> tuple[str, str]:
+    """Formatted underline (returns tuple)"""
+    uline = gen_uline_for(title, level)
+    return " "*len(EGY_UPATS[level][0]) + title, uline
+
 # Toggle pure markdown (no rich rendering) for debugging.
 RENDER_MARKDOWN = True
 # Whether to render command details as code or blockquote
@@ -60,16 +99,38 @@ BLOCKQUOTE = False
 # Custom heading renderer to avoid boxed/centered titles.
 class FlatHeading(Heading):
     def __rich_console__(self, console, options):
-        text: Text = self.text
-        text.justify = "left"
-        yield text
-        if self.tag in ("h1", "h2"):
-            underline = "─" * max(len(text.plain), 1)
-            underline_text = Text(underline, style=self.style_name, justify="left")
-            yield underline_text
+        tt = self.text.plain  # title text
+        style = f"heading.{self.tag}"
+        i = int(style[-1])-1
+        t, u = fmt_uline(tt, i)
+
+        T = Text(t, style=style, justify="left")
+        yield T
+
+        if u:
+            T = Text(u, style=style, justify="left")
+            yield T
 
 # Patch Markdown to use the flat heading renderer
 Markdown.elements["heading_open"] = FlatHeading
+
+
+def _coerce_cfg_val(raw: str) -> Any:
+    s = raw.strip()
+    if s.lower() in ("true", "false"):
+        return s.lower() == "true"
+    if s.lower() in ("null", "none"):
+        return None
+    try:
+        if "." not in s:
+            return int(s)
+    except Exception:
+        pass
+    try:
+        return float(s)
+    except Exception:
+        return raw
+
 
 
 # ============== UI OUTPUT MODEL ==============
@@ -133,7 +194,7 @@ class OCMarkDown(OC):
         return rendered
 
     def render_telegram(self, eng: BotEngine) -> str:
-        eng._send_text_telegram(self.text)
+        eng._send_text_telegram(self.text, parse_mode="Markdown")
         return self.text
 
 
@@ -249,13 +310,13 @@ class CommandRegistry:
         self._meta: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     # ---- decorators ----
-    def at(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None):
-        return self._reg((AT_KEY, name.lower()), argspec, options, nreq)
+    def at(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None, freeform: bool = False):
+        return self._reg((AT_KEY, name.lower()), argspec, options, nreq, freeform)
 
-    def bang(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None):
-        return self._reg((BANG_KEY, name.lower()), argspec, options, nreq)
+    def bang(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None, freeform: bool = False):
+        return self._reg((BANG_KEY, name.lower()), argspec, options, nreq, freeform)
 
-    def _reg(self, key: Tuple[str, str], argspec: Optional[List[str]], options: Optional[List[str]], nreq: Optional[int]):
+    def _reg(self, key: Tuple[str, str], argspec: Optional[List[str]], options: Optional[List[str]], nreq: Optional[int], freeform: bool):
         def deco(fn):
             self._handlers[key] = fn
             # Extract first docstring line as summary (if present)
@@ -265,6 +326,7 @@ class CommandRegistry:
             self._meta[key] = {
                 "argspec": list(argspec or []),
                 "options": set(options or []),
+                "freeform": bool(freeform),
                 "summary": summary,
                 "name": key[1],
                 "prefix": key[0],
@@ -298,14 +360,18 @@ class CommandRegistry:
             return f"Unknown {prefix}{head}. Try {AT_KEY}help."
 
         # Parse args according to argspec/options
-        args = self._parse_args(tail, meta)
+        args, errors = self._parse_args(tail, meta)
+        if errors:
+            usage = self._usage_line(meta, reason="; ".join(errors))
+            return CO(OCMarkDown(usage))
         argspec_in_meta = list(meta["argspec"])
         nreq = meta.get("nreq", len(argspec_in_meta))
         # Required positionals: first nreq argspec entries
         required_names = argspec_in_meta[:nreq]
         missing = [a for a in required_names if a not in args]
         if missing:
-            return self._usage_line(meta, reason=f"Missing: {', '.join(missing)}")
+            usage = self._usage_line(meta, reason=f"Missing: {', '.join(missing)}")
+            return CO(OCMarkDown(usage))
 
         log().debug("dispatch.call", cmd=head, prefix=prefix, args=args)
         try:
@@ -317,12 +383,14 @@ class CommandRegistry:
             return f"Error: {e}"
 
     # ---- parsing helpers ----
-    def _parse_args(self, tail: str, meta: Dict[str, Any]) -> Dict[str, str]:
+    def _parse_args(self, tail: str, meta: Dict[str, Any]) -> Tuple[Dict[str, str], List[str]]:
         argspec: List[str] = meta.get("argspec", [])
         options: set = meta.get("options", set())
+        freeform: bool = bool(meta.get("freeform"))
 
         toks = tail.split() if tail else []
         result: Dict[str, str] = {}
+        errors: List[str] = []
 
         # Fill positionals
         for name in argspec:
@@ -337,16 +405,21 @@ class CommandRegistry:
 
         # Remaining tokens as key:value (only declared options)
         for tok in toks:
-            if ":" in tok:
-                k, v = tok.split(":", 1)
+            if ":" in tok or "=" in tok:
+                if ":" in tok:
+                    k, v = tok.split(":", 1)
+                else:
+                    k, v = tok.split("=", 1)
                 k = k.strip().lower()
                 v = v.strip()
-                if not options or k in options:
+                if k in options or freeform:
                     result[k] = v
+                else:
+                    errors.append(f"Unknown option '{k}'")
             else:
-                log().debug("dispatch.ignored-token", token=tok)
+                errors.append(f"Unexpected token '{tok}'")
 
-        return result
+        return result, errors
 
     # ---- help/usage ----
     def _usage_line(self, meta: Dict[str, Any], reason: Optional[str] = None) -> str:
@@ -365,6 +438,8 @@ class CommandRegistry:
         if meta["options"]:
             opt_items = " ".join(f"[{o}:…]" for o in sorted(meta["options"]))
             opt = (" " + opt_items) if opt_items else ""
+        if meta.get("freeform"):
+            opt += " [key=val ...]"
         line = f"**{pre}{nm}**" + (f" {pos}" if pos else "") + opt
         line = re.sub(r"\s{2,}", " ", line).strip()
         if reason:
@@ -460,12 +535,70 @@ def build_registry() -> CommandRegistry:
     def _txt(text: str) -> CO:
         return CO(OCText(text))
 
+    def _err(text: str) -> CO:
+        body = "\n".join(["**Error**", "", f"- {text.strip()}"])
+        return CO(OCMarkDown(body))
+
     def _tbl(headers: List[str], rows: List[Sequence[Any]], intro: str | None = None) -> CO:
         comps: List[OC] = []
         if intro:
             comps.append(OCMarkDown(intro))
         comps.append(OCTable(headers=headers, rows=rows))
         return CO(comps)
+
+    def _thinker_kind_info(eng: BotEngine) -> List[Dict[str, Any]]:
+        infos: List[Dict[str, Any]] = []
+        factory = eng.tm.factory
+        for kind in factory.kinds():
+            cls = factory.cls_for(kind)
+            doc = (cls.__doc__ or "").strip()
+            one_liner = ""
+            if doc:
+                for ln in doc.splitlines():
+                    ln = ln.strip()
+                    if ln:
+                        one_liner = ln
+                        break
+            cfg_cls = getattr(cls, "Config", None)
+            assert cfg_cls is not None, f"{kind} missing Config dataclass"
+            cfg_fields = []
+            for f in fields(cfg_cls):
+                default = f.default
+                if default is MISSING:
+                    assert f.default_factory is not MISSING
+                    default = f.default_factory()
+                cfg_fields.append({
+                    "name": f.name,
+                    "default": default,
+                    "help": f.metadata.get("help") if f.metadata else "",
+                })
+            infos.append({"kind": kind, "doc": one_liner, "fields": cfg_fields})
+        return infos
+
+    def _render_cfg_fields(cfg_fields: List[Dict[str, Any]]) -> str:
+        lines = ["{"]
+        for f in cfg_fields:
+            val = json.dumps(f["default"], ensure_ascii=False)
+            comment = f["help"]
+            suffix = f"  # {comment}" if comment else ""
+            lines.append(f'  "{f["name"]}": {val},' + (f" {suffix}" if suffix else ""))
+        lines.append("}")
+        return "\n".join(lines)
+
+    def _thinker_kind_blocks(eng: BotEngine) -> str:
+        blocks: List[str] = []
+        for info in _thinker_kind_info(eng):
+            block_lines = [f"**{info['kind']}**"]
+            if info["doc"]:
+                block_lines.append(f"*{info['doc']}*")
+            block_lines.extend([
+                "```",
+                _render_cfg_fields(info["fields"]),
+                "```",
+            ])
+            block = "\n".join(block_lines)
+            blocks.append(block.strip("\n"))
+        return "\n\n".join(blocks)
 
     # ----------------------- HELP -----------------------
     # TODO improve help formatting
@@ -527,8 +660,8 @@ def build_registry() -> CommandRegistry:
 
         detail: 1 = summary
                 2 = summary + per-position overview (with opened datetime & signed target)
-                3 = level 2 + per-symbol leg summary (agg qty, WAP, last price, PnL)
-                4 = level 2 + list every leg (timestamp, entry, last, qty, PnL)
+                3 = per-symbol leg summary (agg qty, WAP, last price, PnL)
+                4 = list every leg (timestamp, entry, last, qty, PnL)
 
         Examples:
           ?positions detail:1
@@ -576,40 +709,19 @@ def build_registry() -> CommandRegistry:
             for lg in store.get_legs(r["position_id"]):
                 if lg["symbol"]:
                     involved_syms.add(lg["symbol"])
-        marks: Dict[str, Optional[float]] = {s: _last_cached_price(eng, s) for s in involved_syms}
+            marks: Dict[str, Optional[float]] = {s: eh.last_cached_price(eng, s) for s in involved_syms}
 
-        # ---------- detail 1: summary ----------
+        # Shared accumulators
+        md_lines: List[str] = [f"# Positions ({status})"]
+        summary_lines: List[str] = []
+        rows_tbl_d2: List[Sequence[Any]] = []
+        detail3_lines: List[str] = []
+        detail4_lines: List[str] = []
+
         total_target = 0.0
         total_pnl = 0.0
         pnl_missing_count = 0
-        for r in rows:
-            total_target += _position_signed_target(r)
-            # Sum position PnL from legs with None-safe handling
-            pos_pnl = 0.0
-            pos_missing = 0
-            for lg in store.get_legs(r["position_id"]):
-                m = marks.get(lg["symbol"])
-                pnl = _leg_pnl(lg["entry_price"], lg["qty"], m)
-                if pnl is None:
-                    pos_missing += 1
-                    continue
-                pos_pnl += pnl
-            total_pnl += pos_pnl
-            pnl_missing_count += (1 if pos_missing else 0)
 
-        md_lines: List[str] = [f"# Positions ({status})"]
-        lines: List[str] = []
-        total_pnl_pct = _fmt_pct(_pct_of(total_pnl, ref_balance), show_sign=True)
-        bal_str = _fmt_num(ref_balance, 2)
-        lines.append(
-            f"Positions: {len(rows)} | Target ≈ ${_fmt_num(total_target, 2)} | "
-            f"PNL ≈ ${_fmt_num(total_pnl, 2)} ({total_pnl_pct} of balance ${bal_str})"
-            + (f" (PnL incomplete for {pnl_missing_count} position(s))" if pnl_missing_count else "")
-        )
-        if detail == 1:
-            return _md("\n".join(md_lines + [""] + lines))
-
-        # ---------- detail 2+: per-position overview ----------
         count = 0
         for r in rows:
             if count >= limit:
@@ -619,34 +731,45 @@ def build_registry() -> CommandRegistry:
             opened_str = ts_human(opened_ms)
             signed_target = _position_signed_target(r)
 
-            # compute position pnl and missing flag
+            # per-position aggregates
             pos_pnl = 0.0
             any_missing = False
-            for lg in store.get_legs(pid):
+            legs = store.get_legs(pid)
+            for lg in legs:
                 m = marks.get(lg["symbol"])
-                pnl = _leg_pnl(lg["entry_price"], lg["qty"], m)
+                pnl = leg_pnl(lg["entry_price"], lg["qty"], m)
                 if pnl is None:
                     any_missing = True
                 else:
                     pos_pnl += pnl
 
+            total_target += signed_target
+            if any_missing:
+                pnl_missing_count += 1
+            else:
+                total_pnl += pos_pnl
+
             risk_pct = _fmt_pct(r["risk"], show_sign=False)
-            pnl_pct = _fmt_pct(_pct_of(pos_pnl, ref_balance), show_sign=True)
+            pnl_pct = _fmt_pct(pct_of(pos_pnl, ref_balance), show_sign=True)
             pnl_str = f"${_fmt_num(pos_pnl, 2)}" + (" (incomplete)" if any_missing else "")
 
-            lines.append(
-                f"{pid} {r['num']} / {r['den'] or '-'} "
-                f"status={r['status']} opened={opened_str} "
-                f"signed_target=${_fmt_num(signed_target, 2)} "
-                f"risk={risk_pct} pnl={pnl_str} pnl%={pnl_pct}"
-            )
+            # detail 2 rows
+            rows_tbl_d2.append([
+                pid,
+                f"{r['num']} / {r['den'] or '-'}",
+                r["status"],
+                opened_str,
+                f"${_fmt_num(signed_target, 2)}",
+                risk_pct,
+                pnl_str,
+                pnl_pct,
+            ])
 
-            # ---------- detail 3: per-symbol leg summary ----------
+            # detail 3: per-symbol leg summary
             if detail == 3:
-                # aggregate per symbol: signed qty sum; WAP by abs(qty) as weight
                 by_sym: Dict[str, Dict[str, float]] = {}
                 missing_map: Dict[str, bool] = {}
-                for lg in store.get_legs(pid):
+                for lg in legs:
                     s = lg["symbol"]
                     q = lg["qty"]
                     ep = lg["entry_price"]
@@ -659,142 +782,82 @@ def build_registry() -> CommandRegistry:
                         w = abs(float(q))
                         by_sym[s]["wap_num"] += float(ep) * w
                         by_sym[s]["wap_den"] += w
-                    # pnl accumulation
-                    pnl = _leg_pnl(ep, q, marks.get(s))
-                    if pnl is None:
+                    pnl_sym = leg_pnl(ep, q, marks.get(s))
+                    if pnl_sym is None:
                         missing_map[s] = True
                     else:
-                        by_sym[s]["pnl"] += pnl
+                        by_sym[s]["pnl"] += pnl_sym
 
+                detail3_lines.append(f"## Position {pid}: {r['num']} / {r['den'] or '-'}")
                 for s, acc in by_sym.items():
                     wap = (acc["wap_num"] / acc["wap_den"]) if acc["wap_den"] > 0 else None
                     last = marks.get(s)
-                    pnl_pct_leg = _fmt_pct(_pct_of(acc["pnl"], ref_balance), show_sign=True)
+                    size = acc["qty"] * last if last is not None else None
+                    pnl_pct_leg = _fmt_pct(pct_of(acc["pnl"], ref_balance), show_sign=True)
                     pnl_s = _fmt_num(acc["pnl"], 2)
                     if missing_map.get(s):
                         pnl_s += " (incomplete)"
-                    lines.append(
-                        f"  - {s}  qty={_fmt_qty(acc['qty'])}  entry≈{_fmt_num(wap, 6)}  "
-                        f"last={_fmt_num(last, 6)}  pnl=${pnl_s} pnl%={pnl_pct_leg} risk={risk_pct}"
+                    detail3_lines.append(
+                        f"- {s} qty={_fmt_qty(acc['qty'])} entry≈{_fmt_num(wap, 6)} "
+                        f"last={_fmt_num(last, 6)} size=${_fmt_num(size, 2)} "
+                        f"pnl=${pnl_s} pnl%={pnl_pct_leg} risk={risk_pct}"
                     )
 
-            # ---------- detail 4: list every leg ----------
+            # detail 4: list every leg
             if detail == 4:
-                for lg in store.get_legs(pid):
+                detail4_lines.append(f"## Position {pid}: {r['num']} / {r['den'] or '-'}")
+                for lg in legs:
                     ts = lg["entry_price_ts"]
                     ts_h = ts_human(ts)
                     last = marks.get(lg["symbol"])
-                    pnl = _leg_pnl(lg["entry_price"], lg["qty"], last)
-                    pnl_pct_leg = _fmt_pct(_pct_of(pnl, ref_balance), show_sign=True)
+                    size = float(lg["qty"]) * last if (lg["qty"] is not None and last is not None) else None
+                    pnl = leg_pnl(lg["entry_price"], lg["qty"], last)
+                    pnl_pct_leg = _fmt_pct(pct_of(pnl, ref_balance), show_sign=True)
                     pnl_str = _fmt_num(pnl, 2)
                     if pnl is None:
                         pnl_str = "? (missing price/entry/qty)"
-                    lines.append(
-                        f"  - {lg['leg_id']} {lg['symbol']}  t={ts_h}  qty={_fmt_qty(lg['qty'])}  "
-                        f"entry={_fmt_num(lg['entry_price'], 6)}  last={_fmt_num(last, 6)}  "
+                    detail4_lines.append(
+                        f"- {lg['leg_id']} {lg['symbol']}  t={ts_h}  qty={_fmt_qty(lg['qty'])}  "
+                        f"entry={_fmt_num(lg['entry_price'], 6)}  last={_fmt_num(last, 6)}  size=${_fmt_num(size, 2)}  "
                         f"pnl=${pnl_str} pnl%={pnl_pct_leg} risk={risk_pct}"
                     )
 
             count += 1
 
-        return _md("\n".join(md_lines + [""] + lines))
+        # summary block
+        total_pnl_pct = _fmt_pct(pct_of(total_pnl, ref_balance), show_sign=True)
+        bal_str = _fmt_num(ref_balance, 2)
+        summary_lines.append(
+            f"Positions: {len(rows)} | Target ≈ ${_fmt_num(total_target, 2)} | "
+            f"PNL ≈ ${_fmt_num(total_pnl, 2)} ({total_pnl_pct} of balance ${bal_str})"
+            + (f" (PnL incomplete for {pnl_missing_count} position(s))" if pnl_missing_count else "")
+        )
 
+        if detail == 1:
+            return _md("\n".join(md_lines + [""] + summary_lines))
+
+        if detail == 2:
+            headers = ["id", "pair", "status", "opened", "target$", "risk%", "pnl$", "pnl%"]
+            return CO([
+                OCMarkDown("\n".join(md_lines + [""] + summary_lines)),
+                OCTable(headers=headers, rows=rows_tbl_d2),
+            ])
+
+        extra_lines = detail3_lines if detail == 3 else detail4_lines
+        body = "\n".join(md_lines + [""] + summary_lines + [""] + extra_lines)
+        return _md(body)
+
+    # ----------------------- RISK SNAPSHOT -----------------------
+    @R.at("risk")
     # ----------------------- RISK SNAPSHOT -----------------------
     @R.at("risk")
     def _at_risk(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Show risk/exposure snapshot."""
-        cfg = eng.store.get_config()
-        ref_balance = cfg["reference_balance"]
-        leverage = cfg["leverage"]
-
-        rows = eng.store.list_open_positions()
-        if not rows:
-            txt = (
-                f"# Risk\n"
-                f"- Balance=${_fmt_num(ref_balance,2)} leverage={_fmt_num(leverage,2)} "
-                f"default_risk={_fmt_pct(cfg['default_risk'])}\n"
-                f"- No open positions."
-            )
-            return _md(txt)
-
-        involved_syms = set()
-        for r in rows:
-            for lg in eng.store.get_legs(r["position_id"]):
-                if lg["symbol"]:
-                    involved_syms.add(lg["symbol"])
-        marks: Dict[str, Optional[float]] = {s: _last_cached_price(eng, s) for s in involved_syms}
-
-        total_exposure = 0.0
-        exposure_missing = False
-        total_pnl = 0.0
-        table_rows: List[Sequence[Any]] = []
-
-        for r in rows:
-            pid = int(r["position_id"])
-            legs = eng.store.get_legs(pid)
-            risk_val = float(r["risk"])
-            risk_budget = ref_balance * risk_val if ref_balance else None
-            pos_pnl = 0.0
-            pnl_missing = False
-            notional = 0.0
-            notional_missing = False
-
-            for lg in legs:
-                mk = marks.get(lg["symbol"])
-                pnl = _leg_pnl(lg["entry_price"], lg["qty"], mk)
-                if pnl is None:
-                    pnl_missing = True
-                else:
-                    pos_pnl += pnl
-                if lg["qty"] is None or mk is None:
-                    notional_missing = True
-                else:
-                    notional += abs(float(lg["qty"])) * float(mk)
-
-            if not notional_missing:
-                total_exposure += notional
-            else:
-                exposure_missing = True
-                notional = None
-
-            if not pnl_missing:
-                total_pnl += pos_pnl
-
-            pnl_pct = _pct_of(pos_pnl, ref_balance)
-            r_multiple = (pos_pnl / risk_budget) if risk_budget else None
-            tp_2r = 2 * risk_budget if risk_budget is not None else None
-            tp_3r = 3 * risk_budget if risk_budget is not None else None
-
-            table_rows.append([
-                pid,
-                f"{r['num']}/{r['den'] or '-'}",
-                _fmt_pct(risk_val),
-                _fmt_num(risk_budget, 2),
-                _fmt_num(notional, 2),
-                _fmt_num(pos_pnl, 2) + (" (incomplete)" if pnl_missing else ""),
-                _fmt_pct(pnl_pct, show_sign=True),
-                _fmt_num(r_multiple, 2),
-                f"{_fmt_num(tp_2r, 2)}/{_fmt_num(tp_3r, 2)}"
-            ])
-
-        max_exposure = ref_balance * leverage if ref_balance and leverage else None
-        available = (max_exposure - total_exposure) if (max_exposure is not None) else None
-        exposure_used = _pct_of(total_exposure, max_exposure) if max_exposure else None
-        total_pnl_pct = _pct_of(total_pnl, ref_balance)
-
-        md_lines = [
-            "# Risk",
-            f"- Balance=${_fmt_num(ref_balance,2)} leverage={_fmt_num(leverage,2)} "
-            f"default_risk={_fmt_pct(cfg['default_risk'])}",
-            f"- Exposure: ${_fmt_num(total_exposure,2)} / ${_fmt_num(max_exposure,2)} "
-            f"(used {_fmt_pct(exposure_used)}; available=${_fmt_num(available,2)})"
-            + (" (exposure incomplete)" if exposure_missing else ""),
-            f"- PnL: ${_fmt_num(total_pnl,2)} ({_fmt_pct(total_pnl_pct, show_sign=True)})"
-        ]
-
-        headers = ["id", "pair", "risk%", "budget$", "notional$", "pnl$", "pnl%", "R", "2R/3R$"]
-        return CO([OCMarkDown("\n".join(md_lines)), OCTable(headers=headers, rows=table_rows)])
-
+        report = build_risk_report(eng)
+        rendered = format_risk_report(report)
+        comps: List[OC] = [OCMarkDown(rendered["markdown"]),
+                          OCTable(headers=rendered["headers"], rows=rendered["rows"])]
+        return CO(comps)
     # ----------------------- !OPEN POSITION -----------------------
     @R.bang("open", argspec=["pair", "ts", "usd"], options=["note", "risk"])
     def _bang_open(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -839,13 +902,19 @@ def build_registry() -> CommandRegistry:
         return _md("\n".join(lines))
 
     # ----------------------- THINKER KINDS -----------------------
-    @R.at("thinker-kinds")
+    @R.at("thinker-kinds", options=["detail"])
     def _at_thinker_kinds(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List available thinker kinds (from factory auto-discovery)."""
-        kinds = list(eng.tm.factory.kinds())
-        ndigits = len(str(len(kinds)-1))
-        body = "\n".join(f"- [{i:0{ndigits}d}] {k}" for i, k in enumerate(kinds))
-        return _md("# Thinker kinds\n" + body + "\n\n*Use either index or kind name to create new thinkers")
+        detail = int(args.get("detail", "1"))
+        infos = _thinker_kind_info(eng)
+        if detail <= 1:
+            ndigits = len(str(len(infos)-1))
+            body = "\n".join(f"- [{i:0{ndigits}d}] {info['kind']}" for i, info in enumerate(infos))
+            return _md("# Thinker kinds\n" + body + "\n\n*Use either index or kind name to create new thinkers")
+
+        blocks = _thinker_kind_blocks(eng)
+        header = "# Thinker kinds"
+        return _md(f"{header}\n{blocks}")
 
     # ----------------------- THINKER ENABLE -----------------------
     @R.bang("thinker-enable", argspec=["id"])
@@ -884,6 +953,63 @@ def build_registry() -> CommandRegistry:
         eng.store.delete_thinker(int(tid))
         return _txt(f"Thinker #{tid} deleted.")
 
+    # ----------------------- THINKER SET -----------------------
+    @R.bang("thinker-set", argspec=["id"], freeform=True)
+    def _bang_thinker_set(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Update a thinker's config with free-form key=val pairs.
+
+        Usage:
+          !thinker-set <id> <key>=<val> [more...]
+        """
+        tid_raw = args["id"].strip()
+        if not tid_raw.isdigit():
+            return _txt("Usage: !thinker-set <id> <key>=<val> ...")
+        tid = int(tid_raw)
+
+        updates = {k: v for k, v in args.items() if k != "id"}
+        if not updates:
+            return _txt("Provide at least one key=val")
+
+        row = eng.store.get_thinker(tid)
+        if row is None:
+            return _txt(f"Thinker #{tid} not found.")
+
+        cfg_cls = eng.tm.factory.cls_for(row["kind"]).Config
+        allowed_keys = {f.name for f in fields(cfg_cls)}
+
+        bad_keys = [k for k in updates if k not in allowed_keys]
+        if bad_keys:
+            allowed_list = ", ".join(sorted(allowed_keys))
+            return _err(f"Unknown config key(s): {', '.join(sorted(bad_keys))}. Allowed: {allowed_list}")
+
+        cfg = json.loads(row["config_json"] or "{}")
+        for k, v in updates.items():
+            if not k:
+                return _txt("Empty config key not allowed.")
+            cfg[k] = _coerce_cfg_val(v)
+
+        # Validate by instantiating the thinker with proposed config
+        inst = eng.tm.factory.create(row["kind"])
+        fake_row = dict(row)
+        fake_row["config_json"] = json.dumps(cfg, ensure_ascii=False)
+        try:
+            inst._init_from_row(fake_row)
+        except Exception as e:
+            return _err(f"Invalid config: {e}")
+
+        eng.store.update_thinker_config(tid, cfg)
+        eng.tm.reload(tid)
+        body = "\n".join([
+            f"# Thinker #{tid} updated",
+            f"- kind: `{row['kind']}`",
+            "",
+            "```json",
+            json.dumps(cfg, indent=2, ensure_ascii=False),
+            "```",
+        ])
+        return _md(body)
+
     # ----------------------- THINKER NEW -----------------------
     @R.bang("thinker-new", argspec=["kind"], options=["enabled"])
     def _bang_thinker_new(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -912,10 +1038,15 @@ def build_registry() -> CommandRegistry:
         if enabled_opt is not None:
             enabled_val = 1 if enabled_opt.strip() not in ("0", "false", "False") else 0
 
-        tid = eng.store.insert_thinker(kind, config={})
+        cls = factory.cls_for(kind)
+        default_cfg = cls(eng.tm, eng)._build_cfg({})
+        tid = eng.store.insert_thinker(kind, config=default_cfg)
         if not enabled_val:
             eng.store.update_thinker_enabled(tid, False)
-        return _txt(f"Thinker #{tid} created (kind={kind}, enabled={bool(enabled_val)}).")
+        return _txt(
+            f"Thinker #{tid} created (kind={kind}, enabled={bool(enabled_val)}). "
+            f"Config: {json.dumps(default_cfg, ensure_ascii=False)}"
+        )
 
     # ----------------------- ALERT -----------------------
     @R.bang("alert", argspec=["symbol", "op", "price"], options=["msg"])
@@ -1075,6 +1206,100 @@ def build_registry() -> CommandRegistry:
         except Exception as e:
             log().exc(e, where="cmd.chart-rv")
             return CO(f"Error: {e}")
+
+    # ----------------------- CHART PNL -----------------------
+    @R.at("chart-pnl", argspec=["which", "timeframe", "from", "to"], nreq=1)
+    def _at_chart_pnl(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Plot PnL over time for one position or all open positions.
+
+        Usage:
+          @chart-pnl <position_id|all> [<timeframe=1d>] [from:] [to:]
+        """
+        which = args["which"].strip().lower()
+        tf = args.get("timeframe", "1d")
+        frm_raw = args.get("from")
+        to_raw = args.get("to")
+
+        end_ms = parse_when(to_raw) if to_raw else None
+        start_ms = parse_when(frm_raw) if frm_raw else None
+
+        if which == "all":
+            rows = eng.store.list_open_positions()
+            pids = [int(r["position_id"]) for r in rows]
+        else:
+            pids = [int(which)]
+
+        try:
+            df, report, meta = eh.pnl_time_series(eng, pids, tf, start_ms, end_ms)
+        except Exception as e:
+            log().exc(e, where="cmd.chart-pnl")
+            return CO(f"Error: {e}")
+
+        # Build missing-data summary
+        def _fmt_ts(ms: int) -> str:
+            return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat(timespec="seconds")
+        md_lines = ["# PnL chart", f"Timeframe: `{tf}`",
+                    f"Window: {_fmt_ts(meta['start_ms'])} → {_fmt_ts(meta['end_ms'])}"]
+        def _bullet(title, seq):
+            if not seq: return None
+            return f"- {title}: " + ", ".join(str(x) for x in seq)
+
+        bullets = []
+        b = _bullet("Missing positions", report.get("missing_positions"))
+        if b: bullets.append(b)
+        b = _bullet("Positions missing qty/entry_price", report.get("missing_qty_entry"))
+        if b: bullets.append(b)
+        b = _bullet("Symbols missing klines", report.get("symbols_missing_klines"))
+        if b: bullets.append(b)
+        missing_prices = report.get("missing_prices") or []
+        if missing_prices:
+            bullets.append(f"- Missing prices at {len(missing_prices)} timestamp(s) across legs (series will have gaps)")
+        if bullets:
+            md_lines.append("## Missing data")
+            md_lines.extend(bullets)
+
+        # Plot
+        df_plot = df.dropna(how="all", axis=1)
+        if df_plot.empty:
+            return CO(OCMarkDown("\n".join(md_lines + ["- No data to plot."])))
+
+        title = f"PnL {which.upper()} {tf}"
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for col in df_plot.columns:
+            ax.plot(df_plot.index, df_plot[col], label=str(col))
+        ax.set_title(title)
+        ax.set_xlabel("Time")
+        ax.set_ylabel("PnL (quote)")
+        ax.grid(True, linestyle="--", alpha=0.35)
+        ax.legend()
+        fig.tight_layout()
+        out_path = os.path.join("/tmp", f"chart_pnl_{which}_{tf}.png")
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+
+        return CO(
+            OCPhoto(path=out_path, caption=title),
+            OCMarkDown("\n".join(md_lines)),
+        )
+
+    # ----------------------- KLINES CACHE SUMMARY -----------------------
+    @R.at("klines-cache")
+    def _at_klines_cache(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Summary of cached klines by (symbol, timeframe).
+
+        Columns: symbol, timeframe, n
+        Ordered by symbol, timeframe (ms).
+
+        Usage:
+          @klines-cache
+        """
+        rows = eh.klines_cache_summary(eng)
+        if not rows:
+            return _txt("No klines cached.")
+        table_rows = [(r["symbol"], r["timeframe"], r["n"]) for r in rows]
+        return _tbl(["symbol", "timeframe", "n"], table_rows, intro="# Klines cache")
 
 
     @R.bang("position-rm", argspec=["position_id"])
@@ -1260,7 +1485,7 @@ def build_registry() -> CommandRegistry:
 
         # --- gather marks per symbol ---
         symbols = sorted({r["symbol"] for r in rows if r["symbol"]})
-        marks: Dict[str, Optional[float]] = {s: _last_cached_price(eng, s) for s in symbols}
+        marks: Dict[str, Optional[float]] = {s: eh.last_cached_price(eng, s) for s in symbols}
 
         # stats[symbol] = {
         #   "last_price": float|None,
@@ -1287,7 +1512,7 @@ def build_registry() -> CommandRegistry:
             g["legs"] += 1
 
             mark = stats[sym]["last_price"]
-            pnl = _leg_pnl(r["entry_price"], r["qty"], mark)
+            pnl = leg_pnl(r["entry_price"], r["qty"], mark)
             if pnl is None:
                 g["missing"] += 1
             else:
@@ -1335,15 +1560,6 @@ def build_registry() -> CommandRegistry:
     return R
 
 # === helpers (local to build_registry) ====================================
-def _last_cached_price(eng: BotEngine, symbol: str) -> Optional[float]:
-    """Latest cached close from KlinesCache (first configured timeframe)."""
-    kc = eng.kc
-    tfs = eng.cfg.KLINES_TIMEFRAMES or ["1m"]
-    for tf in tfs:
-        r = kc.last_row(symbol, tf)
-        if r and r["close"] is not None:
-            return float(r["close"])
-    return None
 
 def _fmt_num(x: Any, nd=2) -> str:
     if x is None:
@@ -1352,17 +1568,6 @@ def _fmt_num(x: Any, nd=2) -> str:
         return f"{float(x):.{nd}f}"
     except Exception:
         return "?"
-
-def _pct_of(val: Any, base: Any) -> Optional[float]:
-    try:
-        if val is None or base is None:
-            return None
-        base_f = float(base)
-        if base_f == 0.0:
-            return None
-        return float(val) / base_f
-    except Exception:
-        return None
 
 def _fmt_pct(frac: Any, nd=2, show_sign: bool = False) -> str:
     if frac is None:
@@ -1381,11 +1586,6 @@ def _fmt_qty(x: Any) -> str:
         return s if s else "0"
     except Exception:
         return "?"
-
-def _leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float]) -> Optional[float]:
-    if entry is None or qty is None or mark is None:
-        return None
-    return (float(mark) - float(entry)) * float(qty)
 
 def _position_signed_target(row) -> float:
     # Correct sign: dir_sign * target_usd

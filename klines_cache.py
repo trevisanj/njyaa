@@ -103,7 +103,30 @@ class KlinesCache:
           ON klines(symbol, timeframe, open_ts DESC);
         CREATE INDEX IF NOT EXISTS ix_klines_final_close
           ON klines(finalized, close_ts);
+        CREATE TABLE IF NOT EXISTS timeframe_ms(
+          timeframe TEXT PRIMARY KEY,
+          ms INTEGER NOT NULL
+        );
         """)
+        c.executemany(
+            "INSERT OR IGNORE INTO timeframe_ms(timeframe, ms) VALUES (?,?)",
+            [
+                ("1m", 60_000),
+                ("3m", 180_000),
+                ("5m", 300_000),
+                ("15m", 900_000),
+                ("30m", 1_800_000),
+                ("1h", 3_600_000),
+                ("2h", 7_200_000),
+                ("4h", 14_400_000),
+                ("6h", 21_600_000),
+                ("8h", 28_800_000),
+                ("12h", 43_200_000),
+                ("1d", 86_400_000),
+                ("3d", 259_200_000),
+                ("1w", 604_800_000),
+            ],
+        )
         self.con.commit()
 
     def _ensure_api(self):

@@ -70,6 +70,11 @@ Usage:
         Example:
           @chart-rv ETH/BTC 4h 500
 
+**@klines-cache**
+*Summarize cached klines (symbol, timeframe, n).*
+Usage:
+          @klines-cache
+
 **@help** <command> [detail:…]
 *Show this help.*
 

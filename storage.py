@@ -414,10 +414,18 @@ class Storage:
                         (kind, 1, json.dumps(config, ensure_ascii=False), "{}", ts, ts))
             return int(cur.lastrowid)
 
+    def get_thinker(self, thinker_id: int) -> Optional[sqlite3.Row]:
+        return self.con.execute("SELECT * FROM thinkers WHERE id=?", (thinker_id,)).fetchone()
+
     def update_thinker_enabled(self, thinker_id: int, enabled: bool):
         with self.txn(write=True) as cur:
             cur.execute("UPDATE thinkers SET enabled=?, updated_ts=? WHERE id=?",
                         (1 if enabled else 0, Clock.now_utc_ms(), thinker_id))
+
+    def update_thinker_config(self, thinker_id: int, config: dict):
+        with self.txn(write=True) as cur:
+            cur.execute("""UPDATE thinkers SET config_json=?, updated_ts=? WHERE id=?""",
+                        (json.dumps(config or {}, ensure_ascii=False), Clock.now_utc_ms(), thinker_id))
 
     def delete_thinker(self, thinker_id: int):
         with self.txn(write=True) as cur:

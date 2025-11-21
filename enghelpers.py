@@ -17,9 +17,20 @@ import tempfile, os, io
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
+import numpy as np
 
 if False:
     from bot_api import BotEngine
+
+
+def last_cached_price(eng: "BotEngine", symbol: str) -> Optional[float]:
+    kc = eng.kc
+    tfs = eng.cfg.KLINES_TIMEFRAMES or ["1m"]
+    for tf in tfs:
+        r = kc.last_row(symbol, tf)
+        if r and r["close"] is not None:
+            return float(r["close"])
+    return None
 
 
 def _close_series(eng: BotEngine, symbol: str, timeframe: str, n: int):
@@ -51,6 +62,22 @@ def pair_close_series(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: in
         return num_series
     den_series = _close_series(eng, den, timeframe, n=n)
     return divide_series(num_series, den_series, name=f"{num}/{den}")
+
+
+def klines_cache_summary(eng: BotEngine):
+    """
+    Return klines cache summary rows [(symbol, timeframe, n)] ordered by symbol + timeframe ms.
+    """
+    cur = eng.kc.con.execute(
+        """
+        SELECT k.symbol, k.timeframe, COUNT(*) AS n
+        FROM klines k
+        JOIN timeframe_ms t ON t.timeframe = k.timeframe
+        GROUP BY k.symbol, k.timeframe
+        ORDER BY k.symbol, t.ms
+        """
+    )
+    return cur.fetchall()
 
 
 def render_chart(eng: BotEngine, symbol: str, timeframe: str, n: int = 200, outdir: str = "/tmp") -> str:
@@ -116,13 +143,115 @@ def render_ratio_chart(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: i
     ax.grid(True, linestyle="--", alpha=0.35)
     ax.legend()
 
-    fname = f"chart_rv_{(series.name or pair_or_symbol).replace('/', '-')}_{timeframe}_{n}.png"
+    fname = f"chart_NJYAA_{(series.name or pair_or_symbol).replace('/', '-')}_{timeframe}_{n}.png"
     out_path = os.path.join(outdir, fname)
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     log().info("render_ratio_chart.success", out_path=out_path, pair=pair_or_symbol, timeframe=timeframe, n=n)
     return out_path
+
+
+def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
+                    start_ms: int | None, end_ms: int | None):
+    """
+    Build a PnL time series per position (and total) using cached klines.
+
+    Returns:
+      df: pandas.DataFrame indexed by ts, columns per position_id + "TOTAL" (floats, NaN when missing)
+      report: dict with missing/issue details
+      meta: dict with time bounds used
+    """
+    assert eng.store and eng.kc and eng.positionbook
+    tfm = tf_ms(timeframe)
+    now_ms = Clock.now_utc_ms()
+    end_ts = end_ms or now_ms
+    start_ts = start_ms or (end_ts - tfm * 200)
+
+    positions = []
+    missing_positions = []
+    for pid in position_ids:
+        row = eng.store.get_position(pid)
+        if row:
+            positions.append(row)
+        else:
+            missing_positions.append(pid)
+    if not positions:
+        raise ValueError("No positions to process.")
+
+    legs_by_pid = {int(p["position_id"]): eng.store.get_legs(p["position_id"]) for p in positions}
+    missing_qty_entry: list[int] = []
+    symbols = set()
+    for pid, legs in legs_by_pid.items():
+        for lg in legs:
+            if lg["qty"] is None or lg["entry_price"] is None:
+                missing_qty_entry.append(pid)
+                break
+        symbols.update(lg["symbol"] for lg in legs if lg["symbol"])
+
+    price_rows: dict[str, list] = {}
+    symbols_missing_klines = []
+    for sym in symbols:
+        rows = eng.kc.range_by_close(sym, timeframe, start_ts - tfm, end_ts, include_live=False)
+        if not rows:
+            symbols_missing_klines.append(sym)
+            continue
+        price_rows[sym] = rows
+
+    # Build time axis from available klines
+    ts_set = set()
+    for rows in price_rows.values():
+        ts_set.update(int(r["close_ts"]) for r in rows)
+    timeline = sorted(ts_set)
+    if not timeline:
+        raise ValueError("No klines in requested window.")
+
+    # Build per-symbol price lookup at close_ts
+    price_map = {
+        sym: {int(r["close_ts"]): float(r["close"]) for r in rows}
+        for sym, rows in price_rows.items()
+    }
+
+    data = {pid: [] for pid in legs_by_pid}
+    total = []
+    missing_prices: list[dict] = []
+
+    for ts in timeline:
+        tick_total = 0.0
+        for pid, legs in legs_by_pid.items():
+            # skip if leg data incomplete
+            if pid in missing_qty_entry:
+                data[pid].append(np.nan)
+                continue
+            prices_for_pid = {}
+            missing_any = False
+            for lg in legs:
+                sym = lg["symbol"]
+                price = price_map.get(sym, {}).get(ts)
+                if price is None:
+                    missing_prices.append({"position_id": pid, "symbol": sym, "ts": ts})
+                    missing_any = True
+                    break
+                prices_for_pid[sym] = price
+            if missing_any:
+                data[pid].append(np.nan)
+                continue
+            pnl = sum((prices_for_pid[lg["symbol"]] - float(lg["entry_price"])) * float(lg["qty"]) for lg in legs)
+            data[pid].append(pnl)
+            tick_total += pnl
+        total.append(tick_total if data else np.nan)
+
+    df = pd.DataFrame(data, index=pd.to_datetime(timeline, unit="ms"))
+    df["TOTAL"] = total
+
+    report = {
+        "missing_positions": missing_positions,
+        "missing_qty_entry": sorted(set(missing_qty_entry)),
+        "symbols_missing_klines": symbols_missing_klines,
+        "missing_prices": missing_prices,
+    }
+    meta = {"start_ms": start_ts, "end_ms": end_ts, "timeframe": timeframe}
+    return df, report, meta
 
 
 def parse_pair_or_single(eng: BotEngine, raw: str) -> Tuple[str, Optional[str]]:

@@ -2,19 +2,20 @@
 # FILE: thinkers1.py
 
 from __future__ import annotations
-import json, math, sqlite3, time
+import json, math, sqlite3, time, threading
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, Union, TYPE_CHECKING, get_type_hints, Literal
 
 from setuptools.msvc import msvc14_get_vc_env
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle, PositionBook
 from klines_cache import KlinesCache
-from common import log, Clock, AppConfig
+from common import log, Clock, AppConfig, coerce_to_type
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 from common import Log, sublog
 import common
+from dataclasses import dataclass, fields, is_dataclass
 
 if TYPE_CHECKING:
     from commands import CO
@@ -48,7 +49,8 @@ class ThinkerManager:
         self.eng = eng
         self.store = eng.store
         self._instances: Dict[int, ThinkerBase] = {}    # id -> instance
-        self._configs: Dict[int, Dict[str, Any]] = {}  # id -> config dict
+        self._reload_pending: set[int] = set()
+        self._lock = threading.RLock()
         self.log = sublog("thinking")
         self.factory = ThinkerFactory(self, eng)
 
@@ -57,15 +59,26 @@ class ThinkerManager:
     def _load(self) -> List[sqlite3.Row]:
         return self.store.con.execute("SELECT * FROM thinkers WHERE enabled=1 ORDER BY id").fetchall()
 
+    def reload(self, thinker_id: int):
+        tid = int(thinker_id)
+        tr = self.store.get_thinker(tid)
+        with self._lock:
+            self._reload_pending.discard(tid)
+            if tr and tr["enabled"]:
+                self._reload_pending.add(tid)
+
     def _ensure_instantiated(self, tr: sqlite3.Row):
         tid = int(tr["id"])
-        if tid in self._instances:
-            return
-        inst = self.factory.create(tr["kind"])
-        inst._init_from_row(tr)
-        self._instances[tid] = inst
-        self._configs[tid] = dict(inst._cfg)
-        self.log.info("thinker.ready", id=tid, kind=tr["kind"])
+        with self._lock:
+            if tid in self._reload_pending:
+                self._instances.pop(tid, None)
+                self._reload_pending.discard(tid)
+            if tid in self._instances:
+                return
+            inst = self.factory.create(tr["kind"])
+            inst._init_from_row(tr)
+            self._instances[tid] = inst
+            self.log.info("thinker.ready", id=tid, kind=tr["kind"])
 
     # --- run one cycle
     def run_once(self, now_ms: Optional[int] = None) -> Tuple[int, int]:
@@ -83,9 +96,9 @@ class ThinkerManager:
             tid = int(tr["id"])
             inst = self._instances[tid]
             try:
-                msg = inst.tick(now)
-                if msg:
-                    self.log_event(tid, "INFO", str(msg))
+                result = inst.tick(now)
+                if result is not None:
+                    self.log_event(tid, "INFO", "thinker.result", result=str(result), thinker_id=tid, kind=tr["kind"])
                 n_ok += 1
             except Exception as e:
                 log().exc(e, where="thinker.tick", thinker_id=tid, kind=tr["kind"])
@@ -143,6 +156,9 @@ class ThinkerFactory:
     def kinds(self):
         return self._kinds
 
+    def cls_for(self, kind: str):
+        return self._map[kind]
+
 
 # -----------------------------
 # Thinker Protocol + Envelope
@@ -150,8 +166,7 @@ class ThinkerFactory:
 
 class ThinkerBase(ABC):
     kind: str = None  # e.g. "THRESHOLD_ALERT", "PSAR_STOP"
-    required_cfg_fields: Tuple[str, ...] = ()
-    default_cfg: Dict[str, Any] = {}
+    Config: Optional[type] = None  # dataclass for typed config
 
     def __init__(self, tm: ThinkerManager, eng: BotEngine):
         self.tm = tm
@@ -171,14 +186,9 @@ class ThinkerBase(ABC):
         config = _parse_json(tr["config_json"])
         runtime = _parse_json(tr["runtime_json"])
         self._thinker_id = int(tid)
-        self._cfg = dict(config or {})
-        if self.default_cfg:
-            self._set_def_cfg(self.default_cfg)
+        self._cfg = self._build_cfg(config or {})
         self._runtime = dict(runtime or {})
         self._on_init()
-        missing = [k for k in self.required_cfg_fields if k not in self._cfg]
-        if missing:
-            raise ValueError(f"{self.__class__.__name__} missing {', '.join(missing)}")
 
     def runtime(self) -> Dict[str, Any]:
         return self._runtime
@@ -195,6 +205,26 @@ class ThinkerBase(ABC):
     def _on_init(self) -> None:
         """Hook for subclasses after config validation."""
         return
+
+    def _build_cfg(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        ConfigCls = getattr(self, "Config", None)
+        if ConfigCls:
+            assert is_dataclass(ConfigCls), "Config must be a dataclass"
+            hints = get_type_hints(ConfigCls)
+            kwargs: Dict[str, Any] = {}
+            for f in fields(ConfigCls):
+                name = f.name
+                if name in cfg:
+                    kwargs[name] = coerce_to_type(cfg[name], hints.get(name, Any))
+                else:
+                    kwargs[name] = getattr(ConfigCls, name, f.default)
+            obj = ConfigCls(**kwargs)
+            cfg_dict: Dict[str, Any] = {f.name: getattr(obj, f.name) for f in fields(ConfigCls)}
+            for k, v in cfg.items():
+                if k not in cfg_dict:
+                    cfg_dict[k] = v
+            return cfg_dict
+        return dict(cfg)
 
     @abstractmethod
     def tick(self, now_ms: int): ...

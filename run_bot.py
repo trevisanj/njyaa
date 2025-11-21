@@ -6,7 +6,7 @@ from bot_api import BotEngine
 def main():
     cfg = make_cfg()
 
-    mode = 2
+    mode = 0
 
     match mode:
         case 0:  # console only
