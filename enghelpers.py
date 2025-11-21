@@ -22,10 +22,41 @@ if False:
     from bot_api import BotEngine
 
 
-def render_chart(eng: BotEngine, symbol: str, timeframe: str, outdir: str = "/tmp") -> str:
+def _close_series(eng: BotEngine, symbol: str, timeframe: str, n: int):
+    """Return a Close-price Series for a symbol/timeframe."""
+    rows = eng.kc.last_n(symbol, timeframe, n=n)
+    if not rows:
+        raise ValueError(f"No cached klines for {symbol} {timeframe}")
+    df = rows_to_dataframe(rows)
+    s = df["Close"].copy()
+    s.name = symbol
+    return s
+
+
+def divide_series(num: pd.Series, den: pd.Series, name: Optional[str] = None) -> pd.Series:
+    """Construct ratio series with index intersection."""
+    aligned_num, aligned_den = num.align(den, join="inner")
+    if aligned_num.empty:
+        raise ValueError("No overlapping timestamps between numerator and denominator series.")
+    ratio = aligned_num / aligned_den
+    ratio.name = name or f"{num.name}/{den.name}"
+    return ratio
+
+
+def pair_close_series(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: int) -> pd.Series:
+    """Return Close-price series for NUM[/DEN], dividing when denominator is provided."""
+    num, den = parse_pair_or_single(eng, pair_or_symbol)
+    num_series = _close_series(eng, num, timeframe, n=n)
+    if not den:
+        return num_series
+    den_series = _close_series(eng, den, timeframe, n=n)
+    return divide_series(num_series, den_series, name=f"{num}/{den}")
+
+
+def render_chart(eng: BotEngine, symbol: str, timeframe: str, n: int = 200, outdir: str = "/tmp") -> str:
     """Render a candlestick+volume chart from KlinesCache → PNG. Returns file path."""
     kc = eng.kc
-    rows = kc.last_n(symbol, timeframe, n=200)
+    rows = kc.last_n(symbol, timeframe, n=n)
     if not rows:
         raise ValueError(f"No cached klines for {symbol} {timeframe}")
 
@@ -58,15 +89,39 @@ def render_chart(eng: BotEngine, symbol: str, timeframe: str, outdir: str = "/tm
         mav=(20,),
         volume=True,
         style=style,
-        title=f"{symbol} {timeframe} – last {len(df)} candles",
+        title=f"{symbol} {timeframe} – last {len(df)} of {n} candles",
         returnfig=True,
         figsize=(9, 6),
     )
 
-    out_path = os.path.join(outdir, f"chart_{symbol}_{timeframe}.png")
+    out_path = os.path.join(outdir, f"chart_{symbol}_{timeframe}_{n}.png")
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     log().info("render_chart.success", out_path=out_path)
+    return out_path
+
+
+def render_ratio_chart(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: int = 200,
+                       outdir: str = "/tmp") -> str:
+    """Render a Close-price line + MA for a symbol or ratio."""
+    series = pair_close_series(eng, pair_or_symbol, timeframe, n=n)
+    ma = series.rolling(window=20).mean()
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(series.index, series, label=series.name or pair_or_symbol, color="deepskyblue", linewidth=1.6)
+    ax.plot(ma.index, ma, label="MA20", color="orange", linewidth=1.2)
+    ax.set_title(f"{series.name or pair_or_symbol} {timeframe} – last {len(series)} of {n} closes")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Close")
+    ax.grid(True, linestyle="--", alpha=0.35)
+    ax.legend()
+
+    fname = f"chart_rv_{(series.name or pair_or_symbol).replace('/', '-')}_{timeframe}_{n}.png"
+    out_path = os.path.join(outdir, fname)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    log().info("render_ratio_chart.success", out_path=out_path, pair=pair_or_symbol, timeframe=timeframe, n=n)
     return out_path
 
 

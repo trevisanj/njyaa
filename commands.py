@@ -1029,25 +1029,51 @@ def build_registry() -> CommandRegistry:
         return _txt(f"Retried {n} failed job(s).")
 
     # ----------------------- CHART -----------------------
-    @R.at("chart", argspec=["symbol", "timeframe"])
-    def _at_chart(eng: BotEngine, args: Dict[str, str]) -> CO:
+    @R.at("chart-candle", argspec=["symbol", "timeframe", "n"], nreq=2)
+    def _at_chart_candle(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Render candlestick chart (with volume & a simple indicator).
 
         Usage:
-          @chart <symbol> <timeframe>
+          @chart-candle <symbol> <timeframe> [<n=200>]
 
         Example:
-          @chart ETHUSDT 1m
+          @chart-candle ETHUSDT 1m 300
         """
         symbol = args["symbol"].upper()
         tf = args["timeframe"]
+        n_raw = args.get("n")
+        n = int(n_raw) if n_raw else 200
         try:
-            path = eh.render_chart(eng, symbol, tf)
-            return CO(OCPhoto(path=path, caption=f"{symbol} {tf}"),
-                      f"Chart generated for {symbol} {tf}")
+            path = eh.render_chart(eng, symbol, tf, n=n)
+            return CO(OCPhoto(path=path, caption=f"{symbol} {tf} n={n}"),
+                      f"Chart generated for {symbol} {tf} n={n}")
         except Exception as e:
-            log().exc(e, where="cmd.chart")
+            log().exc(e, where="cmd.chart-candle")
+            return CO(f"Error: {e}")
+
+    @R.at("chart-rv", argspec=["pair_or_symbol", "timeframe", "n"], nreq=1)
+    def _at_chart_rv(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Render Close-price line chart (single symbol or ratio) with MA.
+
+        Usage:
+          @chart-rv <pair_or_symbol> [<timeframe=1d>] [<n=200>]
+
+        Example:
+          @chart-rv ETH/BTC 4h 500
+        """
+        pair_or_symbol = args["pair_or_symbol"]
+        tf = args.get("timeframe", "1d")
+        n_raw = args.get("n")
+        n = int(n_raw) if n_raw else 200
+        try:
+            path = eh.render_ratio_chart(eng, pair_or_symbol, tf, n=n)
+            caption = f"{pair_or_symbol.upper()} {tf} n={n}"
+            return CO(OCPhoto(path=path, caption=caption),
+                      f"Chart generated for {caption}")
+        except Exception as e:
+            log().exc(e, where="cmd.chart-rv")
             return CO(f"Error: {e}")
 
 

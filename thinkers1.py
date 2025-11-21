@@ -165,10 +165,16 @@ class ThinkerBase(ABC):
     def init(self, config: Dict[str, Any]) -> None:
         self._cfg = dict(config or {})
         self._runtime = {}
+        self._on_init()
         missing = [k for k in self.required_fields if k not in self._cfg]
         if missing:
             raise ValueError(f"{self.__class__.__name__} missing {', '.join(missing)}")
-        self.on_init()
+
+    def _set_def_cfg(self, cfg: Dict[str, Any]) -> None:
+        assert isinstance(cfg, dict)
+        for k, v in cfg.items():
+            if k not in self._cfg:
+                self._cfg[k] = v
 
     def attach_runtime(self, thinker_id: int, runtime: Dict[str, Any]):
         self._thinker_id = int(thinker_id)
@@ -187,7 +193,7 @@ class ThinkerBase(ABC):
         if send:
             self.eng.send_text(msg)
 
-    def on_init(self) -> None:
+    def _on_init(self) -> None:
         """Hook for subclasses after config validation."""
         return
 

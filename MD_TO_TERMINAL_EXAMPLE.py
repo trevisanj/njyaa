@@ -267,16 +267,28 @@ Commands
         Usage: !thinker-rm <id>
 ```
 
-**@chart** <symbol> <timeframe>
+**@chart-candle** <symbol> <timeframe> [<n=200>]
 
 *Render candlestick chart (with volume & a simple indicator).*
 
 ```
         Usage:
-          @chart <symbol> <timeframe>
+          @chart-candle <symbol> <timeframe> [<n>]
 
         Example:
-          @chart ETHUSDT 1m
+          @chart-candle ETHUSDT 1m 300
+```
+
+**@chart-rv** <pair_or_symbol> [<timeframe=1d>] [<n=200>]
+
+*Render Close-price line chart for a symbol or ratio (with MA).*
+
+```
+        Usage:
+          @chart-rv <pair_or_symbol> [<timeframe>] [<n>]
+
+        Example:
+          @chart-rv ETH/BTC 4h 500
 ```
 
 **@help** <command> [detail:…]

@@ -37,7 +37,13 @@ class ThresholdAlertThinker(ThinkerBase):
 
     required_fields = ("symbol", "direction", "price")
 
-    def on_init(self) -> None:
+    def _on_init(self) -> None:
+        self._set_def_cfg({
+            "symbol": "BTCUSDT",
+            "direction": "ABOVE",
+            "price": 0.0,
+            "message": "",
+        })
         d = self._cfg["direction"].upper()
         if d not in ("ABOVE", "BELOW"):
             raise ValueError("direction must be ABOVE or BELOW")
@@ -93,10 +99,18 @@ class PSARStopThinker(ThinkerBase):
 
     required_fields = ("position_id", "symbol", "direction")
 
-    def on_init(self) -> None:
-        self._cfg["af"] = float(self._cfg.get("af", 0.02))
-        self._cfg["max_af"] = float(self._cfg.get("max_af", 0.2))
-        self._cfg["window_min"] = int(self._cfg.get("window_min", 200))
+    def _on_init(self) -> None:
+        self._set_def_cfg({
+            "position_id": "0",
+            "symbol": "BTCUSDT",
+            "direction": "LONG",
+            "af": 0.02,
+            "max_af": 0.2,
+            "window_min": 200,
+        })
+        self._cfg["af"] = float(self._cfg["af"])
+        self._cfg["max_af"] = float(self._cfg["max_af"])
+        self._cfg["window_min"] = int(self._cfg["window_min"])
         d = self._cfg["direction"].upper()
         if d not in ("LONG", "SHORT"):
             raise ValueError("direction must be LONG or SHORT")
@@ -228,15 +242,20 @@ class RiskThinker(ThinkerBase):
     """
     kind = "RISK_MONITOR"
 
-    def __init__(self, eng: BotEngine):
+    def __init__(self, tm: "ThinkerManager", eng: BotEngine):
         self._last_alert_ms: int = 0
-        super().__init__(eng)
+        super().__init__(tm, eng)
         self._last_alert_ms: int = 0
 
-    def on_init(self) -> None:
-        self._cfg["warn_exposure_ratio"] = float(self._cfg.get("warn_exposure_ratio", 1.0))
-        self._cfg["warn_loss_mult"] = float(self._cfg.get("warn_loss_mult", 1.0))
-        self._cfg["min_alert_interval_ms"] = int(self._cfg.get("min_alert_interval_ms", 300_000))
+    def _on_init(self) -> None:
+        self._set_def_cfg({
+            "warn_exposure_ratio": 1.0,
+            "warn_loss_mult": 1.0,
+            "min_alert_interval_ms": 300_000,
+        })
+        self._cfg["warn_exposure_ratio"] = float(self._cfg["warn_exposure_ratio"])
+        self._cfg["warn_loss_mult"] = float(self._cfg["warn_loss_mult"])
+        self._cfg["min_alert_interval_ms"] = int(self._cfg["min_alert_interval_ms"])
 
     def tick(self, now_ms: int):
         cfg = self.eng.store.get_config()
@@ -364,8 +383,9 @@ class HorseWithNoName(ThinkerBase):
 "But the humans will give no love",
     ]
 
-    def on_init(self):
-        self._cfg["prob"] = float(self._cfg.get("prob") or 0.1)
+    def _on_init(self):
+        self._set_def_cfg({"prob": 0.1})
+        self._cfg["prob"] = float(self._cfg["prob"])
 
     def tick(self, now_ms: int):
         if random.random() < self._cfg["prob"]:

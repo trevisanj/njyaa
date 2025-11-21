@@ -22,7 +22,7 @@ import tabulate
 import asyncio
 
 from rich.console import Console
-from console_ui import ConsoleUI, CONSOLE_THEME
+from console_ui import ConsoleUI  #, CONSOLE_THEME
 
 
 class _EngineLogStream:
@@ -211,7 +211,7 @@ class BotEngine:
 
         # rendering sinks
         self._sinks: List[str] = []
-        self._console_lock = threading.Lock()
+        self._print_lock = threading.Lock()
         self._log_stream_lock = threading.Lock()
         self._send_queue: Queue = Queue()
         self._log_stream_buffer = ""
@@ -341,7 +341,7 @@ class BotEngine:
                 return
             except Exception:
                 pass
-        with self._console_lock:
+        with self._print_lock:
             sys.stdout.write(text + "\n")
             sys.stdout.flush()
 
@@ -352,26 +352,19 @@ class BotEngine:
             self._rich_console.print(text, style=style, highlight=False, markup=False)
         return capture.get().rstrip("\n")
 
-    def _echo_console_command(self, text: str) -> None:
-        if not text:
-            return
-        style = CONSOLE_THEME.get("command_echo", "bold cyan")
-        rendered = self._render_console_line(text, style)
-        if rendered:
-            self._send_text_console(rendered)
+    # def _echo_console_command(self, text: str) -> None:
+    #     if not text:
+    #         return
+    #     style = CONSOLE_THEME.get("command_echo", "bold cyan")
+    #     rendered = self._render_console_line(text, style)
+    #     if rendered:
+    #         self._send_text_console(rendered)
 
     # ---------- text sinks ----------
     def _send_text_console(self, text: str) -> None:
         """Basic console sink for alerts/heartbeats."""
-        if self._stopping:
-            return
-        ui = getattr(self, "_console_ui", None)
-        if ui is not None:
-            ui.append_output(text)
-            return
-        with self._console_lock:
-            sys.stdout.write(text + "\n")
-            sys.stdout.flush()
+        if self._stopping: return
+        self._console_ui.append_output(text)
 
     def _send_text_telegram(self, text: str) -> None:
         """Telegram sink for alerts/heartbeats."""
@@ -760,8 +753,8 @@ class BotEngine:
     def dispatch_command(self, text: str, chat_id: int = 0, origin: str = "console") -> str:
         """Build context and route through the registry, then render per-origin."""
         assert self._registry
-        if origin == "console":
-            self._echo_console_command(text)
+        # if origin == "console":
+        #     self._echo_console_command(text)
         raw = self._registry.dispatch(self, text)
         self._render_co(raw, sinks=[origin])
         return ""
