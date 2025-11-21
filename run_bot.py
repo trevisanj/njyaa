@@ -6,7 +6,7 @@ from bot_api import BotEngine
 def main():
     cfg = make_cfg()
 
-    mode = 0
+    mode = 4
 
     match mode:
         case 0:  # console only
@@ -24,6 +24,9 @@ def main():
         case 3:  # none
             cfg.TELEGRAM_ENABLED = False
             cfg.CONSOLE_ENABLED = False
+
+        case 4:
+            pass
 
         case _:
             raise ValueError(f"Invalid mode: {mode}")

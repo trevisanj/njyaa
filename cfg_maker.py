@@ -13,7 +13,7 @@ def _get_env(varname, default):
     env_varname = f"NJYAA_{varname}"
     value = os.environ.get(varname)
     if value:
-        log().info(f"Read ({env_varname}: '{value!r}') --> cfg.{varname}")
+        print(f"njyaa: Read ({env_varname}: '{value!r}') --> cfg.{varname}")
         return value
     return default
 
