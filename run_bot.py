@@ -1,9 +1,31 @@
 #!/usr/bin/env python3
 # FILE: run_bot.py
+import fcntl
+import os
+import sys
+from pathlib import Path
+
 from cfg_maker import make_cfg
 from bot_api import BotEngine
 
+_LOCK_FD = None
+
+
+def acquire_singleton_lock():
+    global _LOCK_FD
+    lock_path = Path(__file__).resolve().parent / "njyaa.lock"
+    _LOCK_FD = open(lock_path, "a+")
+    try:
+        fcntl.flock(_LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("Another njyaa instance is already running here.")
+    _LOCK_FD.seek(0)
+    _LOCK_FD.truncate()
+    _LOCK_FD.write(f"{os.getpid()}\n")
+    _LOCK_FD.flush()
+
 def main():
+    acquire_singleton_lock()
     cfg = make_cfg()
 
     mode = 4

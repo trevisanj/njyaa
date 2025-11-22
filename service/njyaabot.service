@@ -1,0 +1,25 @@
+# /etc/systemd/system/njyaa.service
+[Unit]
+Description=NJYAA bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=j
+# Note that in the droplet the path is different to my local path
+WorkingDirectory=/home/j/Documents/projects/njyaa
+Environment=PATH=/home/j/miniconda3/envs/maisnovo/bin:/usr/bin
+Environment=NJYAA_LOG_LEVEL=INFO
+Environment=NJYAA_TELEGRAM_ENABLED=true
+Environment=NJYAA_CONSOLE_ENABLED=false
+EnvironmentFile=/etc/njyaa.env
+ExecStart=/home/j/miniconda3/envs/maisnovo/bin/python /home/j/Documents/projects/njyaa/run_bot.py
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65535
+StandardOutput=append:/var/log/njyaa.log
+StandardError=append:/var/log/njyaa.log
+
+[Install]
+WantedBy=multi-user.target

@@ -48,7 +48,7 @@ def make_cfg():
     cfg = AppConfig(
         TZ_LOCAL=ZoneInfo("America/Fortaleza"),
         RECV_WINDOW_MS=60_000,
-        DB_PATH=_get_env("DB_PATH", "njyaa_db.sqlite"),
+        DB_PATH="njyaa_db.sqlite",
         LOG_LEVEL=_get_env("LOG_LEVEL", "INFO"),
         PRICE_BACKFILL_WINDOW_SEC=5,
         PRICE_BACKFILL_MAX_SEC=120,
@@ -57,19 +57,33 @@ def make_cfg():
         REPORT_USD_DIGITS=2,
         TELEGRAM_ENABLED=_get_env_bool("TELEGRAM_ENABLED", False),
         CONSOLE_ENABLED=_get_env_bool("CONSOLE_ENABLED", False),
-        TELEGRAM_TOKEN=T[0],
-        TELEGRAM_CHAT_ID=T[1],
-        BINANCE_KEY=B[0],
-        BINANCE_SEC=B[1],
+        TELEGRAM_CHAT_ID=_get_env("TELEGRAM_CHAT_ID", None),
+        TELEGRAM_TOKEN=_get_env("TELEGRAM_TOKEN", None),
+        BINANCE_KEY=_get_env("BINANCE_KEY", None),
+        BINANCE_SEC=_get_env("BINANCE_SEC", None),
 
-        # ---- NEW: klines cache ----
-        KLINES_CACHE_DB_PATH=_get_env("KLINES_CACHE_DB_PATH", "./njyaa_cache.sqlite"),
-        KLINES_CACHE_KEEP_BARS=int(_get_env("KLINES_CACHE_KEEP_BARS", "2000")),
-        THINKING_SEC=int(_get_env("KLINES_POLL_SEC", "10")),
+        # ---- klines cache ----
+        KLINES_CACHE_DB_PATH="./njyaa_cache.sqlite",
+        KLINES_CACHE_KEEP_BARS=2000,
         KLINES_TIMEFRAMES=["1m", "1h", "1d"],
-        KLINES_FETCH_LIMIT=int(_get_env("KLINES_FETCH_LIMIT", "1000")),
+        KLINES_FETCH_LIMIT=1000,
+
+        THINKING_SEC=10,
 
         AUX_SYMBOLS=[],
     )
+
+    if all([cfg.TELEGRAM_CHAT_ID, cfg.TELEGRAM_TOKEN, cfg.BINANCE_KEY, cfg.BINANCE_SEC]):
+        pass
+    else:
+        from saccakeys import keys as _keys
+
+        B = _keys.apikeys["binance"]
+        T = _keys.apikeys["mettabot"]
+
+        if not cfg.TELEGRAM_CHAT_ID: cfg.TELEGRAM_CHAT_ID = T[1]
+        if not cfg.TELEGRAM_TOKEN: cfg.TELEGRAM_TOKEN = T[0]
+        if not cfg.BINANCE_KEY: cfg.BINANCE_KEY = B[0]
+        if not cfg.BINANCE_SEC: cfg.BINANCE_SEC = B[1]
 
     return cfg
