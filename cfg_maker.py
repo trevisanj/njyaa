@@ -72,6 +72,8 @@ def make_cfg():
     if all([cfg.TELEGRAM_CHAT_ID, cfg.TELEGRAM_TOKEN, cfg.BINANCE_KEY, cfg.BINANCE_SEC]):
         pass
     else:
+        sys.path.insert(0, "/home/j/yp/saccakeys")
+
         from saccakeys import keys as _keys
 
         B = _keys.apikeys["binance"]

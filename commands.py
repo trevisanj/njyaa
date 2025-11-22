@@ -463,7 +463,7 @@ class CommandRegistry:
             metas.append(self._meta[(prefix, name)])
 
         if detail == 1:
-            parts = [f"**{m['prefix']}{m['name']}**" for m in metas]
+            parts = [f"`{m['prefix']}{m['name']}`" for m in metas]
             body = "  ".join(parts) if parts else "(none)"
             header = "Commands"
             return CO(OCMarkDown(f"{header}\n{'-' * len(header)}\n{body}"))

@@ -8,6 +8,7 @@ import json
 import threading
 import time
 import os
+import socket
 import signal
 import logging
 from queue import Queue, Empty
@@ -50,6 +51,7 @@ PTB_LOGGERS = [
     "telegram.ext._utils.networkloop",
     "telegram.ext._updater",
     "telegram.request",
+    "telegram.ext._application",
 ]
 PTB_LOG_LEVEL = logging.WARNING
 PTB_STRIP_TRACEBACK = True  # keep the message but drop the multi-line traceback
@@ -208,6 +210,8 @@ class BotEngine:
         self._console_ui: Optional["ConsoleUI"] = None
         self._telegram_loop: Optional[asyncio.AbstractEventLoop] = None
         self._rich_console = Console(force_terminal=True, color_system="truecolor", soft_wrap=True)
+        self._host_name = socket.gethostname()
+        self._debug_log_mode = str(cfg.LOG_LEVEL or "").upper() == "DEBUG"
 
         # rendering sinks
         self._sinks: List[str] = []
@@ -370,8 +374,9 @@ class BotEngine:
         """Telegram sink for alerts/heartbeats."""
         if self._stopping: return
         loop = self._telegram_loop
+        body = f"{self._host_name}\n{text}" if self._debug_log_mode else text
         coro = self._app.bot.send_message(
-            chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=text, parse_mode=parse_mode
+            chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body, parse_mode=parse_mode
         )
         asyncio.run_coroutine_threadsafe(coro, loop)
 
