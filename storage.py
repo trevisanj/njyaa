@@ -58,6 +58,7 @@ class Storage:
           target_usd    REAL    NOT NULL,
           risk          REAL    NOT NULL DEFAULT 0.02,
           user_ts       INTEGER NOT NULL,        -- user-declared timestamp (ms)
+          closed_ts     INTEGER,                 -- when status transitions to CLOSED (ms)
           status        TEXT    NOT NULL DEFAULT 'OPEN',
           note          TEXT,
           created_ts    INTEGER NOT NULL
@@ -143,6 +144,7 @@ class Storage:
 
         # lightweight migrations for new columns/tables
         self._ensure_column("positions", "risk", "REAL NOT NULL DEFAULT 0.02")
+        self._ensure_column("positions", "closed_ts", "INTEGER")
         self._ensure_config_row()
 
     # -------- transaction manager --------
@@ -272,7 +274,11 @@ class Storage:
 
     def close_position(self, position_id: int):
         with self.txn(write=True) as cur:
-            cur.execute("UPDATE positions SET status='CLOSED' WHERE position_id=?", (int(position_id),))
+            ts = Clock.now_utc_ms()
+            cur.execute(
+                "UPDATE positions SET status='CLOSED', closed_ts=? WHERE position_id=?",
+                (ts, int(position_id)),
+            )
 
     # --- legs (stubs + fulfill) ---
     def ensure_leg_stub(self, position_id: int, symbol: str):
@@ -301,6 +307,9 @@ class Storage:
     def upsert_position(self, row: dict):
         q = """INSERT OR IGNORE INTO positions(position_id,num,den,dir_sign,target_usd,risk,user_ts,status,note,created_ts)
                VALUES(:position_id,:num,:den,:dir_sign,:target_usd,:risk,:user_ts,:status,:note,:created_ts)"""
+        if "closed_ts" in row:
+            q = """INSERT OR IGNORE INTO positions(position_id,num,den,dir_sign,target_usd,risk,user_ts,closed_ts,status,note,created_ts)
+                   VALUES(:position_id,:num,:den,:dir_sign,:target_usd,:risk,:user_ts,:closed_ts,:status,:note,:created_ts)"""
         with self.txn(write=True) as cur:
             cur.execute(q, row)
 

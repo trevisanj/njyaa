@@ -160,13 +160,11 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
     Returns:
       df: pandas.DataFrame indexed by ts, columns per position_id + "TOTAL" (floats, NaN when missing)
       report: dict with missing/issue details
-      meta: dict with time bounds used
+    meta: dict with time bounds used
     """
     assert eng.store and eng.kc and eng.positionbook
     tfm = tf_ms(timeframe)
     now_ms = Clock.now_utc_ms()
-    end_ts = end_ms or now_ms
-    start_ts = start_ms or (end_ts - tfm * 200)
 
     positions = []
     missing_positions = []
@@ -180,6 +178,31 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
         raise ValueError("No positions to process.")
 
     legs_by_pid = {int(p["position_id"]): eng.store.get_legs(p["position_id"]) for p in positions}
+    pos_meta: dict[int, dict] = {}
+    open_bounds: list[int] = []
+    close_bounds: list[int] = []
+    for p in positions:
+        pid = int(p["position_id"])
+        num = str(p["num"])
+        den = p["den"]
+        open_ms = int(p["user_ts"] or p["created_ts"])
+        closed_raw = p["closed_ts"] if "closed_ts" in p.keys() else None
+        closed_ms = int(closed_raw) if closed_raw is not None else None
+        open_bounds.append(open_ms)
+        close_bounds.append(closed_ms or now_ms)
+        lbl = f"{pid} {num}/{den}" if den else f"{pid} {num}"
+        pos_meta[pid] = {
+            "label": lbl,
+            "num": num,
+            "den": den,
+            "open_ms": open_ms,
+            "closed_ms": closed_ms,
+            "status": p["status"],
+        }
+
+    # window based on union of position lifetimes unless explicitly overridden
+    end_ts = end_ms or (max(close_bounds) if close_bounds else now_ms)
+    start_ts = start_ms or (min(open_bounds) if open_bounds else end_ts - tfm * 200)
     missing_qty_entry: list[int] = []
     symbols = set()
     for pid, legs in legs_by_pid.items():
@@ -223,6 +246,15 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
             if pid in missing_qty_entry:
                 data[pid].append(np.nan)
                 continue
+            span = pos_meta[pid]
+            open_ms = span["open_ms"]
+            closed_ms = span["closed_ms"]
+            if ts < open_ms:
+                data[pid].append(np.nan)
+                continue
+            if closed_ms is not None and ts > closed_ms:
+                data[pid].append(np.nan)
+                continue
             prices_for_pid = {}
             missing_any = False
             for lg in legs:
@@ -250,7 +282,7 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
         "symbols_missing_klines": symbols_missing_klines,
         "missing_prices": missing_prices,
     }
-    meta = {"start_ms": start_ts, "end_ms": end_ts, "timeframe": timeframe}
+    meta = {"start_ms": start_ts, "end_ms": end_ts, "timeframe": timeframe, "positions": pos_meta}
     return df, report, meta
 
 

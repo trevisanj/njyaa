@@ -1261,13 +1261,40 @@ def build_registry() -> CommandRegistry:
 
         # Plot
         df_plot = df.dropna(how="all", axis=1)
+        # hide TOTAL when plotting a single position for clarity
+        if len(pids) == 1 and "TOTAL" in df_plot.columns:
+            df_plot = df_plot.drop(columns=["TOTAL"])
         if df_plot.empty:
             return CO(OCMarkDown("\n".join(md_lines + ["- No data to plot."])))
 
         title = f"PnL {which.upper()} {tf}"
         fig, ax = plt.subplots(figsize=(10, 5))
+        pos_meta = meta.get("positions", {}) if isinstance(meta, dict) else {}
+
         for col in df_plot.columns:
-            ax.plot(df_plot.index, df_plot[col], label=str(col))
+            is_total = str(col).upper() == "TOTAL"
+            pid = None if is_total else int(col)
+            info = pos_meta.get(pid) if pid is not None else None
+            label = info["label"] if info else str(col)
+
+            line, = ax.plot(df_plot.index, df_plot[col], label=label)
+            if is_total:
+                continue
+
+            series = df_plot[col].dropna()
+            if series.empty:
+                continue
+
+            color = line.get_color()
+            start_ts = series.index[0]
+            start_val = series.iloc[0]
+            ax.plot(start_ts, start_val, marker="o", markersize=7, color=color, markerfacecolor=color, markeredgecolor=color)
+
+            end_ts = series.index[-1]
+            end_val = series.iloc[-1]
+            closed = info and str(info.get("status", "")).upper() == "CLOSED"
+            end_marker = "x" if closed else ">"
+            ax.plot(end_ts, end_val, marker=end_marker, markersize=8, color=color, markeredgewidth=2)
         ax.set_title(title)
         ax.set_xlabel("Time")
         ax.set_ylabel("PnL (quote)")
@@ -1312,14 +1339,15 @@ def build_registry() -> CommandRegistry:
     # ======================= POSITION EDIT =======================
     @R.bang("position-set",
             argspec=["position_id"],
-            options=["num", "den", "dir_sign", "target_usd", "risk", "user_ts", "status", "note", "created_ts"])
+            options=["num", "den", "dir_sign", "target_usd", "risk", "user_ts", "closed_ts", "status", "note", "created_ts"])
     def _bang_position_set(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Update fields in a position row (by position_id).
 
         Usage:
           !position-set <position_id> [num:ETHUSDT] [den:STRKUSDT|-] [dir_sign:-1|+1]
-                          [target_usd:5000] [risk:0.02] [user_ts:<when>] [status:OPEN|CLOSED]
+                          [target_usd:5000] [risk:0.02] [user_ts:<when>] [closed_ts:<when>]
+                          [status:OPEN|CLOSED]
                           [note:...] [created_ts:<when>]
 
         Notes:
@@ -1333,7 +1361,7 @@ def build_registry() -> CommandRegistry:
 
         # capture only provided (recognized) option keys
         provided = {k: v for k, v in args.items()
-                    if k in {"num", "den", "dir_sign", "target_usd", "risk", "user_ts", "status", "note",
+                    if k in {"num", "den", "dir_sign", "target_usd", "risk", "user_ts", "closed_ts", "status", "note",
                              "created_ts"} and v is not None}
 
         if not provided:
@@ -1631,6 +1659,7 @@ def _coerce_position_fields(raw: dict) -> dict:
         out["risk"] = rv
     if "target_usd" in raw: out["target_usd"] = float(raw["target_usd"])
     if "user_ts" in raw: out["user_ts"] = parse_when(str(raw["user_ts"]))
+    if "closed_ts" in raw: out["closed_ts"] = parse_when(str(raw["closed_ts"]))
     if "created_ts" in raw: out["created_ts"] = parse_when(str(raw["created_ts"]))
     if "status" in raw: out["status"] = str(raw["status"]).upper().strip()
     if "note" in raw: out["note"] = str(raw["note"])
