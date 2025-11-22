@@ -40,10 +40,6 @@ def _get_env_bool(varname, default) -> bool:
 
 def make_cfg():
     sys.path.append("/home/j/yp/saccakeys")
-    from saccakeys import keys as _keys
-
-    B = _keys.apikeys["binance"]
-    T = _keys.apikeys["mettabot"]
 
     cfg = AppConfig(
         TZ_LOCAL=ZoneInfo("America/Fortaleza"),
