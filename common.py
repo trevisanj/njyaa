@@ -10,7 +10,7 @@ import threading
 from typing import Optional, Union
 
 
-__all__ = ["AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when", "ts_human", "LV", "coerce_to_type", "pct_of", "leg_pnl"]
+__all__ = ["AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when", "ts_human", "LV", "coerce_to_type", "pct_of", "leg_pnl", "fmt_pair"]
 
 
 LV = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
@@ -299,6 +299,16 @@ def leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float])
     if entry is None or qty is None or mark is None:
         return None
     return (float(mark) - float(entry)) * float(qty)
+
+
+def fmt_pair(num: str, den: str | None) -> str:
+    """Human-friendly pair string for display."""
+    assert num
+    if den:
+        if num.endswith("USDT") and den.endswith("USDT"):
+            return f"{num.removesuffix('USDT')}/{den.removesuffix('USDT')}"
+        return f"{num}/{den}"
+    return num
 
 
 # ---- tiny TF helpers ----

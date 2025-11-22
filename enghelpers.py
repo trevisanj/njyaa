@@ -190,7 +190,7 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
         closed_ms = int(closed_raw) if closed_raw is not None else None
         open_bounds.append(open_ms)
         close_bounds.append(closed_ms or now_ms)
-        lbl = f"{pid} {num}/{den}" if den else f"{pid} {num}"
+        lbl = f"{pid} {fmt_pair(num, den)}"
         pos_meta[pid] = {
             "label": lbl,
             "num": num,
