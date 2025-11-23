@@ -11,6 +11,22 @@ from common import tf_ms
 if TYPE_CHECKING:
     from bot_api import BotEngine
 
+
+# Default column set for klines queries (ts + OHLCV + finalized/meta)
+KLINE_COLS: List[str] = [
+    # "symbol",
+    # "timeframe",
+    "open_ts",
+    "close_ts",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    # "finalized",
+]
+
+
 @dataclass
 class KlineRow:
     """
@@ -74,21 +90,6 @@ class KlinesCache:
 
         # DB lock for concurrent writers (WAL allows concurrent readers)
         self._db_lock = threading.Lock()
-
-
-# Default column set for klines queries (ts + OHLCV + finalized/meta)
-KLINE_COLS: List[str] = [
-    "symbol",
-    "timeframe",
-    "open_ts",
-    "close_ts",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "finalized",
-]
 
     # ---------- schema ----------
     def _ensure_schema(self):

@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, Tuple, Optional, List, Sequence, Literal
 import json
 import os
 
-from common import *
+from common import parse_when, log, ts_human
 from datetime import datetime, timezone, timedelta
 import textwrap
 from binance_um import BinanceUM
@@ -18,7 +18,7 @@ from rich.markdown import Markdown, Heading
 from rich.theme import Theme
 from rich.text import Text
 from rich.rule import Rule
-from common import Clock, coerce_to_type, pct_of, leg_pnl
+from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when
 from risk_report import build_risk_report, RiskThresholds, RiskReport, format_risk_report
 
 if TYPE_CHECKING:
@@ -663,16 +663,20 @@ def build_registry() -> CommandRegistry:
         return _txt(f"{summary} ({changed})")
 
     # ----------------------- TRAILING / EXIT ATTACHMENTS -----------------------
-    @R.bang("attach-exit", argspec=["position_id"], options=["policies", "lookback"], nreq=1)
+    @R.bang("attach-exit", argspec=["position_id"], options=["policies", "lookback", "thinker_id", "at"], nreq=1)
     def _bang_attach_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Attach trailing/exit policies to a position.
 
         Usage:
-          !attach-exit <position_id> [policies:<json>] [lookback:200]
+          !attach-exit <position_id> [policies:<json>] [lookback:200] [thinker_id:<id>] [at:<iso|rel>]
+
+        at: iso (local) like 2024-08-20T15:30 or relative like -5m/+2h; defaults to now.
         """
         pid = int(args["position_id"])
         lookback = int(args.get("lookback", 200))
+        thinker_id = int(args.get("thinker_id", 0))
+        at_opt = args.get("at")
         policies_raw = args.get("policies")
         if policies_raw:
             try:
@@ -681,18 +685,29 @@ def build_registry() -> CommandRegistry:
                 return _err(f"Bad policies JSON: {e}")
         else:
             policies = [{"policy": "psar_lock", "indicator": "psar", "indicator_cfg": {"af": 0.02, "max_af": 0.2}}]
-        now_ms = Clock.now_utc_ms()
+        at_ms = Clock.now_utc_ms()
+        if at_opt:
+            rel = _parse_rel_time(at_opt)
+            if rel is not None:
+                at_ms = Clock.now_utc_ms() + rel
+            else:
+                try:
+                    at_ms = Clock.from_local_iso_to_utc_ms(at_opt)
+                except Exception as e:
+                    return _err(f"Bad at: {e}")
         try:
-            tid, rt = _trailing_runtime(eng)
+            tid, rt = _trailing_runtime(eng) if thinker_id <= 0 else (thinker_id, json.loads(eng.store.get_thinker(thinker_id)["runtime_json"] or "{}"))
         except Exception as e:
             return _err(str(e))
+        if "positions" not in rt:
+            rt["positions"] = {}
         rt["positions"][str(pid)] = {
             "policies": policies,
             "lookback_bars": lookback,
-            "attached_at_ms": now_ms,
+            "attached_at_ms": at_ms,
         }
         _save_trailing_runtime(eng, tid, rt)
-        return _txt(f"Attached exit policies to position {pid} ({len(policies)} policy)")
+        return _txt(f"Attached exit policies to position {pid} ({len(policies)} policy) via thinker {tid} at {at_ms}")
 
     @R.at("exit-list")
     def _at_exit_list(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -1809,11 +1824,11 @@ def _coerce_leg_fields(raw: dict) -> dict:
     if "note" in raw: out["note"] = str(raw["note"])
     return out
 
-def _coerce_config_fields(raw: dict) -> dict:
-    """Coerce incoming config fields."""
-    out: Dict[str, Any] = {}
-    if "reference_balance" in raw:
-        rb = float(raw["reference_balance"])
+    def _coerce_config_fields(raw: dict) -> dict:
+        """Coerce incoming config fields."""
+        out: Dict[str, Any] = {}
+        if "reference_balance" in raw:
+            rb = float(raw["reference_balance"])
         if rb <= 0:
             raise ValueError("reference_balance must be > 0")
         out["reference_balance"] = rb

@@ -98,6 +98,7 @@ def step_psar(bars: List[Bar], state: Optional[PSARState], af0: float, afmax: fl
         traces.append({
             "ts_ms": bars[i][0],
             "psar": psar,
+            "value": psar,
             "ep": ep,
             "af": af,
             "trend": "UP" if up else "DOWN",
@@ -165,6 +166,7 @@ def step_atr(bars: List[Bar], state: Optional[ATRState], period: int) -> Tuple[A
         traces.append({
             "ts_ms": bars[i][0],
             "atr": atr,
+            "value": atr,
             "tr": tr,
             "o": bars[i][1],
             "h": h,
@@ -178,3 +180,20 @@ def step_atr(bars: List[Bar], state: Optional[ATRState], period: int) -> Tuple[A
 
     new_state = ATRState(atr=atr, prev_close=prev_close, last_open_ms=traces[-1]["ts_ms"])
     return new_state, traces
+
+
+def run_indicator(name: str, bars: List[Bar], cfg: dict, state: Optional[dict]) -> Tuple[dict, List[Dict[str, Any]], Optional[float]]:
+    """
+    Generic indicator dispatcher. Returns (state_dict, traces, latest_value).
+    """
+    if name == "psar":
+        st = PSARState(**state) if state else None
+        ns, traces = step_psar(bars, st, cfg.get("af", 0.02), cfg.get("max_af", 0.2))
+        latest = traces[-1]["value"] if traces else (state["psar"] if state else None)
+        return ns.__dict__, traces, latest
+    if name == "atr":
+        st = ATRState(**state) if state else None
+        ns, traces = step_atr(bars, st, int(cfg.get("period", 14)))
+        latest = traces[-1]["value"] if traces else (state["atr"] if state else None)
+        return ns.__dict__, traces, latest
+    raise ValueError(f"Unknown indicator: {name}")
