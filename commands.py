@@ -1041,16 +1041,45 @@ def build_registry() -> CommandRegistry:
         )
 
     # ----------------------- THINKERS LIST -----------------------
-    @R.at("thinkers")
+    @R.at("thinkers", argspec=["thinker_id"], options=["detail"], nreq=0)
     def _at_thinkers(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List thinkers stored in DB."""
+        tid_opt = args.get("thinker_id")
+        detail = int(args.get("detail", "1"))
         rows = eng.store.list_thinkers()
+        if tid_opt:
+            rows = [r for r in rows if int(r["id"]) == int(tid_opt)]
+            detail = 2  # force full view when targeting one
         if not rows:
             return _txt("No thinkers.")
-        lines = ["# Thinkers", ""]
-        for r in rows:
-            lines.append(f"- `#{r['id']}` {r['kind']} enabled={r['enabled']} cfg={r['config_json']}")
-        return _md("\n".join(lines))
+
+        def fmt_block(r, heading_level: int) -> str:
+            head = "#" * heading_level
+            header = f"{head} #{r['id']} {r['kind']}"
+            cfg = r["config_json"] or "{}"
+            rt = r["runtime_json"] or "{}"
+            return "\n".join([
+                header,
+                "",
+                "```",
+                cfg,
+                "```",
+                "",
+                "```",
+                rt,
+                "```",
+            ])
+
+        if detail <= 1 and not tid_opt:
+            lines = ["# Thinkers", ""]
+            for r in rows:
+                cfg = r["config_json"] or "{}"
+                lines.append(f"- `#{r['id']}` {r['kind']} enabled={r['enabled']} cfg=`{cfg}`")
+            return _md("\n".join(lines))
+
+        heading_level = 1 if tid_opt else 2
+        blocks = [fmt_block(r, heading_level) for r in rows]
+        return _md("\n\n".join(blocks))
 
     # ----------------------- THINKER KINDS -----------------------
     @R.at("thinker-kinds", options=["detail"])

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # FILE: indicator_engines.py
 from __future__ import annotations
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
@@ -18,18 +18,18 @@ class PSARIndicator:
         return {"af": 0.02, "max_af": 0.2, "initial_trend": "UP"}
 
     @classmethod
-    def run(cls, df: pd.DataFrame, state: Optional[dict], cfg: dict, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray], Optional[float]]:
+    def run(cls, df: pd.DataFrame, state: Optional[dict], cfg: dict, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
         """
-        Compute PSAR; returns (new_state, outputs, latest_value).
+        Compute PSAR; returns (new_state, outputs).
         outputs: {"value", "ep", "af", "trend"} aligned to df.index (NaNs where unchanged).
         """
-        base_cfg = cls.default_cfg()
-        cfg = {**base_cfg, **(cfg or {})}
         if df is None or df.empty:
             raise ValueError("bars required")
         if start_idx >= len(df):
-            return state or {}, {"value": np.full(len(df), np.nan)}, None
+            return state or {}, {"value": np.full(len(df), np.nan)}
 
+        base_cfg = cls.default_cfg()
+        cfg = {**base_cfg, **(cfg or {})}
         af0 = cfg["af"]
         afmax = cfg["max_af"]
         init_up = True if str(cfg["initial_trend"]).upper() == "UP" else False
@@ -38,7 +38,6 @@ class PSARIndicator:
         h_arr = df["High"].values
         l_arr = df["Low"].values
         c_arr = df["Close"].values
-        ts_arr = (df.index.view("int64") // 1_000_000).astype(np.int64)
 
         n_total = len(df)
         val_arr = np.full(n_total, np.nan, dtype=float)
@@ -66,7 +65,7 @@ class PSARIndicator:
             up = True if state["trend"] == "UP" else False
             idx = max(start_idx, 0)
 
-        for i in range(idx, len(ts_arr)):
+        for i in range(idx, n_total):
             o, h, l, c = o_arr[i], h_arr[i], l_arr[i], c_arr[i]
             prev_psar = psar
             prev_ep = ep
@@ -114,15 +113,9 @@ class PSARIndicator:
             af_arr[i] = af
             trend_arr[i] = "UP" if up else "DOWN"
 
-        latest = None
-        if np.any(~np.isnan(val_arr)):
-            latest = float(val_arr[~np.isnan(val_arr)][-1])
-
-        last_idx = int(np.nanmax(np.where(~np.isnan(val_arr), np.arange(len(val_arr)), -1))) if np.any(~np.isnan(val_arr)) else (len(df) - 1)
-        last_open_ms = int(df.index[last_idx].value // 1_000_000)
-        new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("UP" if up else "DOWN"), "last_open_ms": last_open_ms}
+        new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("UP" if up else "DOWN")}
         outputs = {"value": val_arr, "ep": ep_arr, "af": af_arr, "trend": trend_arr}
-        return new_state, outputs, latest
+        return new_state, outputs
 
 
 class ATRIndicator:
@@ -138,18 +131,18 @@ class ATRIndicator:
         return {"period": 14}
 
     @classmethod
-    def run(cls, df: pd.DataFrame, state: Optional[dict], cfg: dict, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray], Optional[float]]:
+    def run(cls, df: pd.DataFrame, state: Optional[dict], cfg: dict, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
         """
-        Compute ATR; returns (new_state, outputs, latest_value).
+        Compute ATR; returns (new_state, outputs).
         outputs: {"value", "tr"} aligned to df.index (NaNs where unchanged).
         """
-        base_cfg = cls.default_cfg()
-        cfg = {**base_cfg, **(cfg or {})}
         if df is None or df.empty:
             raise ValueError("bars required")
         if start_idx >= len(df):
-            return state or {}, {"value": np.full(len(df), np.nan)}, None
+            return state or {}, {"value": np.full(len(df), np.nan)}
 
+        base_cfg = cls.default_cfg()
+        cfg = {**base_cfg, **(cfg or {})}
         period = int(cfg["period"])
         need = cls.lookback_bars(cfg)
 
@@ -157,7 +150,6 @@ class ATRIndicator:
         l_arr = df["Low"].values
         c_arr = df["Close"].values
         o_arr = df["Open"].values
-        ts_arr = (df.index.view("int64") // 1_000_000).astype(np.int64)
 
         n_total = len(df)
         val_arr = np.full(n_total, np.nan, dtype=float)
@@ -180,7 +172,7 @@ class ATRIndicator:
             atr = float(state["atr"])
             prev_close = float(state["prev_close"])
 
-        for i in range(idx, len(ts_arr)):
+        for i in range(idx, n_total):
             h = h_arr[i]; l = l_arr[i]; c = c_arr[i]
             tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
             atr = ((atr * (period - 1)) + tr) / period
@@ -188,14 +180,9 @@ class ATRIndicator:
             val_arr[i] = atr
             tr_arr[i] = tr
 
-        latest = None
-        if np.any(~np.isnan(val_arr)):
-            latest = float(val_arr[~np.isnan(val_arr)][-1])
-
-        last_idx = int(np.nanmax(np.where(~np.isnan(val_arr), np.arange(len(val_arr)), -1))) if np.any(~np.isnan(val_arr)) else (len(df) - 1)
-        new_state = {"atr": atr, "prev_close": prev_close, "last_open_ms": int(df.index[last_idx].value // 1_000_000)}
+        new_state = {"atr": atr, "prev_close": prev_close}
         outputs = {"value": val_arr, "tr": tr_arr}
-        return new_state, outputs, latest
+        return new_state, outputs
 
 
 INDICATOR_DISPATCH = {
@@ -204,7 +191,7 @@ INDICATOR_DISPATCH = {
 }
 
 
-def run_indicator(name: str, bars: pd.DataFrame, cfg: dict, state: Optional[dict], start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray], Optional[float]]:
+def run_indicator(name: str, bars: pd.DataFrame, cfg: dict, state: Optional[dict], start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
     cls = INDICATOR_DISPATCH.get(name)
     if not cls:
         raise ValueError(f"Unknown indicator: {name}")

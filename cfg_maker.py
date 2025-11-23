@@ -9,11 +9,12 @@ from bot_api import (
     AppConfig, log, Clock
 )
 
-def _get_env(varname, default):
+def _get_env(varname, default, show=True):
     env_varname = f"NJYAA_{varname}"
     value = os.environ.get(env_varname)
     if value:
-        log().info(f"njyaa: Read ({env_varname}: '{value!r}') --> cfg.{varname}")
+        show_value = value if show else "..."
+        log().info(f"njyaa: Read ({env_varname}: '{show_value!r}') --> cfg.{varname}")
         return value
     return default
 
@@ -53,10 +54,10 @@ def make_cfg():
         REPORT_USD_DIGITS=2,
         TELEGRAM_ENABLED=_get_env_bool("TELEGRAM_ENABLED", False),
         CONSOLE_ENABLED=_get_env_bool("CONSOLE_ENABLED", False),
-        TELEGRAM_CHAT_ID=_get_env("TELEGRAM_CHAT_ID", None),
-        TELEGRAM_TOKEN=_get_env("TELEGRAM_TOKEN", None),
-        BINANCE_KEY=_get_env("BINANCE_KEY", None),
-        BINANCE_SEC=_get_env("BINANCE_SEC", None),
+        TELEGRAM_CHAT_ID=_get_env("TELEGRAM_CHAT_ID", None, show=False),
+        TELEGRAM_TOKEN=_get_env("TELEGRAM_TOKEN", None, show=False),
+        BINANCE_KEY=_get_env("BINANCE_KEY", None, show=False),
+        BINANCE_SEC=_get_env("BINANCE_SEC", None, show=False),
 
         # ---- klines cache ----
         KLINES_CACHE_DB_PATH="./njyaa_cache.sqlite",

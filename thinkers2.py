@@ -269,7 +269,7 @@ class TrailingStopThinker(ThinkerBase):
             pid = int(pid_str)
             pos = self.eng.store.get_position(pid)
 
-            if ctx["invalid"]:
+            if ctx.get("invalid"):
                 continue
 
             if not pos or pos["status"] != "OPEN":
@@ -288,34 +288,40 @@ class TrailingStopThinker(ThinkerBase):
             need_n = max(int(ctx.get("lookback_bars", 200)), 5)
             bars = self._pair_bars(symbol, den, need_n)
             if bars.empty or len(bars) < need_n:
-                self.notify("DEBUG", f"[trail] {symbol} missing klines {tf}", symbol=symbol)
+                self.notify("DEBUG", f"[trail] {symbol} missing klines {tf}", symbol=symbol)  # TODO regular logging instead of notify
                 continue
 
             indicators: Dict[str, Dict[str, Any]] = {}
             history_rows: List[dict] = []
             ind_states = ctx.setdefault("indicators", {})
+            ctx_last_ts = ctx.get("last_ts")
+            start_idx = 0
+            if ctx_last_ts is not None:
+                dt = pd.to_datetime(int(ctx_last_ts), unit="ms")
+                start_idx = int(bars.index.searchsorted(dt, side="right"))
+
+            last_ts_seen = ctx_last_ts
             for ind_name, cfg in ind_cfgs.items():
                 st_info = ind_states.get(ind_name, {})
                 st_payload = st_info.get("state")
-                last_ts = st_info.get("ts_ms")
-                if last_ts is None:
-                    start_idx = 0
-                else:
-                    dt = pd.to_datetime(int(last_ts), unit="ms")
-                    start_idx = int(bars.index.searchsorted(dt, side="right"))
                 try:
-                    ns, outputs, latest_val = run_indicator(ind_name, bars, cfg, st_payload, start_idx=start_idx)
+                    ns, outputs = run_indicator(ind_name, bars, cfg, st_payload, start_idx=start_idx)
                 except Exception as e:
                     self.notify("WARN", f"[trail] {symbol} indicator {ind_name} failed: {e}", symbol=symbol)
                     continue
                 val_arr = outputs.get("value")
-                ts_val = st_info.get("ts_ms", now_ms)
+                ts_val = last_ts_seen
                 if val_arr is not None and np.any(~np.isnan(val_arr)):
                     last_idx = int(np.nanmax(np.where(~np.isnan(val_arr), np.arange(len(val_arr)), -1)))
                     ts_val = int(bars.index[last_idx].value // 1_000_000)
-                ind_states[ind_name] = {"state": ns, "ts_ms": ts_val}
+                ind_states[ind_name] = {"state": ns}
                 history_rows.extend(self._indicator_history_rows(tid, pid, ind_name, outputs, bars, start_idx))
-                indicators[ind_name] = {"value": latest_val, "ts_ms": ts_val, "raw": ns}
+                # latest value = last non-nan in value array
+                latest_val = None
+                if val_arr is not None and np.any(~np.isnan(val_arr)):
+                    latest_val = float(val_arr[~np.isnan(val_arr)][-1])
+                indicators[ind_name] = {"value": latest_val, "raw": ns}
+                last_ts_seen = ts_val
 
             if history_rows:
                 self.eng.ih.insert_history(history_rows)
@@ -388,6 +394,8 @@ class TrailingStopThinker(ThinkerBase):
             positions_ctx[pid_str] = ctx
             processed += 1
             dirty = True
+            latest_bar_ts = int(bars.index[-1].value // 1_000_000)
+            ctx["last_ts"] = max(last_ts_seen or latest_bar_ts, latest_bar_ts)
 
         if dirty:
             self.save_runtime()

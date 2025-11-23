@@ -196,7 +196,7 @@ class ThinkerBase(ABC):
 
     def notify(self, level: str, msg: str, send=False, **kwargs) -> None:
         self.tm.log_event(self._thinker_id, level, msg, **kwargs)
-        if send:
+        if send:  # TODO decouple message and logging
             self.eng.send_text(msg)
 
     def _on_init(self) -> None:
