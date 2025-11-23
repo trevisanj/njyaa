@@ -155,12 +155,12 @@ def render_ratio_chart(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: i
 def render_indicator_history_chart(eng: "BotEngine", thinker_id: int, position_id: int, indicator_name: str, symbol: str,
                                    timeframe: str = "1m", n: int = 300, outdir: str = "/tmp") -> str:
     """Overlay price closes with recorded indicator history."""
-    cols = eng.kc.last_n(symbol, timeframe, n=n, include_live=True, asc=True)
-    if not cols["close"]:
+    rows = eng.kc.last_n(symbol, timeframe, n=n, include_live=True, asc=True)
+    if not rows:
         raise ValueError(f"No klines for {symbol} {timeframe}")
-    df = rows_to_dataframe(cols)
-    hist = eng.ih.list_history(thinker_id, position_id, indicator_name, limit=5000, columns=None)
-    if not hist["ts_ms"]:
+    df = rows_to_dataframe(rows)
+    hist = eng.ih.list_history(thinker_id, position_id, indicator_name, limit=5000)
+    if not hist:
         raise ValueError("No history rows")
     hdf = pd.DataFrame(hist)
     hdf["dt"] = pd.to_datetime(hdf["ts_ms"], unit="ms")

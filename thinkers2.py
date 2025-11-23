@@ -15,14 +15,16 @@ import enghelpers as eh
 import risk_report
 from indicator_engines import run_indicator
 from trailing_policies import evaluate_policy
+from klines_cache import rows_to_dataframe
+import pandas as pd
+from klines_cache import rows_to_dataframe
+import pandas as pd
+import numpy as np
+
 
 if TYPE_CHECKING:
     from bot_api import BotEngine
 
-
-# --------------------------------
-# Thinker Implementations (examples)
-# --------------------------------
 
 class ThresholdAlertThinker(ThinkerBase):
     """
@@ -143,15 +145,6 @@ class RiskThinker(ThinkerBase):
 # ========= Trailing stop orchestrator =========
 
 
-def _bars_from_cols(cols: Dict[str, List[Any]]) -> List[tuple[int, float, float, float, float]]:
-    if not cols.get("open_ts"):
-        return []
-    return [
-        (int(ts), float(o), float(h), float(l), float(c))
-        for ts, o, h, l, c in zip(cols["open_ts"], cols["open"], cols["high"], cols["low"], cols["close"])
-    ]
-
-
 def _agg_stop(side: str, stops: List[Optional[float]]) -> Optional[float]:
     usable = [s for s in stops if s is not None]
     if not usable:
@@ -185,16 +178,9 @@ class TrailingStopThinker(ThinkerBase):
     def _on_init(self) -> None:
         self._runtime.setdefault("positions", {})
 
-    def _fetch_bars(self, symbol: str, n: int) -> List[tuple[int, float, float, float, float]]:
-        cols = self.eng.kc.last_n(
-            symbol,
-            self._cfg["timeframe"],
-            n=n,
-            include_live=True,
-            asc=True,
-            columns=["open_ts", "open", "high", "low", "close"],
-        )
-        return _bars_from_cols(cols)
+    def _fetch_bars(self, symbol: str, n: int) -> pd.DataFrame:
+        rows = self.eng.kc.last_n(symbol, self._cfg["timeframe"], n=n, include_live=True, asc=True)
+        return rows_to_dataframe(rows) if rows else rows_to_dataframe([])
 
     def _indicator_configs(self, policies: List[dict]) -> Dict[str, dict]:
         cfgs: Dict[str, dict] = {}
@@ -205,17 +191,29 @@ class TrailingStopThinker(ThinkerBase):
             cfgs.setdefault(ind, dict(p.get("indicator_cfg") or {}))
         return cfgs
 
-    def _indicator_history_rows(self, tid: int, pid: int, name: str, traces: List[dict]) -> List[dict]:
+    def _indicator_history_rows(self, tid: int, pid: int, name: str, outputs: Dict[str, Any], bars: pd.DataFrame, start_idx: int) -> List[dict]:
         rows = []
-        for t in traces:
+        val_arr = outputs.get("value")
+        if val_arr is None:
+            return rows
+        idxs = np.where(~np.isnan(val_arr))[0]
+        for pos in idxs:
+            if pos < start_idx:
+                continue
+            ts_ms = int(bars.index[pos].value // 1_000_000)
+            aux = {}
+            for k in ("ep", "af", "trend", "tr"):
+                arr = outputs.get(k)
+                if arr is not None and pos < len(arr):
+                    aux[k] = arr[pos]
             rows.append({
                 "thinker_id": tid,
                 "position_id": pid,
                 "name": name,
-                "ts_ms": t["ts_ms"],
-                "value": t.get("value"),
-                "price": t.get("c"),
-                "aux": {k: t[k] for k in ("ep", "af", "trend", "tr") if k in t},
+                "ts_ms": ts_ms,
+                "value": val_arr[pos],
+                "price": float(bars.iloc[pos]["Close"]),
+                "aux": aux,
             })
         return rows
 
@@ -232,33 +230,30 @@ class TrailingStopThinker(ThinkerBase):
     def _positions_ctx(self) -> Dict[str, dict]:
         return self._runtime.setdefault("positions", {})
 
-    def _pair_bars(self, num: str, den: Optional[str], n: int) -> List[tuple[int, float, float, float, float]]:
+    def _pair_bars(self, num: str, den: Optional[str], n: int) -> pd.DataFrame:
         """
-        Return OHLC bars for num[/den], aligned on open_ts.
+        Return OHLC dataframe for num[/den], aligned on open_ts.
         For ratios, divide num o/h/l/c by den o/h/l/c; volume ignored for now.
         """
         if not den:
             return self._fetch_bars(num, n)
         kc = self.eng.kc
-        num_rows = kc.last_n(num, self._cfg["timeframe"], n=n, include_live=True, asc=True)
-        den_rows = kc.last_n(den, self._cfg["timeframe"], n=n, include_live=True, asc=True)
-        if not num_rows or not den_rows:
-            return []
-        by_open = {int(r[0]): r for r in den_rows}
-        merged: List[tuple[int, float, float, float, float]] = []
-        for nr in num_rows:
-            ts = int(nr[0])
-            dr = by_open.get(ts)
-            if not dr:
-                continue
-            o = float(nr[1]) / float(dr[1])
-            h = float(nr[2]) / float(dr[2])
-            l = float(nr[3]) / float(dr[3])
-            c = float(nr[4]) / float(dr[4])
-            merged.append((ts, o, h, l, c))
-        if len(merged) > n:
-            merged = merged[-n:]
-        return merged
+        num_df = rows_to_dataframe(kc.last_n(num, self._cfg["timeframe"], n=n, include_live=True, asc=True))
+        den_df = rows_to_dataframe(kc.last_n(den, self._cfg["timeframe"], n=n, include_live=True, asc=True))
+        if num_df.empty or den_df.empty:
+            return rows_to_dataframe([])
+        num_df, den_df = num_df.align(den_df, join="inner")
+        if num_df.empty:
+            return num_df
+        out = num_df.copy()
+        out["Open"] = num_df["Open"] / den_df["Open"]
+        out["High"] = num_df["High"] / den_df["High"]
+        out["Low"] = num_df["Low"] / den_df["Low"]
+        out["Close"] = num_df["Close"] / den_df["Close"]
+        out["Volume"] = num_df["Volume"]
+        if len(out) > n:
+            out = out.iloc[-n:]
+        return out
 
     def tick(self, now_ms: int):
         positions_ctx = self._positions_ctx()
@@ -274,7 +269,9 @@ class TrailingStopThinker(ThinkerBase):
             pid = int(pid_str)
             pos = self.eng.store.get_position(pid)
 
-            # TODO: may check ctx["invalid"] instead
+            if ctx["invalid"]:
+                continue
+
             if not pos or pos["status"] != "OPEN":
                 ctx["invalid"] = True
                 ctx["invalid_msg"] = "Closed" if pos else "Inexistent"
@@ -284,17 +281,13 @@ class TrailingStopThinker(ThinkerBase):
 
             symbol = pos["num"]
             den = pos["den"]
-            price = eh.last_cached_price(self.eng, symbol) # TODO: may skip this check
-            if price is None:
-                continue
 
             policies = ctx.get("policies") or []
             ind_cfgs = self._indicator_configs(policies)
 
-            # TODO: here, the <num[/den]> series must be pulled, not the klines for the numerator only. Create helper method to obtain ohlcv bars for <num[/den]> (calculate ratios for ohlc and compute quote-notional sum for v).
             need_n = max(int(ctx.get("lookback_bars", 200)), 5)
             bars = self._pair_bars(symbol, den, need_n)
-            if len(bars) < need_n:
+            if bars.empty or len(bars) < need_n:
                 self.notify("DEBUG", f"[trail] {symbol} missing klines {tf}", symbol=symbol)
                 continue
 
@@ -304,14 +297,24 @@ class TrailingStopThinker(ThinkerBase):
             for ind_name, cfg in ind_cfgs.items():
                 st_info = ind_states.get(ind_name, {})
                 st_payload = st_info.get("state")
+                last_ts = st_info.get("ts_ms")
+                if last_ts is None:
+                    start_idx = 0
+                else:
+                    dt = pd.to_datetime(int(last_ts), unit="ms")
+                    start_idx = int(bars.index.searchsorted(dt, side="right"))
                 try:
-                    ns, traces, latest_val = run_indicator(ind_name, bars, cfg, st_payload)
+                    ns, outputs, latest_val = run_indicator(ind_name, bars, cfg, st_payload, start_idx=start_idx)
                 except Exception as e:
                     self.notify("WARN", f"[trail] {symbol} indicator {ind_name} failed: {e}", symbol=symbol)
                     continue
-                ts_val = traces[-1]["ts_ms"] if traces else st_info.get("ts_ms", now_ms)
+                val_arr = outputs.get("value")
+                ts_val = st_info.get("ts_ms", now_ms)
+                if val_arr is not None and np.any(~np.isnan(val_arr)):
+                    last_idx = int(np.nanmax(np.where(~np.isnan(val_arr), np.arange(len(val_arr)), -1)))
+                    ts_val = int(bars.index[last_idx].value // 1_000_000)
                 ind_states[ind_name] = {"state": ns, "ts_ms": ts_val}
-                history_rows.extend(self._indicator_history_rows(tid, pid, ind_name, traces))
+                history_rows.extend(self._indicator_history_rows(tid, pid, ind_name, outputs, bars, start_idx))
                 indicators[ind_name] = {"value": latest_val, "ts_ms": ts_val, "raw": ns}
 
             if history_rows:

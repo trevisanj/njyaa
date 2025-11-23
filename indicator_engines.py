@@ -1,199 +1,211 @@
 #!/usr/bin/env python3
 # FILE: indicator_engines.py
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Any
-
-# Types:
-# Bar = (open_ts_ms, open, high, low, close)
-Bar = Tuple[int, float, float, float, float]
+from typing import Dict, Optional, Tuple, Any
+import numpy as np
+import pandas as pd
 
 
-@dataclass
-class PSARState:
-    psar: float
-    ep: float
-    af: float
-    trend: str   # "UP" or "DOWN"
-    last_open_ms: int
+class PSARIndicator:
+    """Parabolic SAR indicator with configurable initial trend."""
 
+    @classmethod
+    def lookback_bars(cls, cfg: dict) -> int:
+        return 5
 
-def step_psar(bars: List[Bar], state: Optional[PSARState], af0: float, afmax: float) -> Tuple[PSARState, List[Dict[str, Any]]]:
-    """
-    Advance PSAR over a sequence of bars (ascending by open_ts).
-    If state is None, bootstrap from the first 5 bars (needs at least 5).
-    Returns updated state and per-bar trace for logging/plotting.
-    """
-    if not bars:
-        raise ValueError("bars required")
-    if state is None and len(bars) < 5:
-        raise ValueError("Need at least 5 bars to bootstrap PSAR")
+    @classmethod
+    def default_cfg(cls) -> dict:
+        return {"af": 0.02, "max_af": 0.2, "initial_trend": "UP"}
 
-    traces: List[Dict[str, Any]] = []
+    @classmethod
+    def run(cls, df: pd.DataFrame, state: Optional[dict], cfg: dict, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray], Optional[float]]:
+        """
+        Compute PSAR; returns (new_state, outputs, latest_value).
+        outputs: {"value", "ep", "af", "trend"} aligned to df.index (NaNs where unchanged).
+        """
+        base_cfg = cls.default_cfg()
+        cfg = {**base_cfg, **(cfg or {})}
+        if df is None or df.empty:
+            raise ValueError("bars required")
+        if start_idx >= len(df):
+            return state or {}, {"value": np.full(len(df), np.nan)}, None
 
-    idx = 0
-    if state is None:
-        first = bars[:5]
-        h0 = max(b[2] for b in first)
-        l0 = min(b[3] for b in first)
-        up = True
-        ep = h0 if up else l0
-        af = af0
-        psar = l0 if up else h0
-        idx = 5
-    else:
-        psar = float(state.psar)
-        ep = float(state.ep)
-        af = float(state.af)
-        up = True if state.trend == "UP" else False
-        # only process bars strictly newer than last_open_ms
-        while idx < len(bars) and bars[idx][0] <= state.last_open_ms:
-            idx += 1
+        af0 = cfg["af"]
+        afmax = cfg["max_af"]
+        init_up = True if str(cfg["initial_trend"]).upper() == "UP" else False
 
-    for i in range(idx, len(bars)):
-        o, h, l, c = bars[i][1], bars[i][2], bars[i][3], bars[i][4]
-        prev_psar = psar
-        prev_ep = ep
-        prev_up = up
+        o_arr = df["Open"].values
+        h_arr = df["High"].values
+        l_arr = df["Low"].values
+        c_arr = df["Close"].values
+        ts_arr = (df.index.view("int64") // 1_000_000).astype(np.int64)
 
-        psar = prev_psar + af * (prev_ep - prev_psar)
-        if up:
-            # clamp to last 2 lows
-            if i >= 1:
-                psar = min(psar, bars[i - 1][3])
-            if i >= 2:
-                psar = min(psar, bars[i - 2][3])
+        n_total = len(df)
+        val_arr = np.full(n_total, np.nan, dtype=float)
+        ep_arr = np.full(n_total, np.nan, dtype=float)
+        af_arr = np.full(n_total, np.nan, dtype=float)
+        trend_arr = np.full(n_total, None, dtype=object)
+
+        if state is None:
+            if start_idx != 0:
+                start_idx = 0
+            need = cls.lookback_bars(cfg)
+            if len(df) < need:
+                raise ValueError(f"Need at least {need} bars to bootstrap PSAR")
+            h0 = float(np.max(h_arr[:need]))
+            l0 = float(np.min(l_arr[:need]))
+            up = init_up
+            ep = h0 if up else l0
+            af = af0
+            psar = l0 if up else h0
+            idx = need
         else:
-            # clamp to last 2 highs
-            if i >= 1:
-                psar = max(psar, bars[i - 1][2])
-            if i >= 2:
-                psar = max(psar, bars[i - 2][2])
+            psar = float(state["psar"])
+            ep = float(state["ep"])
+            af = float(state["af"])
+            up = True if state["trend"] == "UP" else False
+            idx = max(start_idx, 0)
 
-        if up:
-            if l < psar:
-                up = False
-                psar = prev_ep
-                ep = l
-                af = af0
+        for i in range(idx, len(ts_arr)):
+            o, h, l, c = o_arr[i], h_arr[i], l_arr[i], c_arr[i]
+            prev_psar = psar
+            prev_ep = ep
+            prev_up = up
+
+            psar = prev_psar + af * (prev_ep - prev_psar)
+            if up:
+                if i >= 1:
+                    psar = min(psar, l_arr[i - 1])
+                if i >= 2:
+                    psar = min(psar, l_arr[i - 2])
             else:
-                if h > prev_ep:
-                    ep = h
-                    af = min(af + af0, afmax)
-                else:
-                    ep = prev_ep
-        else:
-            if h > psar:
-                up = True
-                psar = prev_ep
-                ep = h
-                af = af0
-            else:
-                if l < prev_ep:
+                if i >= 1:
+                    psar = max(psar, h_arr[i - 1])
+                if i >= 2:
+                    psar = max(psar, h_arr[i - 2])
+
+            if up:
+                if l < psar:
+                    up = False
+                    psar = prev_ep
                     ep = l
-                    af = min(af + af0, afmax)
+                    af = af0
                 else:
-                    ep = prev_ep
+                    if h > prev_ep:
+                        ep = h
+                        af = min(af + af0, afmax)
+                    else:
+                        ep = prev_ep
+            else:
+                if h > psar:
+                    up = True
+                    psar = prev_ep
+                    ep = h
+                    af = af0
+                else:
+                    if l < prev_ep:
+                        ep = l
+                        af = min(af + af0, afmax)
+                    else:
+                        ep = prev_ep
 
-        traces.append({
-            "ts_ms": bars[i][0],
-            "psar": psar,
-            "value": psar,
-            "ep": ep,
-            "af": af,
-            "trend": "UP" if up else "DOWN",
-            "o": o,
-            "h": h,
-            "l": l,
-            "c": c,
-        })
+            val_arr[i] = psar
+            ep_arr[i] = ep
+            af_arr[i] = af
+            trend_arr[i] = "UP" if up else "DOWN"
 
-    if not traces:
-        # nothing new; return previous state unchanged
-        last_ts = state.last_open_ms if state else bars[-1][0]
-        return PSARState(psar=psar, ep=ep, af=af, trend=("UP" if up else "DOWN"), last_open_ms=last_ts), traces
+        latest = None
+        if np.any(~np.isnan(val_arr)):
+            latest = float(val_arr[~np.isnan(val_arr)][-1])
 
-    last_open_ms = traces[-1]["ts_ms"]
-    new_state = PSARState(psar=psar, ep=ep, af=af, trend=("UP" if up else "DOWN"), last_open_ms=last_open_ms)
-    return new_state, traces
+        last_idx = int(np.nanmax(np.where(~np.isnan(val_arr), np.arange(len(val_arr)), -1))) if np.any(~np.isnan(val_arr)) else (len(df) - 1)
+        last_open_ms = int(df.index[last_idx].value // 1_000_000)
+        new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("UP" if up else "DOWN"), "last_open_ms": last_open_ms}
+        outputs = {"value": val_arr, "ep": ep_arr, "af": af_arr, "trend": trend_arr}
+        return new_state, outputs, latest
 
 
-@dataclass
-class ATRState:
-    atr: float
-    prev_close: float
-    last_open_ms: int
+class ATRIndicator:
+    """Wilder ATR indicator."""
 
+    @classmethod
+    def lookback_bars(cls, cfg: dict) -> int:
+        period = int(cfg.get("period", 14))
+        return max(period + 1, 2)
 
-def step_atr(bars: List[Bar], state: Optional[ATRState], period: int) -> Tuple[ATRState, List[Dict[str, Any]]]:
-    """
-    Wilder ATR stepper. Requires period+1 bars when bootstrapping.
-    Returns updated state and per-bar trace with TR/ATR.
-    """
-    if period <= 1:
-        raise ValueError("period must be > 1")
-    if not bars:
-        raise ValueError("bars required")
+    @classmethod
+    def default_cfg(cls) -> dict:
+        return {"period": 14}
 
-    traces: List[Dict[str, Any]] = []
-    idx = 0
+    @classmethod
+    def run(cls, df: pd.DataFrame, state: Optional[dict], cfg: dict, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray], Optional[float]]:
+        """
+        Compute ATR; returns (new_state, outputs, latest_value).
+        outputs: {"value", "tr"} aligned to df.index (NaNs where unchanged).
+        """
+        base_cfg = cls.default_cfg()
+        cfg = {**base_cfg, **(cfg or {})}
+        if df is None or df.empty:
+            raise ValueError("bars required")
+        if start_idx >= len(df):
+            return state or {}, {"value": np.full(len(df), np.nan)}, None
 
-    if state is None:
-        if len(bars) < period + 1:
-            raise ValueError(f"Need at least {period+1} bars to bootstrap ATR(p={period})")
-        # Bootstrap using first period TR average
-        prev_close = bars[0][4]
-        trs: List[float] = []
-        for i in range(1, period + 1):
-            _, _, h, l, c = bars[i]
+        period = int(cfg["period"])
+        need = cls.lookback_bars(cfg)
+
+        h_arr = df["High"].values
+        l_arr = df["Low"].values
+        c_arr = df["Close"].values
+        o_arr = df["Open"].values
+        ts_arr = (df.index.view("int64") // 1_000_000).astype(np.int64)
+
+        n_total = len(df)
+        val_arr = np.full(n_total, np.nan, dtype=float)
+        tr_arr = np.full(n_total, np.nan, dtype=float)
+        idx = max(start_idx, 0)
+
+        if state is None:
+            if len(df) < need:
+                raise ValueError(f"Need at least {need} bars to bootstrap ATR(p={period})")
+            prev_close = c_arr[0]
+            trs: list[float] = []
+            for i in range(1, need):
+                h = h_arr[i]; l = l_arr[i]; c = c_arr[i]
+                tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
+                trs.append(tr)
+                prev_close = c
+            atr = sum(trs) / float(period)
+            idx = need
+        else:
+            atr = float(state["atr"])
+            prev_close = float(state["prev_close"])
+
+        for i in range(idx, len(ts_arr)):
+            h = h_arr[i]; l = l_arr[i]; c = c_arr[i]
             tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
-            trs.append(tr)
+            atr = ((atr * (period - 1)) + tr) / period
             prev_close = c
-        atr = sum(trs) / float(period)
-        idx = period + 1
-    else:
-        atr = float(state.atr)
-        prev_close = float(state.prev_close)
-        # advance only newer bars
-        while idx < len(bars) and bars[idx][0] <= state.last_open_ms:
-            idx += 1
+            val_arr[i] = atr
+            tr_arr[i] = tr
 
-    for i in range(idx, len(bars)):
-        _, _, h, l, c = bars[i]
-        tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
-        atr = ((atr * (period - 1)) + tr) / period
-        prev_close = c
-        traces.append({
-            "ts_ms": bars[i][0],
-            "atr": atr,
-            "value": atr,
-            "tr": tr,
-            "o": bars[i][1],
-            "h": h,
-            "l": l,
-            "c": c,
-        })
+        latest = None
+        if np.any(~np.isnan(val_arr)):
+            latest = float(val_arr[~np.isnan(val_arr)][-1])
 
-    if not traces:
-        last_ts = state.last_open_ms if state else bars[-1][0]
-        return ATRState(atr=atr, prev_close=prev_close, last_open_ms=last_ts), traces
-
-    new_state = ATRState(atr=atr, prev_close=prev_close, last_open_ms=traces[-1]["ts_ms"])
-    return new_state, traces
+        last_idx = int(np.nanmax(np.where(~np.isnan(val_arr), np.arange(len(val_arr)), -1))) if np.any(~np.isnan(val_arr)) else (len(df) - 1)
+        new_state = {"atr": atr, "prev_close": prev_close, "last_open_ms": int(df.index[last_idx].value // 1_000_000)}
+        outputs = {"value": val_arr, "tr": tr_arr}
+        return new_state, outputs, latest
 
 
-def run_indicator(name: str, bars: List[Bar], cfg: dict, state: Optional[dict]) -> Tuple[dict, List[Dict[str, Any]], Optional[float]]:
-    """
-    Generic indicator dispatcher. Returns (state_dict, traces, latest_value).
-    """
-    if name == "psar":
-        st = PSARState(**state) if state else None
-        ns, traces = step_psar(bars, st, cfg.get("af", 0.02), cfg.get("max_af", 0.2))
-        latest = traces[-1]["value"] if traces else (state["psar"] if state else None)
-        return ns.__dict__, traces, latest
-    if name == "atr":
-        st = ATRState(**state) if state else None
-        ns, traces = step_atr(bars, st, int(cfg.get("period", 14)))
-        latest = traces[-1]["value"] if traces else (state["atr"] if state else None)
-        return ns.__dict__, traces, latest
-    raise ValueError(f"Unknown indicator: {name}")
+INDICATOR_DISPATCH = {
+    "psar": PSARIndicator,
+    "atr": ATRIndicator,
+}
+
+
+def run_indicator(name: str, bars: pd.DataFrame, cfg: dict, state: Optional[dict], start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray], Optional[float]]:
+    cls = INDICATOR_DISPATCH.get(name)
+    if not cls:
+        raise ValueError(f"Unknown indicator: {name}")
+    return cls.run(bars, state, cfg, start_idx=start_idx)
