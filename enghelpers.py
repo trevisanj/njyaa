@@ -152,6 +152,35 @@ def render_ratio_chart(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: i
     return out_path
 
 
+def render_indicator_history_chart(eng: "BotEngine", thinker_id: int, position_id: int, indicator_name: str, symbol: str,
+                                   timeframe: str = "1m", n: int = 300, outdir: str = "/tmp") -> str:
+    """Overlay price closes with recorded indicator history."""
+    rows = eng.kc.last_n(symbol, timeframe, n=n, include_live=True, asc=True)
+    if not rows:
+        raise ValueError(f"No klines for {symbol} {timeframe}")
+    df = rows_to_dataframe(rows)
+    hist = eng.store.list_indicator_history(thinker_id, position_id, indicator_name, limit=5000)
+    if not hist:
+        raise ValueError("No history rows")
+    hdf = pd.DataFrame(hist)
+    hdf["dt"] = pd.to_datetime(hdf["ts_ms"], unit="ms")
+    df_idx = pd.to_datetime(df.index)
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(df_idx, df["Close"], label="Close", color="steelblue", linewidth=1.4)
+    ax.plot(hdf["dt"], hdf["value"], label=indicator_name, color="tomato", linewidth=1.2)
+    ax.set_title(f"{symbol} {indicator_name} history (pos {position_id})")
+    ax.grid(True, linestyle="--", alpha=0.35)
+    ax.legend()
+    fname = f"hist_{indicator_name}_{symbol}_{timeframe}_{position_id}.png".replace("/", "-")
+    out_path = os.path.join(outdir, fname)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    log().info("render_indicator_history_chart", path=out_path, position_id=position_id, indicator=indicator_name)
+    return out_path
+
+
 def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
                     start_ms: int | None, end_ms: int | None):
     """

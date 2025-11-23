@@ -5,7 +5,7 @@
 from __future__ import annotations
 import json, math, sqlite3, time, random
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CHECKING, Literal
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
@@ -13,6 +13,8 @@ from common import log, Clock, AppConfig, leg_pnl
 from thinkers1 import ThinkerBase
 import enghelpers as eh
 import risk_report
+from indicator_engines import step_psar, step_atr, PSARState, ATRState
+from trailing_policies import evaluate_policy
 
 if TYPE_CHECKING:
     from bot_api import BotEngine
@@ -68,140 +70,6 @@ class ThresholdAlertThinker(ThinkerBase):
 
         self.notify("INFO", f"{msg} | last={pr:.4f}", send=True,
                     symbol=sym, direction=dir_, price=pr, threshold=thr)
-        return 1
-
-
-class PSARStopThinker(ThinkerBase):
-    """
-    Minimal Parabolic SAR trailing stop for a specific position.
-
-    config = {
-      "position_id": "<hex>",
-      "symbol": "ETHUSDT",
-      "direction": "LONG" | "SHORT",   # relative to stop logic
-      "af": 0.02,
-      "max_af": 0.2,
-      "window_min": 200   # how many last 1m bars to pull (for smoothing)
-    }
-
-    Runtime we persist (manager saves it for us):
-      {
-        "psar": float,
-        "ep": float,
-        "af": float,
-        "trend": "UP"|"DOWN",
-        "last_candle_open": int,
-      "last_alert_ts": int
-      }
-
-    Fires ALERT when price crosses PSAR against trend.
-    """
-    kind = "PSAR_STOP"
-    @dataclass
-    class Config:
-        position_id: str = field(default="0", metadata={"help": "Target position id (string/hex)"})
-        symbol: str = field(default="BTCUSDT", metadata={"help": "Symbol to monitor for PSAR stops"})
-        direction: Literal["LONG", "SHORT"] = field(default="LONG", metadata={"help": "LONG triggers on close < psar; SHORT triggers on close > psar"})
-        af: float = field(default=0.02, metadata={"help": "Acceleration factor step"})
-        max_af: float = field(default=0.2, metadata={"help": "Maximum acceleration factor"})
-        window_min: int = field(default=200, metadata={"help": "Number of 1m bars to pull for PSAR"})
-
-    def _on_init(self) -> None:
-        self._cfg["af"] = float(self._cfg["af"])
-        self._cfg["max_af"] = float(self._cfg["max_af"])
-        self._cfg["window_min"] = int(self._cfg["window_min"])
-        d = self._cfg["direction"].upper()
-        if d not in ("LONG", "SHORT"):
-            raise ValueError("direction must be LONG or SHORT")
-        self._cfg["direction"] = d
-
-    # classic PSAR step on OHLC stream
-    @staticmethod
-    def _psar_series(ohlc: List[Tuple[float,float,float,float]], af0: float, afmax: float):
-        """
-        Return last (psar, ep, af, trend) after iterating series.
-
-        ohlc: list of (o,h,l,c)
-        """
-        if len(ohlc) < 5:
-            raise ValueError("Need at least 5 bars for PSAR bootstrap")
-
-        # Bootstrap from first bars
-        h0 = max(x[1] for x in ohlc[:5]); l0 = min(x[2] for x in ohlc[:5])
-        up = True  # start bullish by default; will flip quickly if wrong
-        ep = h0 if up else l0
-        af = af0
-        psar = l0 if up else h0
-
-        for i in range(5, len(ohlc)):
-            o,h,l,c = ohlc[i]
-            prev_psar = psar
-            prev_ep = ep
-            prev_up = up
-
-            # move PSAR
-            psar = prev_psar + af * (prev_ep - prev_psar)
-
-            # clamp against last/prev extremities
-            if up:
-                psar = min(psar, min(ohlc[i-1][2], ohlc[i-2][2]))  # clamp to last 2 lows
-            else:
-                psar = max(psar, max(ohlc[i-1][1], ohlc[i-2][1]))  # clamp to last 2 highs
-
-            # trend check
-            if up:
-                if l < psar:  # flip to downtrend
-                    up = False
-                    psar = prev_ep
-                    ep = l
-                    af = af0
-                else:
-                    if h > prev_ep:
-                        ep = h
-                        af = min(af + af0, afmax)
-                    else:
-                        ep = prev_ep
-            else:
-                if h > psar:  # flip to uptrend
-                    up = True
-                    psar = prev_ep
-                    ep = h
-                    af = af0
-                else:
-                    if l < prev_ep:
-                        ep = l
-                        af = min(af + af0, afmax)
-                    else:
-                        ep = prev_ep
-
-        return psar, ep, af, ("UP" if up else "DOWN")
-
-    def tick(self, now_ms: int):
-        sym = self._cfg["symbol"]
-        mins = self._cfg["window_min"]
-        rows = _minute_klines(self.eng, sym, mins)
-        if not rows:
-            return 0
-
-        # Build OHLC tuples (using mark price klines)
-        # rows: [open_time, open, high, low, close, volume, close_time, ...]
-        ohlc = [(float(r[1]), float(r[2]), float(r[3]), float(r[4])) for r in rows]
-        psar, ep, af, trend = self._psar_series(ohlc, self._cfg["af"], self._cfg["max_af"])
-        last_close = float(rows[-1][4])
-
-        # Direction semantics:
-        # - LONG: stop triggers if close < psar
-        # - SHORT: stop triggers if close > psar
-        hit = (last_close < psar) if self._cfg["direction"] == "LONG" else (last_close > psar)
-
-        if hit:
-            self.notify("WARN", f"[PSAR] {sym} {self._cfg['direction']} stop hit: close={last_close:.4f} vs psar={psar:.4f}",
-                        symbol=sym, psar=psar, ep=ep, af=af, trend=trend, last_close=last_close,
-                        direction=self._cfg["direction"])
-        else:
-            self.notify("DEBUG", f"[PSAR] {sym} {self._cfg['direction']} ok: close={last_close:.4f} psar={psar:.4f} trend={trend}",
-                        symbol=sym, psar=psar, ep=ep, af=af, trend=trend, last_close=last_close,
-                        direction=self._cfg["direction"])
         return 1
 
 
@@ -270,6 +138,210 @@ class RiskThinker(ThinkerBase):
             # positions=[p.__dict__ for p in report.positions],
         )
         return None
+
+
+# ========= Trailing stop orchestrator =========
+
+
+def _bars_from_rows(rows: List) -> List[tuple[int, float, float, float, float]]:
+    return [(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])) for r in rows]
+
+
+def _agg_stop(side: str, stops: List[Optional[float]]) -> Optional[float]:
+    usable = [s for s in stops if s is not None]
+    if not usable:
+        return None
+    return max(usable) if side == "LONG" else min(usable)
+
+
+def _stop_improved(side: str, prev: Optional[float], new: Optional[float], min_move_bp: float) -> bool:
+    if new is None:
+        return False
+    if prev is None:
+        return True
+    if side == "LONG":
+        return (new - prev) * 10_000 / prev >= min_move_bp
+    return (prev - new) * 10_000 / prev >= min_move_bp
+
+
+class TrailingStopThinker(ThinkerBase):
+    """
+    Orchestrates per-position trailing policies fed by indicator steppers.
+    Attachments live in storage.exit_attachments.
+    """
+    kind = "TRAILING_STOP"
+
+    @dataclass
+    class Config:
+        timeframe: str = field(default="1m", metadata={"help": "Timeframe for indicator klines"})
+        min_move_bp: float = field(default=1.0, metadata={"help": "Minimum bps improvement to log stop moves"})
+        alert_cooldown_ms: int = field(default=60_000, metadata={"help": "Cooldown between repeated hit alerts"})
+
+    def _on_init(self) -> None:
+        pass
+
+    def _fetch_bars(self, symbol: str, n: int) -> List[tuple[int, float, float, float, float]]:
+        rows = self.eng.kc.last_n(symbol, self._cfg["timeframe"], n=n, include_live=True, asc=True)
+        return _bars_from_rows(rows) if rows else []
+
+    def _indicator_configs(self, policies: List[dict]) -> Dict[str, dict]:
+        cfgs: Dict[str, dict] = {}
+        for p in policies:
+            ind = p.get("indicator") or p.get("name") or p.get("policy") or "psar"
+            if ind not in cfgs:
+                cfgs[ind] = dict(p.get("indicator_cfg") or {})
+        return cfgs
+
+    def _run_indicator(self, ind: str, bars: List[tuple[int, float, float, float, float]], cfg: dict,
+                       state: Optional[dict]):
+        if ind == "psar":
+            st = PSARState(**state) if state else None
+            ns, traces = step_psar(bars, st, cfg.get("af", 0.02), cfg.get("max_af", 0.2))
+            return ns.__dict__, traces, traces[-1]["psar"] if traces else (state["psar"] if state else None)
+        if ind == "atr":
+            st = ATRState(**state) if state else None
+            ns, traces = step_atr(bars, st, int(cfg.get("period", 14)))
+            return ns.__dict__, traces, traces[-1]["atr"] if traces else (state["atr"] if state else None)
+        raise ValueError(f"Unknown indicator: {ind}")
+
+    def _indicator_history_rows(self, tid: int, pid: int, name: str, traces: List[dict]) -> List[dict]:
+        rows = []
+        for t in traces:
+            v = t.get("psar") if "psar" in t else t.get("atr")
+            rows.append({
+                "thinker_id": tid,
+                "position_id": pid,
+                "name": name,
+                "ts_ms": t["ts_ms"],
+                "value": v,
+                "price": t.get("c"),
+                "aux": {k: t[k] for k in ("ep", "af", "trend", "tr") if k in t},
+            })
+        return rows
+
+    def _position_snapshot(self, pos_row, price: float) -> Dict[str, Any]:
+        side = "LONG" if int(pos_row["dir_sign"]) > 0 else "SHORT"
+        return {
+            "side": side,
+            "last_price": price,
+            "position_id": int(pos_row["position_id"]),
+            "num": pos_row["num"],
+            "den": pos_row["den"],
+        }
+
+    def tick(self, now_ms: int):
+        attachments = self.eng.store.list_exit_attachments()
+        if not attachments:
+            return 0
+        processed = 0
+        min_move_bp = float(self._cfg["min_move_bp"])
+        tf = self._cfg["timeframe"]
+        tid = int(self._thinker_id or 0)
+
+        for att in attachments:
+            pid = int(att["position_id"])
+            pos = self.eng.store.get_position(pid)
+            if not pos or pos["status"] != "OPEN":
+                continue
+            symbol = pos["num"]
+            price = eh.last_cached_price(self.eng, symbol)
+            if price is None:
+                continue
+
+            policies = att["policies"]
+            ind_cfgs = self._indicator_configs(policies)
+
+            bars = self._fetch_bars(symbol, max(att["lookback_bars"], 5))
+            if len(bars) < 5:
+                self.notify("DEBUG", f"[trail] {symbol} missing klines {tf}", symbol=symbol)
+                continue
+
+            indicators: Dict[str, Dict[str, Any]] = {}
+            history_rows: List[dict] = []
+            for ind_name, cfg in ind_cfgs.items():
+                st_row = self.eng.store.get_indicator_state(tid, pid, ind_name)
+                st_payload = st_row["state"] if st_row else None
+                try:
+                    ns, traces, latest_val = self._run_indicator(ind_name, bars, cfg, st_payload)
+                except Exception as e:
+                    self.notify("WARN", f"[trail] {symbol} indicator {ind_name} failed: {e}", symbol=symbol)
+                    continue
+                self.eng.store.upsert_indicator_state(tid, pid, ind_name, ns, traces[-1]["ts_ms"] if traces else now_ms)
+                history_rows.extend(self._indicator_history_rows(tid, pid, ind_name, traces))
+                indicators[ind_name] = {"value": latest_val, "ts_ms": traces[-1]["ts_ms"] if traces else st_row["ts_ms"], "raw": ns}
+
+            if history_rows:
+                self.eng.store.insert_indicator_history(history_rows)
+            history_rows = []
+
+            if not indicators:
+                continue
+
+            snap = self._position_snapshot(pos, price)
+            suggested: List[Dict[str, Any]] = []
+            for p in policies:
+                pname = p.get("policy") or p.get("name")
+                assert pname, "policy name required"
+                ind_name = p.get("indicator") or "psar"
+                prev = self.eng.store.get_trailing_stop_state(pid, pname)
+                prev_stop = prev["stop"] if prev else None
+                try:
+                    decision = evaluate_policy(pname, p, snap, indicators, prev_stop)
+                except Exception as e:
+                    self.notify("WARN", f"[trail] {symbol} policy {pname} failed: {e}", symbol=symbol)
+                    continue
+                suggestion = decision.get("suggested_stop")
+                self.eng.store.set_trailing_stop_state(pid, pname, suggestion, {"reason": decision.get("reason")}, now_ms)
+                history_rows.append({
+                    "thinker_id": tid,
+                    "position_id": pid,
+                    "name": f"trail:{pname}",
+                    "ts_ms": indicators.get(ind_name, {}).get("ts_ms", now_ms),
+                    "value": suggestion,
+                    "price": price,
+                    "aux": {"policy": pname, "source": ind_name},
+                })
+                if suggestion is not None:
+                    suggested.append({"policy": pname, "stop": suggestion})
+
+            if history_rows:
+                self.eng.store.insert_indicator_history(history_rows)
+
+            stops = [s["stop"] for s in suggested]
+            agg = _agg_stop(snap["side"], stops)
+            prev_agg = self.eng.store.get_trailing_stop_state(pid, "__agg__")
+            prev_stop = prev_agg["stop"] if prev_agg else None
+
+            if agg is not None:
+                hit = price <= agg if snap["side"] == "LONG" else price >= agg
+                meta = prev_agg.get("meta") if prev_agg else {}
+                if _stop_improved(snap["side"], prev_stop, agg, min_move_bp):
+                    self.notify("INFO", f"[trail] {symbol} stop -> {agg:.4f} ({snap['side']})", send=True,
+                                symbol=symbol, stop=agg, prev=prev_stop)
+                if hit:
+                    last_alert_ts = (meta or {}).get("last_alert_ts")
+                    if not last_alert_ts or now_ms - int(last_alert_ts) >= self._cfg["alert_cooldown_ms"]:
+                        self.notify("WARN", f"[trail] {symbol} stop hit @ {price:.4f} vs {agg:.4f}", send=True,
+                                    symbol=symbol, stop=agg, price=price)
+                        meta = dict(meta or {})
+                        meta["last_alert_ts"] = now_ms
+                history_rows.append({
+                    "thinker_id": tid,
+                    "position_id": pid,
+                    "name": "trail:agg",
+                    "ts_ms": now_ms,
+                    "value": agg,
+                    "price": price,
+                    "aux": {"side": snap["side"]},
+                })
+                self.eng.store.set_trailing_stop_state(pid, "__agg__", agg, meta, now_ms)
+
+            if history_rows:
+                self.eng.store.insert_indicator_history(history_rows)
+
+            processed += 1
+        return processed
+
 
 class HorseWithNoName(ThinkerBase):
     """Proof-of-concept thinker"""

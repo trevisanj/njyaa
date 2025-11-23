@@ -643,6 +643,96 @@ def build_registry() -> CommandRegistry:
                    f"default_risk={_fmt_pct(cfg['default_risk'])}")
         return _txt(f"{summary} ({changed})")
 
+    # ----------------------- TRAILING / EXIT ATTACHMENTS -----------------------
+    @R.bang("attach-exit", argspec=["position_id"], options=["policies", "lookback"], nreq=1)
+    def _bang_attach_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Attach trailing/exit policies to a position.
+
+        Usage:
+          !attach-exit <position_id> [policies:<json>] [lookback:200]
+        """
+        pid = int(args["position_id"])
+        lookback = int(args.get("lookback", 200))
+        policies_raw = args.get("policies")
+        if policies_raw:
+            try:
+                policies = json.loads(policies_raw)
+            except Exception as e:
+                return _err(f"Bad policies JSON: {e}")
+        else:
+            policies = [{"policy": "psar_lock", "indicator": "psar", "indicator_cfg": {"af": 0.02, "max_af": 0.2}}]
+        now_ms = Clock.now_utc_ms()
+        eng.store.upsert_exit_attachment(pid, policies, now_ms, lookback, meta={"source": "cmd"})
+        return _txt(f"Attached exit policies to position {pid} ({len(policies)} policy)")
+
+    @R.at("exit-list")
+    def _at_exit_list(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """List exit/trailing attachments."""
+        rows = eng.store.list_exit_attachments()
+        if not rows:
+            return _txt("No attachments.")
+        tbl_rows = []
+        for r in rows:
+            tbl_rows.append([
+                r["position_id"],
+                len(r["policies"]),
+                r["lookback_bars"],
+                Clock.ts_to_iso(r["attached_at_ms"]/1000.0),
+            ])
+        return _tbl(["position_id", "policies", "lookback", "attached_at"], tbl_rows, intro="Exit attachments")
+
+    @R.bang("exit-detach", argspec=["position_id"], nreq=1)
+    def _bang_exit_detach(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Remove trailing/exit attachment for a position."""
+        pid = int(args["position_id"])
+        eng.store.delete_exit_attachment(pid)
+        return _txt(f"Detached exit policies from position {pid}")
+
+    @R.at("exit-state", argspec=["position_id"], nreq=1)
+    def _at_exit_state(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Show trailing stop state for a position."""
+        pid = int(args["position_id"])
+        q = """
+            SELECT policy_name, stop, meta_json, ts_ms FROM trailing_stop_state
+            WHERE position_id=?
+            ORDER BY policy_name
+        """
+        rows = eng.store.con.execute(q, (pid,)).fetchall()
+        if not rows:
+            return _txt("No trailing state.")
+        table_rows = []
+        for r in rows:
+            meta = json.loads(r["meta_json"] or "{}")
+            table_rows.append([r["policy_name"], _fmt_num(r["stop"], nd=5), Clock.ts_to_iso(r["ts_ms"]/1000.0), meta])
+        return _tbl(["policy", "stop", "ts", "meta"], table_rows, intro=f"Trailing state for {pid}")
+
+    @R.at("exit-plot", argspec=["position_id"], options=["indicator", "symbol", "timeframe", "n"], nreq=1)
+    def _at_exit_plot(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Plot recorded indicator history against price."""
+        pid = int(args["position_id"])
+        ind = args.get("indicator", "psar")
+        tf = args.get("timeframe", "1m")
+        n = int(args.get("n", 300))
+        sym = args.get("symbol")
+        if not sym:
+            pos = eng.store.get_position(pid)
+            if not pos:
+                return _err("position not found")
+            sym = pos["num"]
+        thinker_id = int(args.get("thinker_id") or args.get("thinker") or 0)
+        if thinker_id <= 0:
+            # default to first trailing thinker id if exists
+            trows = [r for r in eng.store.list_thinkers() if r["kind"] == "TRAILING_STOP"]
+            thinker_id = int(trows[0]["id"]) if trows else 0
+        if thinker_id <= 0:
+            return _err("thinker_id required (no trailing thinker found)")
+        try:
+            path = eh.render_indicator_history_chart(eng, thinker_id, pid, ind, sym, timeframe=tf, n=n)
+        except Exception as e:
+            return _err(str(e))
+        return CO(OCPhoto(path, caption=f"{ind} history for pos {pid}"))
+
     # ----------------------- OPEN (alias) -----------------------
     @R.at("open")
     def _at_open(eng: BotEngine, args: Dict[str, str]) -> CO:
