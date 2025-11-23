@@ -330,7 +330,7 @@ class TrailingStopThinker(ThinkerBase):
             if not indicators or not policies:
                 continue
 
-            snap = self._position_snapshot(pos, price)
+            snap = self._position_snapshot(pos, bars["Close"].iloc[-1])
             trailing = ctx.setdefault("trailing", {})
             suggested: List[Dict[str, Any]] = []
             for p in policies:
@@ -351,7 +351,7 @@ class TrailingStopThinker(ThinkerBase):
                     "name": f"trail:{pname}",
                     "ts_ms": indicators.get(ind_name, {}).get("ts_ms", now_ms),
                     "value": suggestion,
-                    "price": price,
+                    "price": snap["last_price"],
                     "aux": {"policy": pname, "source": ind_name},
                 })
                 if suggestion is not None:

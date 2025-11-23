@@ -1053,11 +1053,20 @@ def build_registry() -> CommandRegistry:
         if not rows:
             return _txt("No thinkers.")
 
+        def _pretty_json(raw: str | None, indent: int = 2, compact: bool = False) -> str:
+            try:
+                obj = json.loads(raw or "{}")
+                if compact:
+                    return json.dumps(obj, separators=(", ", ": "), ensure_ascii=False, sort_keys=True)
+                return json.dumps(obj, indent=indent, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                return raw or "{}"
+
         def fmt_block(r, heading_level: int) -> str:
             head = "#" * heading_level
             header = f"{head} #{r['id']} {r['kind']}"
-            cfg = r["config_json"] or "{}"
-            rt = r["runtime_json"] or "{}"
+            cfg = _pretty_json(r["config_json"], indent=2)
+            rt = _pretty_json(r["runtime_json"], indent=2)
             return "\n".join([
                 header,
                 "",
@@ -1073,7 +1082,7 @@ def build_registry() -> CommandRegistry:
         if detail <= 1 and not tid_opt:
             lines = ["# Thinkers", ""]
             for r in rows:
-                cfg = r["config_json"] or "{}"
+                cfg = _pretty_json(r["config_json"], compact=True)
                 lines.append(f"- `#{r['id']}` {r['kind']} enabled={r['enabled']} cfg=`{cfg}`")
             return _md("\n".join(lines))
 
