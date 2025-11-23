@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 import sqlite3, time, math
-from typing import Iterable, List, Tuple, Optional, Dict, Any, TYPE_CHECKING
+from typing import Iterable, List, Tuple, Optional, Dict, Any, TYPE_CHECKING, Sequence
 from dataclasses import dataclass
 import threading
 from common import tf_ms
@@ -53,9 +53,7 @@ class KlinesCache:
     Typical usage:
         cache = KlinesCache(eng)
         last_open = cache.latest_open_ts("ETHUSDT", "1m")
-        # fetch externally via API and then:
-        # cache.ingest_klines("ETHUSDT", "1m", klines, now_ms)
-        rows = cache.last_n("ETHUSDT", "1m", n=500, include_live=False)  # returns list[sqlite3.Row]-like
+        rows = cache.last_n("ETHUSDT", "1m", n=500, include_live=False)  # returns columnar dict
     """
 
     def __init__(self, eng: BotEngine):
@@ -76,6 +74,21 @@ class KlinesCache:
 
         # DB lock for concurrent writers (WAL allows concurrent readers)
         self._db_lock = threading.Lock()
+
+
+# Default column set for klines queries (ts + OHLCV + finalized/meta)
+KLINE_COLS: List[str] = [
+    "symbol",
+    "timeframe",
+    "open_ts",
+    "close_ts",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "finalized",
+]
 
     # ---------- schema ----------
     def _ensure_schema(self):
@@ -313,26 +326,31 @@ class KlinesCache:
         ).fetchone()
         return int(r["open_ts"]) if r else None
 
-    def last_n(self, symbol: str, timeframe: str, n: int,
-               include_live: bool = True, asc: bool = True) -> List[sqlite3.Row]:
+    def last_n(
+        self,
+        symbol: str,
+        timeframe: str,
+        n: int,
+        columns: Optional[List[str]] = None,
+        include_live: bool = True,
+        asc: bool = True,
+    ) -> Dict[str, List[Any]]:
         """
-        Fetch the last N klines for (symbol,timeframe).
+        Fetch the last N klines for (symbol,timeframe) as columnar dict-of-lists.
 
         Args:
             symbol: Symbol, e.g. 'ETHUSDT'.
             timeframe: Interval string, e.g. '1m'.
             n: Count to return (from the newest backward).
+            columns: Which columns to return; defaults to KLINE_COLS (ts + OHLCV + meta).
             include_live: If False, only finalized candles are returned.
             asc: If True, results are ordered oldest→newest; if False, newest→oldest.
-
-        Returns:
-            List[sqlite3.Row] (dict-like) of length ≤ n.
-            Keys: symbol, timeframe, open_ts, close_ts, open, high, low, close, volume, finalized
         """
+        cols = columns or KLINE_COLS
         live_clause = "" if include_live else "AND finalized=1"
+        select_cols = ",".join(cols)
         q = f"""
-            SELECT symbol, timeframe, open_ts, close_ts,
-                   open, high, low, close, volume, finalized
+            SELECT {select_cols}
             FROM klines
             WHERE symbol=? AND timeframe=? {live_clause}
             ORDER BY open_ts DESC
@@ -341,59 +359,53 @@ class KlinesCache:
         rows = self.con.execute(q, (symbol, timeframe, n)).fetchall()
         if asc:
             rows = list(reversed(rows))
-        return rows
+        return _rows_to_columnar(rows, cols)
 
-    def range_by_open(self, symbol: str, timeframe: str,
-                      start_open_ts: int, end_open_ts: int,
-                      include_live: bool = True) -> List[sqlite3.Row]:
+    def range_by_open(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_open_ts: int,
+        end_open_ts: int,
+        columns: Optional[List[str]] = None,
+        include_live: bool = True,
+    ) -> Dict[str, List[Any]]:
         """
-        Get klines in [start_open_ts, end_open_ts) by open timestamp.
-
-        Args:
-            symbol: Symbol.
-            timeframe: Interval.
-            start_open_ts: Inclusive open_ts lower bound (ms).
-            end_open_ts: Exclusive open_ts upper bound (ms).
-            include_live: If False, returns closed candles only.
-
-        Returns:
-            List[sqlite3.Row] ordered by open_ts ASC.
+        Get klines in [start_open_ts, end_open_ts) by open timestamp (columnar).
         """
+        cols = columns or KLINE_COLS
         live_clause = "" if include_live else "AND finalized=1"
-        q = f"""SELECT symbol, timeframe, open_ts, close_ts,
-                       open, high, low, close, volume, finalized
+        select_cols = ",".join(cols)
+        q = f"""SELECT {select_cols}
                 FROM klines
                 WHERE symbol=? AND timeframe=?
                   AND open_ts>=? AND open_ts<? {live_clause}
                 ORDER BY open_ts ASC"""
         rows = self.con.execute(q, (symbol, timeframe, start_open_ts, end_open_ts)).fetchall()
-        return rows
+        return _rows_to_columnar(rows, cols)
 
-    def range_by_close(self, symbol: str, timeframe: str,
-                       start_close_ts: int, end_close_ts: int,
-                       include_live: bool = True) -> List[sqlite3.Row]:
+    def range_by_close(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_close_ts: int,
+        end_close_ts: int,
+        columns: Optional[List[str]] = None,
+        include_live: bool = True,
+    ) -> Dict[str, List[Any]]:
         """
-        Get klines whose close_ts falls in (start_close_ts, end_close_ts].
-
-        Args:
-            symbol: Symbol.
-            timeframe: Interval.
-            start_close_ts: Exclusive lower bound (ms).
-            end_close_ts: Inclusive upper bound (ms).
-            include_live: If False, returns closed candles only.
-
-        Returns:
-            List[sqlite3.Row] ordered by open_ts ASC.
+        Get klines whose close_ts falls in (start_close_ts, end_close_ts] (columnar).
         """
+        cols = columns or KLINE_COLS
         live_clause = "" if include_live else "AND finalized=1"
-        q = f"""SELECT symbol, timeframe, open_ts, close_ts,
-                       open, high, low, close, volume, finalized
+        select_cols = ",".join(cols)
+        q = f"""SELECT {select_cols}
                 FROM klines
                 WHERE symbol=? AND timeframe=?
                   AND close_ts>? AND close_ts<=? {live_clause}
                 ORDER BY open_ts ASC"""
         rows = self.con.execute(q, (symbol, timeframe, start_close_ts, end_close_ts)).fetchall()
-        return rows
+        return _rows_to_columnar(rows, cols)
 
     def last_row(self, symbol: str, timeframe: str) -> Optional[sqlite3.Row]:
         """
@@ -637,22 +649,33 @@ def rows_to_dataframe(rows):
     """
     import pandas as pd
 
-    rows = list(rows)
-    if not rows:
-        df = pd.DataFrame(columns=["Open","High","Low","Close","Volume"])
-        df.index.name = "Date"
-        df.attrs["symbol"] = None
-        df.attrs["timeframe"] = None
-        return df
+    if isinstance(rows, dict):
+        rows_dict = rows
+        if not rows_dict:
+            df = pd.DataFrame(columns=["Open","High","Low","Close","Volume"])
+            df.index.name = "Date"
+            df.attrs["symbol"] = None
+            df.attrs["timeframe"] = None
+            return df
+        df = pd.DataFrame(rows_dict)
+        cols = list(rows_dict.keys())
+    else:
+        rows = list(rows)
+        if not rows:
+            df = pd.DataFrame(columns=["Open","High","Low","Close","Volume"])
+            df.index.name = "Date"
+            df.attrs["symbol"] = None
+            df.attrs["timeframe"] = None
+            return df
 
-    # Let pandas ingest mapping/rows in C
-    # Derive columns from first row if possible (sqlite3.Row supports .keys())
-    try:
-        cols = list(rows[0].keys())
-    except Exception:
-        cols = None  # let pandas infer
+        # Let pandas ingest mapping/rows in C
+        # Derive columns from first row if possible (sqlite3.Row supports .keys())
+        try:
+            cols = list(rows[0].keys())
+        except Exception:
+            cols = None  # let pandas infer
 
-    df = pd.DataFrame.from_records(rows, columns=cols)
+        df = pd.DataFrame.from_records(rows, columns=cols)
 
     # Minimal columns present check
     needed = ["open_ts", "open", "high", "low", "close", "volume"]
@@ -694,3 +717,14 @@ def rows_to_dataframe(rows):
             df.attrs[meta] = None
 
     return df
+
+
+def _rows_to_columnar(rows: Sequence[Sequence[Any]], columns: Sequence[str]) -> Dict[str, List[Any]]:
+    """Convert sequence of DB rows to dict-of-lists using provided column order."""
+    cols: Dict[str, List[Any]] = {k: [] for k in columns}
+    if not rows:
+        return cols
+    for r in rows:
+        for k, v in zip(columns, r):
+            cols[k].append(v)
+    return cols

@@ -75,6 +75,8 @@ class AppConfig:
     # --- Klines cache subsystem ---
     # Path to SQLite database for cached candles.
     KLINES_CACHE_DB_PATH: Optional[str] = None
+    # Path to SQLite database for indicator history cache.
+    INDICATOR_HISTORY_DB_PATH: Optional[str] = None
 
     # Number of most recent bars to keep per (symbol, timeframe).
     KLINES_CACHE_KEEP_BARS: Optional[int] = None

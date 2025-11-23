@@ -60,6 +60,7 @@ def make_cfg():
 
         # ---- klines cache ----
         KLINES_CACHE_DB_PATH="./njyaa_cache.sqlite",
+        INDICATOR_HISTORY_DB_PATH="./njyaa_indicator.sqlite",
         KLINES_CACHE_KEEP_BARS=2000,
         KLINES_TIMEFRAMES=["1m", "1h", "1d"],
         KLINES_FETCH_LIMIT=1000,

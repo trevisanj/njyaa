@@ -77,7 +77,7 @@ def _mark_close_now(eng: BotEngine, symbol: str) -> Optional[float]:
     return eh.last_cached_price(eng, symbol)
 
 
-def _minute_klines(eng: BotEngine, symbol: str, mins: int) -> List:
+def _minute_klines(eng: BotEngine, symbol: str, mins: int) -> Dict[str, List[Any]]:
     return eng.kc.last_n(symbol, "1m", mins, include_live=True, asc=True)
 
 
@@ -143,8 +143,13 @@ class RiskThinker(ThinkerBase):
 # ========= Trailing stop orchestrator =========
 
 
-def _bars_from_rows(rows: List) -> List[tuple[int, float, float, float, float]]:
-    return [(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])) for r in rows]
+def _bars_from_cols(cols: Dict[str, List[Any]]) -> List[tuple[int, float, float, float, float]]:
+    if not cols.get("open_ts"):
+        return []
+    return [
+        (int(ts), float(o), float(h), float(l), float(c))
+        for ts, o, h, l, c in zip(cols["open_ts"], cols["open"], cols["high"], cols["low"], cols["close"])
+    ]
 
 
 def _agg_stop(side: str, stops: List[Optional[float]]) -> Optional[float]:
@@ -181,8 +186,15 @@ class TrailingStopThinker(ThinkerBase):
         self._runtime.setdefault("positions", {})
 
     def _fetch_bars(self, symbol: str, n: int) -> List[tuple[int, float, float, float, float]]:
-        rows = self.eng.kc.last_n(symbol, self._cfg["timeframe"], n=n, include_live=True, asc=True)
-        return _bars_from_rows(rows) if rows else []
+        cols = self.eng.kc.last_n(
+            symbol,
+            self._cfg["timeframe"],
+            n=n,
+            include_live=True,
+            asc=True,
+            columns=["open_ts", "open", "high", "low", "close"],
+        )
+        return _bars_from_cols(cols)
 
     def _indicator_configs(self, policies: List[dict]) -> Dict[str, dict]:
         cfgs: Dict[str, dict] = {}
@@ -265,7 +277,7 @@ class TrailingStopThinker(ThinkerBase):
                 indicators[ind_name] = {"value": latest_val, "ts_ms": ts_val, "raw": ns}
 
             if history_rows:
-                self.eng.store.insert_indicator_history(history_rows)
+                self.eng.ih.insert_history(history_rows)
             history_rows = []
 
             if not indicators or not policies:
@@ -299,7 +311,7 @@ class TrailingStopThinker(ThinkerBase):
                     suggested.append({"policy": pname, "stop": suggestion})
 
             if history_rows:
-                self.eng.store.insert_indicator_history(history_rows)
+                self.eng.ih.insert_history(history_rows)
 
             stops = [s["stop"] for s in suggested]
             agg = _agg_stop(snap["side"], stops)
@@ -330,7 +342,7 @@ class TrailingStopThinker(ThinkerBase):
                 })
 
             if history_rows:
-                self.eng.store.insert_indicator_history(history_rows)
+                self.eng.ih.insert_history(history_rows)
 
             positions_ctx[pid_str] = ctx
             processed += 1

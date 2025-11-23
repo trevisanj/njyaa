@@ -18,6 +18,7 @@ from common import *  # Clock, log, AppConfig, tf_ms, etc.
 from storage import Storage
 from binance_um import BinanceUM
 from klines_cache import KlinesCache
+from indicator_history import IndicatorHistory
 from engclasses import *  # MarketCatalog, PriceOracle, PositionBook, Worker, Reporter, ThinkerManager, etc.
 import tabulate
 import asyncio
@@ -200,6 +201,7 @@ class BotEngine:
         self.tgbot: Optional[TelegramBot] = None
         self._registry: Optional[CommandRegistry] = None
         self.kc: Optional[KlinesCache] = None
+        self.ih: Optional[IndicatorHistory] = None
         self.tm: Optional[ThinkerManager] = None
 
         # PTB application (only if Telegram is enabled)
@@ -258,6 +260,8 @@ class BotEngine:
         self.worker = Worker(self.cfg, self.store, self.api, self.mc, self.oracle)
         self.scheduler = InternalScheduler()
         self.kc = KlinesCache(self)
+        self.ih = IndicatorHistory(self.cfg.INDICATOR_HISTORY_DB_PATH)
+        self.store.set_indicator_history(self.ih)
         self.tm = ThinkerManager(self)
 
         # Preload catalog to avoid first-use hiccups

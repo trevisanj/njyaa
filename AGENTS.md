@@ -20,7 +20,11 @@
 
 ## Coding Style & Naming Conventions
 - PEP 8, 4-space indents, snake_case for functions/vars, PascalCase for classes; keep type hints consistent.
-- Avoid code repetition: use control variables at will to control flux, assemble result parts aiming fewer lines of code 
+- Avoid code repetition: use control variables at will to control flux, assemble result parts aiming fewer lines of code
+- Don’t restate the same data or constants in multiple places—define them once and reuse. Eliminate redundant
+  phrasing; favor single sources of truth and concise code/comments. Two sources of truth means two chances to forget and break things.
+- When a function returns a non-trivial structure, build it once and return from a single exit point. Initialize defaults up front, mutate fields as
+  needed, and avoid multiple return statements for different branches so the shape stays consistent and easier to inspect.
 - Use `log()` for structured logging with context keys (`position_id`, `symbol`, `job`).
 - Register new commands via `CommandRegistry.at` (read-only) or `CommandRegistry.bang` (writes) and keep docstrings concise for auto-help.
 - Prefer explicit errors over silent fallbacks; fail fast on missing config or schema.

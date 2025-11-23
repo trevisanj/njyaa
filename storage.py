@@ -34,6 +34,7 @@ class Storage:
         self.con = sqlite3.connect(self.path, check_same_thread=False)
         self.con.row_factory = sqlite3.Row
         self._db_lock = threading.RLock()
+        self._indicator_history = None  # optional hook to external history store
         self._init_db()
         self._configure_pragmas()
 
@@ -220,37 +221,12 @@ class Storage:
             log().exc(e, where="storage.ensure_config_row")
 
     def _ensure_indicator_tables(self):
-        """Ensure indicator_history has thinker_id in PK; recreate if not."""
-        def _needs_rebuild(table: str, required_pk: list[str]) -> bool:
-            info = self.con.execute(f"PRAGMA table_info({table});").fetchall()
-            if not info:
-                return False
-            cols = {r[1] for r in info}
-            pk_cols = [r[1] for r in info if r[5]]
-            if not set(required_pk).issubset(cols):
-                return True
-            return pk_cols != required_pk
-
-        rebuild_hist = _needs_rebuild("indicator_history", ["thinker_id", "position_id", "name", "ts_ms"])
-
-        if rebuild_hist:
-            log().warn("storage.migrate.indicator_history.rebuild")
+        """Indicator history moved to a separate DB; drop legacy table if present."""
+        try:
             with self.txn(write=True) as cur:
                 cur.execute("DROP TABLE IF EXISTS indicator_history")
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS indicator_history (
-                      thinker_id  INTEGER NOT NULL,
-                      position_id INTEGER NOT NULL,
-                      name        TEXT    NOT NULL,
-                      ts_ms       INTEGER NOT NULL,
-                      value       REAL,
-                      price       REAL,
-                      aux_json    TEXT,
-                      PRIMARY KEY(thinker_id, position_id, name, ts_ms),
-                      FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE,
-                      FOREIGN KEY(thinker_id) REFERENCES thinkers(id) ON DELETE CASCADE
-                    );
-                """)
+        except Exception as e:
+            log().exc(e, where="storage.drop_legacy_indicator_history")
 
     def get_config(self) -> dict:
         """Return singleton config (expects row to exist)."""
@@ -328,6 +304,10 @@ class Storage:
                 (ts, int(position_id)),
             )
 
+    def set_indicator_history(self, ih):
+        """Attach external IndicatorHistory for cleanup hooks."""
+        self._indicator_history = ih
+
     # --- legs (stubs + fulfill) ---
     def ensure_leg_stub(self, position_id: int, symbol: str):
         """Create the leg if absent, marked as needing backfill."""
@@ -404,7 +384,14 @@ class Storage:
 
             log().info("position.deleted", position_id=position_id,
                        rows=dict(legs=n_legs, jobs=n_jobs, positions=n_pos))
-            return (n_legs + n_jobs + n_pos)
+            total = (n_legs + n_jobs + n_pos)
+        # cleanup indicator history if hooked
+        try:
+            if self._indicator_history:
+                total += self._indicator_history.delete_by_position(position_id)
+        except Exception as e:
+            log().exc(e, where="storage.delete_position.indicator_history", position_id=position_id)
+        return total
 
     # --- jobs ---
     def enqueue_job(self, job_id: str, task: str, payload: dict, position_id: Optional[str] = None):
@@ -504,45 +491,6 @@ class Storage:
                          json.dumps(payload or {}, ensure_ascii=False)))
 
     # ----- indicator + exit/trailing helpers -----
-
-    def insert_indicator_history(self, rows: List[dict]) -> int:
-        """Bulk insert indicator history rows; silently skips empty list."""
-        if not rows:
-            return 0
-        payloads = [
-            (int(r["thinker_id"]), int(r["position_id"]), r["name"], int(r["ts_ms"]), r.get("value"),
-             r.get("price"), json.dumps(r.get("aux") or {}, ensure_ascii=False))
-            for r in rows
-        ]
-        with self.txn(write=True) as cur:
-            cur.executemany("""
-                INSERT OR REPLACE INTO indicator_history(thinker_id,position_id,name,ts_ms,value,price,aux_json)
-                VALUES(?,?,?,?,?,?,?)
-            """, payloads)
-            return cur.rowcount or 0
-
-    def list_indicator_history(self, thinker_id: int, position_id: int, name: str, since_ms: Optional[int] = None, limit: int = 500) -> List[dict]:
-        """Return history rows (ascending by ts)."""
-        q = "SELECT ts_ms,value,price,aux_json FROM indicator_history WHERE thinker_id=? AND position_id=? AND name=?"
-        params = [int(thinker_id), int(position_id), name]
-        if since_ms is not None:
-            q += " AND ts_ms>=?"
-            params.append(int(since_ms))
-        q += " ORDER BY ts_ms ASC LIMIT ?"
-        params.append(int(limit))
-        rows = self.con.execute(q, params).fetchall()
-        out: List[dict] = []
-        for r in rows:
-            try:
-                out.append({
-                    "ts_ms": int(r["ts_ms"]),
-                    "value": r["value"],
-                    "price": r["price"],
-                    "aux": json.loads(r["aux_json"]) if r["aux_json"] else {},
-                })
-            except Exception as e:
-                log().exc(e, where="storage.list_indicator_history.parse", position_id=position_id, name=name)
-        return out
 
     # ------------------- JOBS (inspection / retries) -------------------
 

@@ -56,25 +56,22 @@ def eval_atr_trail(cfg: Dict[str, Any], position: Dict[str, Any], indicators: Di
     atr = indicators.get(name, {})
     atr_v = atr.get("value")
     px = position["last_price"]
-    if atr_v is None or px is None:
-        return {
-            "policy": "atr_trail",
-            "suggested_stop": prev_stop,
-            "source_level": None,
-            "indicator": name,
-            "indicator_ts": atr.get("ts_ms"),
-            "reason": "atr_missing",
-        }
-    stop_candidate = px - k * atr_v if position["side"] == "LONG" else px + k * atr_v
-    stop = _protective_stop_long(stop_candidate, prev_stop) if position["side"] == "LONG" else _protective_stop_short(stop_candidate, prev_stop)
-    return {
+    stop_candidate = None
+    stop = prev_stop
+    reason = "atr_missing"
+    if atr_v is not None and px is not None:
+        stop_candidate = px - k * atr_v if position["side"] == "LONG" else px + k * atr_v
+        stop = _protective_stop_long(stop_candidate, prev_stop) if position["side"] == "LONG" else _protective_stop_short(stop_candidate, prev_stop)
+        reason = "atr_trail"
+    result = {
         "policy": "atr_trail",
         "suggested_stop": stop,
         "source_level": stop_candidate,
         "indicator": name,
         "indicator_ts": atr.get("ts_ms"),
-        "reason": "atr_trail",
+        "reason": reason,
     }
+    return result
 
 
 POLICY_DISPATCH = {

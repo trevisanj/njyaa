@@ -35,10 +35,10 @@ def last_cached_price(eng: "BotEngine", symbol: str) -> Optional[float]:
 
 def _close_series(eng: BotEngine, symbol: str, timeframe: str, n: int):
     """Return a Close-price Series for a symbol/timeframe."""
-    rows = eng.kc.last_n(symbol, timeframe, n=n)
-    if not rows:
+    cols = eng.kc.last_n(symbol, timeframe, n=n)
+    if not cols["close"]:
         raise ValueError(f"No cached klines for {symbol} {timeframe}")
-    df = rows_to_dataframe(rows)
+    df = rows_to_dataframe(cols)
     s = df["Close"].copy()
     s.name = symbol
     return s
@@ -83,11 +83,11 @@ def klines_cache_summary(eng: BotEngine):
 def render_chart(eng: BotEngine, symbol: str, timeframe: str, n: int = 200, outdir: str = "/tmp") -> str:
     """Render a candlestick+volume chart from KlinesCache → PNG. Returns file path."""
     kc = eng.kc
-    rows = kc.last_n(symbol, timeframe, n=n)
-    if not rows:
+    cols = kc.last_n(symbol, timeframe, n=n)
+    if not cols["close"]:
         raise ValueError(f"No cached klines for {symbol} {timeframe}")
 
-    df = rows_to_dataframe(rows)
+    df = rows_to_dataframe(cols)
 
     # Simple indicator (20-period MA)
     df["MA20"] = df["Close"].rolling(window=20).mean()
@@ -155,12 +155,12 @@ def render_ratio_chart(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: i
 def render_indicator_history_chart(eng: "BotEngine", thinker_id: int, position_id: int, indicator_name: str, symbol: str,
                                    timeframe: str = "1m", n: int = 300, outdir: str = "/tmp") -> str:
     """Overlay price closes with recorded indicator history."""
-    rows = eng.kc.last_n(symbol, timeframe, n=n, include_live=True, asc=True)
-    if not rows:
+    cols = eng.kc.last_n(symbol, timeframe, n=n, include_live=True, asc=True)
+    if not cols["close"]:
         raise ValueError(f"No klines for {symbol} {timeframe}")
-    df = rows_to_dataframe(rows)
-    hist = eng.store.list_indicator_history(thinker_id, position_id, indicator_name, limit=5000)
-    if not hist:
+    df = rows_to_dataframe(cols)
+    hist = eng.ih.list_history(thinker_id, position_id, indicator_name, limit=5000, columns=None)
+    if not hist["ts_ms"]:
         raise ValueError("No history rows")
     hdf = pd.DataFrame(hist)
     hdf["dt"] = pd.to_datetime(hdf["ts_ms"], unit="ms")
@@ -241,28 +241,25 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
                 break
         symbols.update(lg["symbol"] for lg in legs if lg["symbol"])
 
-    price_rows: dict[str, list] = {}
+    price_rows: dict[str, list[tuple[int, float]]] = {}
     symbols_missing_klines = []
     for sym in symbols:
-        rows = eng.kc.range_by_close(sym, timeframe, start_ts - tfm, end_ts, include_live=False)
-        if not rows:
+        cols = eng.kc.range_by_close(sym, timeframe, start_ts - tfm, end_ts, include_live=False, columns=["close_ts", "close"])
+        if not cols["close_ts"]:
             symbols_missing_klines.append(sym)
             continue
-        price_rows[sym] = rows
+        price_rows[sym] = list(zip(cols["close_ts"], cols["close"]))
 
     # Build time axis from available klines
     ts_set = set()
     for rows in price_rows.values():
-        ts_set.update(int(r["close_ts"]) for r in rows)
+        ts_set.update(int(ts) for ts, _ in rows)
     timeline = sorted(ts_set)
     if not timeline:
         raise ValueError("No klines in requested window.")
 
     # Build per-symbol price lookup at close_ts
-    price_map = {
-        sym: {int(r["close_ts"]): float(r["close"]) for r in rows}
-        for sym, rows in price_rows.items()
-    }
+    price_map = {sym: {int(ts): float(close) for ts, close in rows} for sym, rows in price_rows.items()}
 
     data = {pid: [] for pid in legs_by_pid}
     total = []
