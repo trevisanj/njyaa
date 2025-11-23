@@ -232,6 +232,34 @@ class TrailingStopThinker(ThinkerBase):
     def _positions_ctx(self) -> Dict[str, dict]:
         return self._runtime.setdefault("positions", {})
 
+    def _pair_bars(self, num: str, den: Optional[str], n: int) -> List[tuple[int, float, float, float, float]]:
+        """
+        Return OHLC bars for num[/den], aligned on open_ts.
+        For ratios, divide num o/h/l/c by den o/h/l/c; volume ignored for now.
+        """
+        if not den:
+            return self._fetch_bars(num, n)
+        kc = self.eng.kc
+        num_rows = kc.last_n(num, self._cfg["timeframe"], n=n, include_live=True, asc=True)
+        den_rows = kc.last_n(den, self._cfg["timeframe"], n=n, include_live=True, asc=True)
+        if not num_rows or not den_rows:
+            return []
+        by_open = {int(r[0]): r for r in den_rows}
+        merged: List[tuple[int, float, float, float, float]] = []
+        for nr in num_rows:
+            ts = int(nr[0])
+            dr = by_open.get(ts)
+            if not dr:
+                continue
+            o = float(nr[1]) / float(dr[1])
+            h = float(nr[2]) / float(dr[2])
+            l = float(nr[3]) / float(dr[3])
+            c = float(nr[4]) / float(dr[4])
+            merged.append((ts, o, h, l, c))
+        if len(merged) > n:
+            merged = merged[-n:]
+        return merged
+
     def tick(self, now_ms: int):
         positions_ctx = self._positions_ctx()
         if not positions_ctx:
@@ -245,11 +273,18 @@ class TrailingStopThinker(ThinkerBase):
         for pid_str, ctx in list(positions_ctx.items()):
             pid = int(pid_str)
             pos = self.eng.store.get_position(pid)
+
+            # TODO: may check ctx["invalid"] instead
             if not pos or pos["status"] != "OPEN":
-                continue  # TODO: update position ctx with "invalid": True, and "invalid_msg": "Closed"/"Inexistent"
+                ctx["invalid"] = True
+                ctx["invalid_msg"] = "Closed" if pos else "Inexistent"
+                positions_ctx[pid_str] = ctx
+                dirty = True
+                continue
 
             symbol = pos["num"]
-            price = eh.last_cached_price(self.eng, symbol)
+            den = pos["den"]
+            price = eh.last_cached_price(self.eng, symbol) # TODO: may skip this check
             if price is None:
                 continue
 
@@ -257,8 +292,9 @@ class TrailingStopThinker(ThinkerBase):
             ind_cfgs = self._indicator_configs(policies)
 
             # TODO: here, the <num[/den]> series must be pulled, not the klines for the numerator only. Create helper method to obtain ohlcv bars for <num[/den]> (calculate ratios for ohlc and compute quote-notional sum for v).
-            bars = self._fetch_bars(symbol, max(int(ctx.get("lookback_bars", 200)), 5))
-            if len(bars) < 5: # TODO compare against lookback bars instead
+            need_n = max(int(ctx.get("lookback_bars", 200)), 5)
+            bars = self._pair_bars(symbol, den, need_n)
+            if len(bars) < need_n:
                 self.notify("DEBUG", f"[trail] {symbol} missing klines {tf}", symbol=symbol)
                 continue
 
