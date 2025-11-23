@@ -13,7 +13,7 @@ from common import log, Clock, AppConfig, leg_pnl
 from thinkers1 import ThinkerBase
 import enghelpers as eh
 import risk_report
-from indicator_engines import step_psar, step_atr, PSARState, ATRState
+from indicator_engines import run_indicator
 from trailing_policies import evaluate_policy
 
 if TYPE_CHECKING:
@@ -167,7 +167,7 @@ def _stop_improved(side: str, prev: Optional[float], new: Optional[float], min_m
 class TrailingStopThinker(ThinkerBase):
     """
     Orchestrates per-position trailing policies fed by indicator steppers.
-    Attachments live in storage.exit_attachments.
+    Attachments + state live in this thinker's runtime, keyed by position id.
     """
     kind = "TRAILING_STOP"
 
@@ -178,7 +178,7 @@ class TrailingStopThinker(ThinkerBase):
         alert_cooldown_ms: int = field(default=60_000, metadata={"help": "Cooldown between repeated hit alerts"})
 
     def _on_init(self) -> None:
-        pass
+        self._runtime.setdefault("positions", {})
 
     def _fetch_bars(self, symbol: str, n: int) -> List[tuple[int, float, float, float, float]]:
         rows = self.eng.kc.last_n(symbol, self._cfg["timeframe"], n=n, include_live=True, asc=True)
@@ -187,33 +187,21 @@ class TrailingStopThinker(ThinkerBase):
     def _indicator_configs(self, policies: List[dict]) -> Dict[str, dict]:
         cfgs: Dict[str, dict] = {}
         for p in policies:
-            ind = p.get("indicator") or p.get("name") or p.get("policy") or "psar"
-            if ind not in cfgs:
-                cfgs[ind] = dict(p.get("indicator_cfg") or {})
+            ind = p.get("indicator") or p.get("name") or p.get("policy")
+            if not ind:
+                continue
+            cfgs.setdefault(ind, dict(p.get("indicator_cfg") or {}))
         return cfgs
-
-    def _run_indicator(self, ind: str, bars: List[tuple[int, float, float, float, float]], cfg: dict,
-                       state: Optional[dict]):
-        if ind == "psar":
-            st = PSARState(**state) if state else None
-            ns, traces = step_psar(bars, st, cfg.get("af", 0.02), cfg.get("max_af", 0.2))
-            return ns.__dict__, traces, traces[-1]["psar"] if traces else (state["psar"] if state else None)
-        if ind == "atr":
-            st = ATRState(**state) if state else None
-            ns, traces = step_atr(bars, st, int(cfg.get("period", 14)))
-            return ns.__dict__, traces, traces[-1]["atr"] if traces else (state["atr"] if state else None)
-        raise ValueError(f"Unknown indicator: {ind}")
 
     def _indicator_history_rows(self, tid: int, pid: int, name: str, traces: List[dict]) -> List[dict]:
         rows = []
         for t in traces:
-            v = t.get("psar") if "psar" in t else t.get("atr")
             rows.append({
                 "thinker_id": tid,
                 "position_id": pid,
                 "name": name,
                 "ts_ms": t["ts_ms"],
-                "value": v,
+                "value": t.get("value"),
                 "price": t.get("c"),
                 "aux": {k: t[k] for k in ("ep", "af", "trend", "tr") if k in t},
             })
@@ -229,17 +217,21 @@ class TrailingStopThinker(ThinkerBase):
             "den": pos_row["den"],
         }
 
+    def _positions_ctx(self) -> Dict[str, dict]:
+        return self._runtime.setdefault("positions", {})
+
     def tick(self, now_ms: int):
-        attachments = self.eng.store.list_exit_attachments()
-        if not attachments:
+        positions_ctx = self._positions_ctx()
+        if not positions_ctx:
             return 0
         processed = 0
         min_move_bp = float(self._cfg["min_move_bp"])
         tf = self._cfg["timeframe"]
         tid = int(self._thinker_id or 0)
+        dirty = False
 
-        for att in attachments:
-            pid = int(att["position_id"])
+        for pid_str, ctx in list(positions_ctx.items()):
+            pid = int(pid_str)
             pos = self.eng.store.get_position(pid)
             if not pos or pos["status"] != "OPEN":
                 continue
@@ -248,50 +240,52 @@ class TrailingStopThinker(ThinkerBase):
             if price is None:
                 continue
 
-            policies = att["policies"]
+            policies = ctx.get("policies") or []
             ind_cfgs = self._indicator_configs(policies)
 
-            bars = self._fetch_bars(symbol, max(att["lookback_bars"], 5))
+            bars = self._fetch_bars(symbol, max(int(ctx.get("lookback_bars", 200)), 5))
             if len(bars) < 5:
                 self.notify("DEBUG", f"[trail] {symbol} missing klines {tf}", symbol=symbol)
                 continue
 
             indicators: Dict[str, Dict[str, Any]] = {}
             history_rows: List[dict] = []
+            ind_states = ctx.setdefault("indicators", {})
             for ind_name, cfg in ind_cfgs.items():
-                st_row = self.eng.store.get_indicator_state(tid, pid, ind_name)
-                st_payload = st_row["state"] if st_row else None
+                st_info = ind_states.get(ind_name, {})
+                st_payload = st_info.get("state")
                 try:
-                    ns, traces, latest_val = self._run_indicator(ind_name, bars, cfg, st_payload)
+                    ns, traces, latest_val = run_indicator(ind_name, bars, cfg, st_payload)
                 except Exception as e:
                     self.notify("WARN", f"[trail] {symbol} indicator {ind_name} failed: {e}", symbol=symbol)
                     continue
-                self.eng.store.upsert_indicator_state(tid, pid, ind_name, ns, traces[-1]["ts_ms"] if traces else now_ms)
+                ts_val = traces[-1]["ts_ms"] if traces else st_info.get("ts_ms", now_ms)
+                ind_states[ind_name] = {"state": ns, "ts_ms": ts_val}
                 history_rows.extend(self._indicator_history_rows(tid, pid, ind_name, traces))
-                indicators[ind_name] = {"value": latest_val, "ts_ms": traces[-1]["ts_ms"] if traces else st_row["ts_ms"], "raw": ns}
+                indicators[ind_name] = {"value": latest_val, "ts_ms": ts_val, "raw": ns}
 
             if history_rows:
                 self.eng.store.insert_indicator_history(history_rows)
             history_rows = []
 
-            if not indicators:
+            if not indicators or not policies:
                 continue
 
             snap = self._position_snapshot(pos, price)
+            trailing = ctx.setdefault("trailing", {})
             suggested: List[Dict[str, Any]] = []
             for p in policies:
                 pname = p.get("policy") or p.get("name")
                 assert pname, "policy name required"
-                ind_name = p.get("indicator") or "psar"
-                prev = self.eng.store.get_trailing_stop_state(pid, pname)
-                prev_stop = prev["stop"] if prev else None
+                ind_name = p.get("indicator") or pname
+                prev_stop = (trailing.get(pname) or {}).get("stop")
                 try:
                     decision = evaluate_policy(pname, p, snap, indicators, prev_stop)
                 except Exception as e:
                     self.notify("WARN", f"[trail] {symbol} policy {pname} failed: {e}", symbol=symbol)
                     continue
                 suggestion = decision.get("suggested_stop")
-                self.eng.store.set_trailing_stop_state(pid, pname, suggestion, {"reason": decision.get("reason")}, now_ms)
+                trailing[pname] = {"stop": suggestion, "meta": {"reason": decision.get("reason")}, "ts_ms": now_ms}
                 history_rows.append({
                     "thinker_id": tid,
                     "position_id": pid,
@@ -309,22 +303,22 @@ class TrailingStopThinker(ThinkerBase):
 
             stops = [s["stop"] for s in suggested]
             agg = _agg_stop(snap["side"], stops)
-            prev_agg = self.eng.store.get_trailing_stop_state(pid, "__agg__")
-            prev_stop = prev_agg["stop"] if prev_agg else None
+            prev_agg = trailing.get("__agg__") or {}
+            prev_stop = prev_agg.get("stop")
 
             if agg is not None:
                 hit = price <= agg if snap["side"] == "LONG" else price >= agg
-                meta = prev_agg.get("meta") if prev_agg else {}
+                meta = dict(prev_agg.get("meta") or {})
                 if _stop_improved(snap["side"], prev_stop, agg, min_move_bp):
                     self.notify("INFO", f"[trail] {symbol} stop -> {agg:.4f} ({snap['side']})", send=True,
                                 symbol=symbol, stop=agg, prev=prev_stop)
                 if hit:
-                    last_alert_ts = (meta or {}).get("last_alert_ts")
+                    last_alert_ts = meta.get("last_alert_ts")
                     if not last_alert_ts or now_ms - int(last_alert_ts) >= self._cfg["alert_cooldown_ms"]:
                         self.notify("WARN", f"[trail] {symbol} stop hit @ {price:.4f} vs {agg:.4f}", send=True,
                                     symbol=symbol, stop=agg, price=price)
-                        meta = dict(meta or {})
                         meta["last_alert_ts"] = now_ms
+                trailing["__agg__"] = {"stop": agg, "meta": meta, "ts_ms": now_ms}
                 history_rows.append({
                     "thinker_id": tid,
                     "position_id": pid,
@@ -334,12 +328,16 @@ class TrailingStopThinker(ThinkerBase):
                     "price": price,
                     "aux": {"side": snap["side"]},
                 })
-                self.eng.store.set_trailing_stop_state(pid, "__agg__", agg, meta, now_ms)
 
             if history_rows:
                 self.eng.store.insert_indicator_history(history_rows)
 
+            positions_ctx[pid_str] = ctx
             processed += 1
+            dirty = True
+
+        if dirty:
+            self.save_runtime()
         return processed
 
 

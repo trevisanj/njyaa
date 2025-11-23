@@ -129,17 +129,7 @@ class Storage:
           FOREIGN KEY(thinker_id) REFERENCES thinkers(id) ON DELETE CASCADE
         );
 
-        -- ============= indicator + trailing state ==========
-        CREATE TABLE IF NOT EXISTS indicator_state (
-          thinker_id  INTEGER NOT NULL,
-          position_id INTEGER NOT NULL,
-          name        TEXT    NOT NULL,
-          state_json  TEXT    NOT NULL,
-          ts_ms       INTEGER NOT NULL,
-          PRIMARY KEY(thinker_id, position_id, name),
-          FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE,
-          FOREIGN KEY(thinker_id) REFERENCES thinkers(id) ON DELETE CASCADE
-        );
+        -- ============= indicator history ==========
         CREATE TABLE IF NOT EXISTS indicator_history (
           thinker_id  INTEGER NOT NULL,
           position_id INTEGER NOT NULL,
@@ -151,25 +141,6 @@ class Storage:
           PRIMARY KEY(thinker_id, position_id, name, ts_ms),
           FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE,
           FOREIGN KEY(thinker_id) REFERENCES thinkers(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS exit_attachments (
-          position_id    INTEGER PRIMARY KEY,
-          policies_json  TEXT    NOT NULL,
-          attached_at_ms INTEGER NOT NULL,
-          lookback_bars  INTEGER NOT NULL,
-          meta_json      TEXT,
-          FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS trailing_stop_state (
-          position_id INTEGER NOT NULL,
-          policy_name TEXT    NOT NULL,
-          stop        REAL,
-          meta_json   TEXT,
-          ts_ms       INTEGER NOT NULL,
-          PRIMARY KEY(position_id, policy_name),
-          FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE
         );
 
         -- ============= config (singleton) ==========
@@ -249,7 +220,7 @@ class Storage:
             log().exc(e, where="storage.ensure_config_row")
 
     def _ensure_indicator_tables(self):
-        """Ensure indicator tables include thinker_id in PK; recreate if not."""
+        """Ensure indicator_history has thinker_id in PK; recreate if not."""
         def _needs_rebuild(table: str, required_pk: list[str]) -> bool:
             info = self.con.execute(f"PRAGMA table_info({table});").fetchall()
             if not info:
@@ -260,25 +231,7 @@ class Storage:
                 return True
             return pk_cols != required_pk
 
-        rebuild_state = _needs_rebuild("indicator_state", ["thinker_id", "position_id", "name"])
         rebuild_hist = _needs_rebuild("indicator_history", ["thinker_id", "position_id", "name", "ts_ms"])
-
-        if rebuild_state:
-            log().warn("storage.migrate.indicator_state.rebuild")
-            with self.txn(write=True) as cur:
-                cur.execute("DROP TABLE IF EXISTS indicator_state")
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS indicator_state (
-                      thinker_id  INTEGER NOT NULL,
-                      position_id INTEGER NOT NULL,
-                      name        TEXT    NOT NULL,
-                      state_json  TEXT    NOT NULL,
-                      ts_ms       INTEGER NOT NULL,
-                      PRIMARY KEY(thinker_id, position_id, name),
-                      FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE,
-                      FOREIGN KEY(thinker_id) REFERENCES thinkers(id) ON DELETE CASCADE
-                    );
-                """)
 
         if rebuild_hist:
             log().warn("storage.migrate.indicator_history.rebuild")
@@ -552,27 +505,6 @@ class Storage:
 
     # ----- indicator + exit/trailing helpers -----
 
-    def upsert_indicator_state(self, thinker_id: int, position_id: int, name: str, state: dict, ts_ms: int) -> None:
-        """Persist latest indicator state snapshot."""
-        with self.txn(write=True) as cur:
-            cur.execute("""
-                INSERT INTO indicator_state(thinker_id,position_id,name,state_json,ts_ms)
-                VALUES(?,?,?,?,?)
-                ON CONFLICT(thinker_id,position_id,name) DO UPDATE SET state_json=excluded.state_json, ts_ms=excluded.ts_ms
-            """, (int(thinker_id), int(position_id), name, json.dumps(state or {}, ensure_ascii=False), int(ts_ms)))
-
-    def get_indicator_state(self, thinker_id: int, position_id: int, name: str) -> Optional[dict]:
-        row = self.con.execute("""
-            SELECT state_json, ts_ms FROM indicator_state WHERE thinker_id=? AND position_id=? AND name=?
-        """, (int(thinker_id), int(position_id), name)).fetchone()
-        if not row:
-            return None
-        try:
-            return {"state": json.loads(row["state_json"]), "ts_ms": int(row["ts_ms"])}
-        except Exception as e:
-            log().exc(e, where="storage.get_indicator_state.parse", thinker_id=thinker_id, position_id=position_id, name=name)
-            return None
-
     def insert_indicator_history(self, rows: List[dict]) -> int:
         """Bulk insert indicator history rows; silently skips empty list."""
         if not rows:
@@ -611,65 +543,6 @@ class Storage:
             except Exception as e:
                 log().exc(e, where="storage.list_indicator_history.parse", position_id=position_id, name=name)
         return out
-
-    def upsert_exit_attachment(self, position_id: int, policies: list, attached_at_ms: int, lookback_bars: int, meta: Optional[dict] = None):
-        with self.txn(write=True) as cur:
-            cur.execute("""
-                INSERT INTO exit_attachments(position_id, policies_json, attached_at_ms, lookback_bars, meta_json)
-                VALUES(?,?,?,?,?)
-                ON CONFLICT(position_id) DO UPDATE SET
-                  policies_json=excluded.policies_json,
-                  attached_at_ms=excluded.attached_at_ms,
-                  lookback_bars=excluded.lookback_bars,
-                  meta_json=excluded.meta_json
-            """, (int(position_id), json.dumps(policies or [], ensure_ascii=False),
-                  int(attached_at_ms), int(lookback_bars), json.dumps(meta or {}, ensure_ascii=False)))
-
-    def list_exit_attachments(self) -> List[dict]:
-        rows = self.con.execute("""
-            SELECT position_id, policies_json, attached_at_ms, lookback_bars, meta_json FROM exit_attachments
-        """).fetchall()
-        out: List[dict] = []
-        for r in rows:
-            try:
-                out.append({
-                    "position_id": int(r["position_id"]),
-                    "policies": json.loads(r["policies_json"]),
-                    "attached_at_ms": int(r["attached_at_ms"]),
-                    "lookback_bars": int(r["lookback_bars"]),
-                    "meta": json.loads(r["meta_json"]) if r["meta_json"] else {},
-                })
-            except Exception as e:
-                log().exc(e, where="storage.list_exit_attachments.parse")
-        return out
-
-    def delete_exit_attachment(self, position_id: int):
-        with self.txn(write=True) as cur:
-            cur.execute("DELETE FROM exit_attachments WHERE position_id=?", (int(position_id),))
-
-    def set_trailing_stop_state(self, position_id: int, policy_name: str, stop: Optional[float], meta: Optional[dict], ts_ms: int):
-        with self.txn(write=True) as cur:
-            cur.execute("""
-                INSERT INTO trailing_stop_state(position_id,policy_name,stop,meta_json,ts_ms)
-                VALUES(?,?,?,?,?)
-                ON CONFLICT(position_id,policy_name) DO UPDATE SET
-                  stop=excluded.stop,
-                  meta_json=excluded.meta_json,
-                  ts_ms=excluded.ts_ms
-            """, (int(position_id), policy_name, stop, json.dumps(meta or {}, ensure_ascii=False), int(ts_ms)))
-
-    def get_trailing_stop_state(self, position_id: int, policy_name: str) -> Optional[dict]:
-        row = self.con.execute("""
-            SELECT stop, meta_json, ts_ms FROM trailing_stop_state WHERE position_id=? AND policy_name=?
-        """, (int(position_id), policy_name)).fetchone()
-        if not row:
-            return None
-        meta = {}
-        try:
-            meta = json.loads(row["meta_json"]) if row["meta_json"] else {}
-        except Exception as e:
-            log().exc(e, where="storage.get_trailing_stop_state.parse", position_id=position_id, policy=policy_name)
-        return {"stop": row["stop"], "meta": meta, "ts_ms": int(row["ts_ms"])}
 
     # ------------------- JOBS (inspection / retries) -------------------
 
