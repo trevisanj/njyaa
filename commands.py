@@ -18,7 +18,7 @@ from rich.markdown import Markdown, Heading
 from rich.theme import Theme
 from rich.text import Text
 from rich.rule import Rule
-from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when
+from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when, tf_ms
 from risk_report import build_risk_report, RiskThresholds, RiskReport, format_risk_report
 
 if TYPE_CHECKING:
@@ -546,8 +546,16 @@ def build_registry() -> CommandRegistry:
         comps.append(OCTable(headers=headers, rows=rows))
         return CO(comps)
 
-    def _trailing_runtime(eng: BotEngine) -> Tuple[int, dict]:
-        rows = [r for r in eng.store.list_thinkers() if r["kind"] == "TRAILING_STOP"]
+    def _trailing_runtime(eng: BotEngine, tid: Optional[int] = None) -> Tuple[int, dict]:
+        if tid is not None and tid > 0:
+            row = eng.store.get_thinker(tid)
+            if not row:
+                raise RuntimeError(f"Thinker {tid} not found")
+            if str(row["kind"]).upper() != "TRAILING_STOP":
+                raise RuntimeError(f"Thinker {tid} is {row['kind']}, expected TRAILING_STOP")
+            rows = [row]
+        else:
+            rows = [r for r in eng.store.list_thinkers() if r["kind"] == "TRAILING_STOP"]
         if not rows:
             raise RuntimeError("No TRAILING_STOP thinker found")
         tid = int(rows[0]["id"])
@@ -663,19 +671,19 @@ def build_registry() -> CommandRegistry:
         return _txt(f"{summary} ({changed})")
 
     # ----------------------- TRAILING / EXIT ATTACHMENTS -----------------------
-    @R.bang("attach-exit", argspec=["position_id"], options=["policies", "lookback", "thinker_id", "at"], nreq=1)
+    @R.bang("attach-exit", argspec=["thinker_id", "position_id"], options=["policies", "lookback", "at"], nreq=2)
     def _bang_attach_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Attach trailing/exit policies to a position.
 
         Usage:
-          !attach-exit <position_id> [policies:<json>] [lookback:200] [thinker_id:<id>] [at:<iso|rel>]
+          !attach-exit <thinker_id> <position_id> [policies:<json>] [lookback:200] [at:<iso|rel>]
 
         at: iso (local) like 2024-08-20T15:30 or relative like -5m/+2h; defaults to now.
         """
+        thinker_id = int(args["thinker_id"])
         pid = int(args["position_id"])
         lookback = int(args.get("lookback", 200))
-        thinker_id = int(args.get("thinker_id", 0))
         at_opt = args.get("at")
         policies_raw = args.get("policies")
         if policies_raw:
@@ -687,7 +695,7 @@ def build_registry() -> CommandRegistry:
             policies = [{"policy": "psar_lock", "indicator": "psar", "indicator_cfg": {"af": 0.02, "max_af": 0.2}}]
         at_ms = Clock.now_utc_ms()
         if at_opt:
-            rel = _parse_rel_time(at_opt)
+            rel = parse_when(at_opt)
             if rel is not None:
                 at_ms = Clock.now_utc_ms() + rel
             else:
@@ -696,7 +704,7 @@ def build_registry() -> CommandRegistry:
                 except Exception as e:
                     return _err(f"Bad at: {e}")
         try:
-            tid, rt = _trailing_runtime(eng) if thinker_id <= 0 else (thinker_id, json.loads(eng.store.get_thinker(thinker_id)["runtime_json"] or "{}"))
+            tid, rt = _trailing_runtime(eng, thinker_id)
         except Exception as e:
             return _err(str(e))
         if "positions" not in rt:
@@ -725,7 +733,7 @@ def build_registry() -> CommandRegistry:
                 int(pid_str),
                 len(ctx.get("policies") or []),
                 ctx.get("lookback_bars"),
-                Clock.ts_to_iso((ctx.get("attached_at_ms") or 0)/1000.0),
+                ts_human(ctx.get("attached_at_ms")),
             ])
         return _tbl(["position_id", "policies", "lookback", "attached_at"], tbl_rows, intro=f"Exit attachments (thinker {tid})")
 
@@ -758,35 +766,33 @@ def build_registry() -> CommandRegistry:
             table_rows.append([
                 name,
                 _fmt_num(meta.get("stop"), nd=5),
-                Clock.ts_to_iso((meta.get("ts_ms") or 0)/1000.0),
+                ts_human(meta.get("ts_ms") or 0),
                 meta.get("meta") if isinstance(meta, dict) else {},
             ])
         return _tbl(["policy", "stop", "ts", "meta"], table_rows, intro=f"Trailing state for {pid}")
 
-    @R.at("exit-plot", argspec=["position_id"], options=["indicator", "symbol", "timeframe", "n"], nreq=1)
-    def _at_exit_plot(eng: BotEngine, args: Dict[str, str]) -> CO:
-        """Plot recorded indicator history against price."""
+    @R.at("chart-exit", argspec=["thinker_id", "position_id"], options=["timeframe", "n"], nreq=2)
+    def _at_chart_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Plot recorded exit/indicator history against price for a position."""
+        thinker_id = int(args["thinker_id"])
         pid = int(args["position_id"])
-        ind = args.get("indicator", "psar")
-        tf = args.get("timeframe", "1m")
+        tf = args.get("timeframe", "1d")
         n = int(args.get("n", 300))
-        sym = args.get("symbol")
-        if not sym:
-            pos = eng.store.get_position(pid)
-            if not pos:
-                return _err("position not found")
-            sym = pos["num"]
-        thinker_id = int(args.get("thinker_id") or args.get("thinker") or 0)
-        if thinker_id <= 0:
-            try:
-                thinker_id, _ = _trailing_runtime(eng)
-            except Exception as e:
-                return _err(str(e))
+
+        pos = eng.store.get_position(pid)
+        if not pos:
+            return _err("position not found")
+        sym = pos["num"]
+
         try:
-            path = eh.render_indicator_history_chart(eng, thinker_id, pid, ind, sym, timeframe=tf, n=n)
+            thinker_id, _ = _trailing_runtime(eng, thinker_id)
         except Exception as e:
             return _err(str(e))
-        return CO(OCPhoto(path, caption=f"{ind} history for pos {pid}"))
+        try:
+            path = eh.render_indicator_history_chart(eng, thinker_id, pid, "psar", sym, timeframe=tf, n=n)
+        except Exception as e:
+            return _err(str(e))
+        return CO(OCPhoto(path, caption=f"exit history for pos {pid}"))
 
     # ----------------------- OPEN (alias) -----------------------
     @R.at("open")
@@ -1824,14 +1830,15 @@ def _coerce_leg_fields(raw: dict) -> dict:
     if "note" in raw: out["note"] = str(raw["note"])
     return out
 
-    def _coerce_config_fields(raw: dict) -> dict:
-        """Coerce incoming config fields."""
-        out: Dict[str, Any] = {}
-        if "reference_balance" in raw:
-            rb = float(raw["reference_balance"])
-        if rb <= 0:
-            raise ValueError("reference_balance must be > 0")
-        out["reference_balance"] = rb
+
+def _coerce_config_fields(raw: dict) -> dict:
+    """Coerce incoming config fields."""
+    out: Dict[str, Any] = {}
+    if "reference_balance" in raw:
+        rb = float(raw["reference_balance"])
+    if rb <= 0:
+        raise ValueError("reference_balance must be > 0")
+    out["reference_balance"] = rb
     if "leverage" in raw:
         lv = float(raw["leverage"])
         if lv <= 0:

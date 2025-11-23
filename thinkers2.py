@@ -178,7 +178,7 @@ class TrailingStopThinker(ThinkerBase):
 
     @dataclass
     class Config:
-        timeframe: str = field(default="1m", metadata={"help": "Timeframe for indicator klines"})
+        timeframe: str = field(default="1d", metadata={"help": "Timeframe for indicator klines"})
         min_move_bp: float = field(default=1.0, metadata={"help": "Minimum bps improvement to log stop moves"})
         alert_cooldown_ms: int = field(default=60_000, metadata={"help": "Cooldown between repeated hit alerts"})
 
@@ -246,7 +246,8 @@ class TrailingStopThinker(ThinkerBase):
             pid = int(pid_str)
             pos = self.eng.store.get_position(pid)
             if not pos or pos["status"] != "OPEN":
-                continue
+                continue  # TODO: update position ctx with "invalid": True, and "invalid_msg": "Closed"/"Inexistent"
+
             symbol = pos["num"]
             price = eh.last_cached_price(self.eng, symbol)
             if price is None:
@@ -255,8 +256,9 @@ class TrailingStopThinker(ThinkerBase):
             policies = ctx.get("policies") or []
             ind_cfgs = self._indicator_configs(policies)
 
+            # TODO: here, the <num[/den]> series must be pulled, not the klines for the numerator only. Create helper method to obtain ohlcv bars for <num[/den]> (calculate ratios for ohlc and compute quote-notional sum for v).
             bars = self._fetch_bars(symbol, max(int(ctx.get("lookback_bars", 200)), 5))
-            if len(bars) < 5:
+            if len(bars) < 5: # TODO compare against lookback bars instead
                 self.notify("DEBUG", f"[trail] {symbol} missing klines {tf}", symbol=symbol)
                 continue
 
