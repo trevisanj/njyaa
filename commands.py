@@ -670,7 +670,7 @@ def build_registry() -> CommandRegistry:
             except Exception as e:
                 return _err(f"Bad policies JSON: {e}")
         else:
-            policies = [{"policy": "psar_lock", "indicator": "psar", "indicator_cfg": {"af": 0.02, "max_af": 0.2}}]
+            policies = [{"policy_name": "psar_lock"}]
         at_ms = Clock.now_utc_ms()
         if at_opt:
             try:

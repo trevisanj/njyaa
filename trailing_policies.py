@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 
 
 def _protective_stop_long(candidate: Optional[float], prev_stop: Optional[float]) -> Optional[float]:
+    """For longs: keep stop from moving down. Return the higher of prev_stop and candidate."""
     if candidate is None:
         return prev_stop
     if prev_stop is None:
@@ -13,6 +14,7 @@ def _protective_stop_long(candidate: Optional[float], prev_stop: Optional[float]
 
 
 def _protective_stop_short(candidate: Optional[float], prev_stop: Optional[float]) -> Optional[float]:
+    """For shorts: keep stop from moving up. Return the lower of prev_stop and candidate."""
     if candidate is None:
         return prev_stop
     if prev_stop is None:
@@ -23,16 +25,20 @@ def _protective_stop_short(candidate: Optional[float], prev_stop: Optional[float
 def eval_psar_lock(cfg: Dict[str, Any], position: Dict[str, Any], indicators: Dict[str, Dict[str, Any]],
                    prev_stop: Optional[float]) -> Dict[str, Any]:
     """
-    Stop follows latest PSAR level; only ratchets in profit direction.
+    PSAR follow: stop = latest PSAR, but only ratchets in profit direction.
+
     cfg: {indicator: "psar"}
-    position: {side: "LONG"/"SHORT", last_price: float}
+    position: {side: +1/-1, last_price: float}
     indicators: {"psar": {"value": float, "open_ts": int, "raw": {...}}}
+    prev_stop: last stop level for this policy (or None)
+
+    Returns: dict with suggested_stop, source_level, indicator_ts, reason.
     """
     name = cfg.get("indicator", "psar")
     psar = indicators.get(name, {})
     lvl = psar.get("value")
     side = position["side"]
-    stop = _protective_stop_long(lvl, prev_stop) if side == "LONG" else _protective_stop_short(lvl, prev_stop)
+    stop = _protective_stop_long(lvl, prev_stop) if side > 0 else _protective_stop_short(lvl, prev_stop)
     return {
         "policy": "psar_lock",
         "suggested_stop": stop,
@@ -47,9 +53,13 @@ def eval_atr_trail(cfg: Dict[str, Any], position: Dict[str, Any], indicators: Di
                    prev_stop: Optional[float]) -> Dict[str, Any]:
     """
     ATR-based trail: stop = close - k*ATR (long) or close + k*ATR (short), then ratchet.
+
     cfg: {indicator: "atr", k: float}
-    position: {side, last_price}
+    position: {side: +1/-1, last_price}
     indicators: {"atr": {"value": float, "open_ts": int}}
+    prev_stop: last stop level for this policy (or None)
+
+    Returns: dict with suggested_stop, source_level, indicator_ts, reason.
     """
     name = cfg.get("indicator", "atr")
     k = float(cfg.get("k", 2.0))
@@ -60,8 +70,8 @@ def eval_atr_trail(cfg: Dict[str, Any], position: Dict[str, Any], indicators: Di
     stop = prev_stop
     reason = "atr_missing"
     if atr_v is not None and px is not None:
-        stop_candidate = px - k * atr_v if position["side"] == "LONG" else px + k * atr_v
-        stop = _protective_stop_long(stop_candidate, prev_stop) if position["side"] == "LONG" else _protective_stop_short(stop_candidate, prev_stop)
+        stop_candidate = px - k * atr_v if position["side"] > 0 else px + k * atr_v
+        stop = _protective_stop_long(stop_candidate, prev_stop) if position["side"] > 0 else _protective_stop_short(stop_candidate, prev_stop)
         reason = "atr_trail"
     result = {
         "policy": "atr_trail",
