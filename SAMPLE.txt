@@ -34,13 +34,13 @@ Create a simple threshold alert thinker.
      !alert <SYMBOL> (>=|<=) <PRICE> [msg:...]                                                                                                                                                
                                                                                                                                                                                               
 
-!attach-exit ⟨thinker_id⟩ ⟨position_id⟩ [at:…] [lookback:…] [policies:…]                                                                                                                      
+!exit-attach ⟨thinker_id⟩ ⟨position_id⟩ [at:…] [lookback:…] [policies:…]
 
 Attach trailing/exit policies to a position.                                                                                                                                                  
 
                                                                                                                                                                                               
    Usage:                                                                                                                                                                                     
-     !attach-exit <thinker_id> <position_id> [policies:<json>] [lookback:200] [at:<iso|rel>]                                                                                                  
+     !exit-attach <thinker_id> <position_id> [policies:<json>] [lookback:200] [at:<iso|rel>]
                                                                                                                                                                                               
    at: iso (local) like 2024-08-20T15:30 or relative like -5m/+2h; defaults to now.                                                                                                           
                                                                                                                                                                                               
@@ -313,7 +313,9 @@ HORSE SAYS: (((On the first part of the journey)))
 [20251124🇧🇷08:30:38] INFO njyaa [njyaa-scheduler] thinker.result {"result": "0", "thinker_id": 4, "kind": "TRAILING_STOP"}
 [20251124🇧🇷08:30:48] INFO njyaa [njyaa-scheduler] thinker.result {"result": "0", "thinker_id": 4, "kind": "TRAILING_STOP"}
 [20251124🇧🇷08:30:58] INFO njyaa [njyaa-scheduler] thinker.result {"result": "0", "thinker_id": 4, "kind": "TRAILING_STOP"}
->                                                                                                                                                              
+>                                                                              
+                                                                                
+
 [20251124🇧🇷08:31:03] INFO njyaa [MainThread] Main loop: stop signal received
 [20251124🇧🇷08:31:03] INFO njyaa [MainThread] Engine stopping …
 [20251124🇧🇷08:31:03] INFO njyaa [MainThread] Console: stopping UI thread

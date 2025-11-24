@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from binance_um import BinanceUM
 import threading, time
 from typing import Callable, Dict
-from klines_cache import KlinesCache, rows_to_dataframe
+from klines_cache import KlinesCache
 import tempfile, os, io
 
 if False:

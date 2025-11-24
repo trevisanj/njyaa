@@ -26,7 +26,7 @@ def eval_psar_lock(cfg: Dict[str, Any], position: Dict[str, Any], indicators: Di
     Stop follows latest PSAR level; only ratchets in profit direction.
     cfg: {indicator: "psar"}
     position: {side: "LONG"/"SHORT", last_price: float}
-    indicators: {"psar": {"value": float, "ts_ms": int, "raw": {...}}}
+    indicators: {"psar": {"value": float, "open_ts": int, "raw": {...}}}
     """
     name = cfg.get("indicator", "psar")
     psar = indicators.get(name, {})
@@ -38,7 +38,7 @@ def eval_psar_lock(cfg: Dict[str, Any], position: Dict[str, Any], indicators: Di
         "suggested_stop": stop,
         "source_level": lvl,
         "indicator": name,
-        "indicator_ts": psar.get("ts_ms"),
+        "indicator_ts": psar.get("open_ts"),
         "reason": "psar_follow",
     }
 
@@ -49,7 +49,7 @@ def eval_atr_trail(cfg: Dict[str, Any], position: Dict[str, Any], indicators: Di
     ATR-based trail: stop = close - k*ATR (long) or close + k*ATR (short), then ratchet.
     cfg: {indicator: "atr", k: float}
     position: {side, last_price}
-    indicators: {"atr": {"value": float, "ts_ms": int}}
+    indicators: {"atr": {"value": float, "open_ts": int}}
     """
     name = cfg.get("indicator", "atr")
     k = float(cfg.get("k", 2.0))
@@ -68,7 +68,7 @@ def eval_atr_trail(cfg: Dict[str, Any], position: Dict[str, Any], indicators: Di
         "suggested_stop": stop,
         "source_level": stop_candidate,
         "indicator": name,
-        "indicator_ts": atr.get("ts_ms"),
+        "indicator_ts": atr.get("open_ts"),
         "reason": reason,
     }
     return result

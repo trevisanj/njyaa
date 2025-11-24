@@ -546,6 +546,10 @@ def build_registry() -> CommandRegistry:
         comps.append(OCTable(headers=headers, rows=rows))
         return CO(comps)
 
+    def _err_exc(where: str, e: Exception) -> CO:
+        log().exc(e, where=where)
+        return _err(str(e))
+
 
     def _thinker_kind_info(eng: BotEngine) -> List[Dict[str, Any]]:
         infos: List[Dict[str, Any]] = []
@@ -645,13 +649,13 @@ def build_registry() -> CommandRegistry:
         return _txt(f"{summary} ({changed})")
 
     # ----------------------- TRAILING / EXIT ATTACHMENTS -----------------------
-    @R.bang("attach-exit", argspec=["thinker_id", "position_id"], options=["policies", "lookback", "at"], nreq=2)
+    @R.bang("exit-attach", argspec=["thinker_id", "position_id"], options=["policies", "lookback", "at"], nreq=2)
     def _bang_attach_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Attach trailing/exit policies to a position.
 
         Usage:
-          !attach-exit <thinker_id> <position_id> [policies:<json>] [lookback:200] [at:<iso|rel>]
+          !exit-attach <thinker_id> <position_id> [policies:<json>] [lookback:200] [at:<iso|rel>]
 
         at: iso (local) like 2024-08-20T15:30 or relative like -5m/+2h; defaults to now.
         """
@@ -676,7 +680,7 @@ def build_registry() -> CommandRegistry:
         try:
             inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
         except Exception as e:
-            return _err(str(e))
+            return _err_exc("exit_attach.get_thinker", e)
         rt = inst.runtime()
         cfg = inst._cfg
         rt.setdefault("positions", {})
@@ -687,7 +691,8 @@ def build_registry() -> CommandRegistry:
             "timeframe": cfg.get("timeframe"),
         }
         inst.save_runtime()
-        return _txt(f"Attached exit policies to position {pid} ({len(policies)} policy) via thinker {thinker_id} at {at_ms}")
+        eng.tm.reload(thinker_id)
+        return _txt(f"Attached exit policies to position {pid} ({len(policies)} policy) via thinker {thinker_id} at {ts_human(at_ms)}")
 
     @R.at("exit-list", argspec=["thinker_id"], nreq=1)
     def _at_exit_list(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -696,7 +701,7 @@ def build_registry() -> CommandRegistry:
         try:
             inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
         except Exception as e:
-            return _err(str(e))
+            return _err_exc("exit_list.get_thinker", e)
         rt = inst.runtime()
         positions = rt.get("positions") or {}
         if not positions:
@@ -719,13 +724,14 @@ def build_registry() -> CommandRegistry:
         try:
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         except Exception as e:
-            return _err(str(e))
+            return _err_exc("exit_detach.get_thinker", e)
         rt = inst.runtime()
         positions = rt.setdefault("positions", {})
         if str(pid) not in positions:
             raise ValueError(f"Position {pid} not attached to thinker {tid}")
         removed = positions.pop(str(pid), None)
         inst.save_runtime()
+        eng.tm.reload(tid)
         return _txt(f"Detached exit policies from position {pid}" + ("" if removed else " (none existed)"))
 
     @R.at("exit-state", argspec=["thinker_id", "position_id"], nreq=2)
@@ -736,7 +742,7 @@ def build_registry() -> CommandRegistry:
         try:
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         except Exception as e:
-            return _err(str(e))
+            return _err_exc("exit_state.get_thinker", e)
         rt = inst.runtime()
         ctx = (rt.get("positions") or {}).get(str(pid))
         if not ctx:
@@ -766,17 +772,64 @@ def build_registry() -> CommandRegistry:
 
         try:
             inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
-        except Exception as e:
-            return _err(str(e))
-        rt = inst.runtime()
-        cfg = inst._cfg
-        ctx = (rt.get("positions") or {}).get(str(pid)) or {}
-        tf = ctx.get("timeframe") or cfg.get("timeframe") or "1d"
-        try:
+            rt = inst.runtime()
+            cfg = inst._cfg
+            ctx = (rt.get("positions") or {}).get(str(pid)) or {}
+            tf = ctx.get("timeframe") or cfg.get("timeframe") or "1d"
             path = eh.render_indicator_history_chart(eng, thinker_id, pid, "psar", sym, timeframe=tf, n=n)
         except Exception as e:
-            return _err(str(e))
+            return _err_exc("chart_exit", e)
         return CO(OCPhoto(path, caption=f"exit history for pos {pid}"))
+
+    @R.at("ind", argspec=["thinker_id", "position_id"], nreq=0)
+    def _at_ind(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """List recorded indicators (distinct by thinker/position/name)."""
+        tid = args.get("thinker_id")
+        pid = args.get("position_id")
+        tid_i = int(tid) if tid is not None else None
+        pid_i = int(pid) if pid is not None else None
+        rows = eng.ih.list_indicators(tid_i, pid_i, fmt="columnar")
+        if not rows or not rows.get("name"):
+            return _txt("No indicators recorded.")
+        tbl_rows = list(zip(rows["thinker_id"], rows["position_id"], rows["name"]))
+        return _tbl(["thinker_id", "position_id", "name"], tbl_rows, intro="Indicator history keys")
+
+    @R.at("chart-ind", argspec=["thinker_id", "position_id", "name"], nreq=2)
+    def _at_chart_ind(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Plot indicator history with candles for a position (all or filtered by name)."""
+        tid = int(args["thinker_id"])
+        pid = int(args["position_id"])
+        name = args.get("name")
+
+        pos = eng.store.get_position(pid)
+        if not pos:
+            return _err("position not found")
+        sym = pos["num"]
+
+        try:
+            inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
+            rt = inst.runtime()
+            cfg = inst._cfg
+            ctx = (rt.get("positions") or {}).get(str(pid)) or {}
+            tf = ctx.get("timeframe") or cfg.get("timeframe") or "1d"
+
+            ind_rows = eng.ih.list_indicators(tid, pid, fmt="columnar")
+            names = ind_rows.get("name") if ind_rows else []
+            if name:
+                if name not in names:
+                    return _err(f"indicator {name} not found for thinker {tid}, position {pid}")
+                names = [name]
+            else:
+                names = list(names or [])
+            if not names:
+                return _txt("No indicators recorded.")
+
+            open_ms = int(pos["user_ts"] or pos["created_ts"])
+            end_ms = int(pos["closed_ts"] or Clock.now_utc_ms())
+            path = eh.render_indicator_chart_multi(eng, tid, pid, names, sym, tf, open_ms, end_ms)
+        except Exception as e:
+            return _err_exc("chart_ind", e)
+        return CO(OCPhoto(path, caption=f"indicators for pos {pid}"))
 
     # ----------------------- OPEN (alias) -----------------------
     @R.at("open")
@@ -844,7 +897,7 @@ def build_registry() -> CommandRegistry:
             for lg in store.get_legs(r["position_id"]):
                 if lg["symbol"]:
                     involved_syms.add(lg["symbol"])
-            marks: Dict[str, Optional[float]] = {s: eh.last_cached_price(eng, s) for s in involved_syms}
+            marks: Dict[str, Optional[float]] = {s: eng.kc.last_cached_price(s) for s in involved_syms}
 
         # Shared accumulators
         md_lines: List[str] = [f"# Positions ({status})"]
@@ -1381,7 +1434,7 @@ def build_registry() -> CommandRegistry:
             return CO(f"Error: {e}")
 
     # ----------------------- CHART PNL -----------------------
-    @R.at("chart-pnl", argspec=["which", "timeframe", "from", "to"], nreq=1)
+    @R.at("chart-pnl", argspec=["which", "timeframe", "from", "to"], options=["pct"], nreq=1)
     def _at_chart_pnl(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Plot PnL over time for one position or all open positions.
@@ -1393,6 +1446,7 @@ def build_registry() -> CommandRegistry:
         tf = args.get("timeframe", "1d")
         frm_raw = args.get("from")
         to_raw = args.get("to")
+        pct_mode = str(args.get("pct", "false")).lower() in ("1", "true", "yes", "y", "on", "pct")
 
         end_ms = parse_when(to_raw) if to_raw else None
         start_ms = parse_when(frm_raw) if frm_raw else None
@@ -1414,6 +1468,9 @@ def build_registry() -> CommandRegistry:
             return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat(timespec="seconds")
         md_lines = ["# PnL chart", f"Timeframe: `{tf}`",
                     f"Window: {_fmt_ts(meta['start_ms'])} → {_fmt_ts(meta['end_ms'])}"]
+        if pct_mode:
+            cfg = eng.store.get_config()
+            md_lines.append(f"Mode: % of reference_balance={_fmt_num(cfg['reference_balance'],2)}")
         def _bullet(title, seq):
             if not seq: return None
             return f"- {title}: " + ", ".join(str(x) for x in seq)
@@ -1440,17 +1497,38 @@ def build_registry() -> CommandRegistry:
         if df_plot.empty:
             return CO(OCMarkDown("\n".join(md_lines + ["- No data to plot."])))
 
+        if pct_mode:
+            cfg = eng.store.get_config()
+            ref_balance = cfg["reference_balance"]
+            if not ref_balance:
+                return CO(OCMarkDown("\n".join(md_lines + ["- reference_balance is zero; cannot compute % mode."])))
+            df_plot = df_plot.applymap(lambda v: (v / ref_balance * 100.0) if v is not None else v)
+
         title = f"PnL {which.upper()} {tf}"
         fig, ax = plt.subplots(figsize=(10, 5))
         pos_meta = meta.get("positions", {}) if isinstance(meta, dict) else {}
 
-        for col in df_plot.columns:
+        cols_to_plot = list(df_plot.columns)
+        if "TOTAL" in cols_to_plot:
+            cols_to_plot = ["TOTAL"] + [c for c in cols_to_plot if c != "TOTAL"]
+
+        for col in cols_to_plot:
             is_total = str(col).upper() == "TOTAL"
             pid = None if is_total else int(col)
             info = pos_meta.get(pid) if pid is not None else None
             label = info["label"] if info else str(col)
 
-            line, = ax.plot(df_plot.index, df_plot[col], label=label)
+            if is_total:
+                line, = ax.plot(
+                    df_plot.index,
+                    df_plot[col],
+                    label=label,
+                    color="dimgray",
+                    linestyle="--",
+                    linewidth=2.4,
+                )
+            else:
+                line, = ax.plot(df_plot.index, df_plot[col], label=label)
             if is_total:
                 continue
 
@@ -1468,9 +1546,9 @@ def build_registry() -> CommandRegistry:
             closed = info and str(info.get("status", "")).upper() == "CLOSED"
             end_marker = "x" if closed else ">"
             ax.plot(end_ts, end_val, marker=end_marker, markersize=8, color=color, markeredgewidth=2)
-        ax.set_title(title)
+        ax.set_title(title + (" (pct)" if pct_mode else ""))
         ax.set_xlabel("Time")
-        ax.set_ylabel("PnL (quote)")
+        ax.set_ylabel("PnL (% of ref balance)" if pct_mode else "PnL (quote)")
         ax.grid(True, linestyle="--", alpha=0.35)
         ax.legend()
         fig.tight_layout()
@@ -1686,7 +1764,7 @@ def build_registry() -> CommandRegistry:
 
         # --- gather marks per symbol ---
         symbols = sorted({r["symbol"] for r in rows if r["symbol"]})
-        marks: Dict[str, Optional[float]] = {s: eh.last_cached_price(eng, s) for s in symbols}
+        marks: Dict[str, Optional[float]] = {s: eng.kc.last_cached_price(s) for s in symbols}
 
         # stats[symbol] = {
         #   "last_price": float|None,

@@ -71,6 +71,26 @@ class _PTBDropTraceback(logging.Filter):
 _PTB_LOG_CONFIGURED = False
 
 
+class _MultiStreamLog(Log):
+    """
+    Simple fan-out wrapper over Log to write to multiple streams.
+    """
+    def __init__(self, base: Log, streams):
+        # copy base config but override stream handling
+        super().__init__(level=base.level_name, stream=base.stream, json_mode=base.json_mode, name=base.name, context=base.ctx)
+        self._streams = streams
+
+    def _emit(self, lvname: str, msg: str, **fields):
+        # Write to all streams
+        for s in self._streams:
+            try:
+                orig_stream = self.stream
+                self.stream = s
+                super()._emit(lvname, msg, **fields)
+            finally:
+                self.stream = orig_stream
+
+
 def _configure_ptb_logging():
     """Apply minimal formatting to PTB loggers (idempotent)."""
     global _PTB_LOG_CONFIGURED
@@ -209,7 +229,7 @@ class BotEngine:
         self._tg_thread: Optional[threading.Thread] = None
         self._worker_thread: Optional[threading.Thread] = None
         self._console_thread: Optional[threading.Thread] = None
-        self._console_ui: Optional["ConsoleUI"] = None
+        self._console_ui: Optional[object] = None
         self._telegram_loop: Optional[asyncio.AbstractEventLoop] = None
         self._rich_console = Console(force_terminal=True, color_system="truecolor", soft_wrap=True)
         self._host_name = socket.gethostname()
@@ -222,14 +242,25 @@ class BotEngine:
         self._send_queue: Queue = Queue()
         self._log_stream_buffer = ""
         self._log_stream = _EngineLogStream(self)
-        set_global_logger(
-            Log(
-                level=cfg.LOG_LEVEL or "INFO",
-                stream=self._log_stream,
-                name="njyaa",
-                json_mode=False,
-            )
+        streams = []
+        if cfg.LOG_TO_STDOUT:
+            streams.append(self._log_stream)
+        if cfg.LOG_TO_FILE and cfg.LOG_FILE_PATH:
+            try:
+                file_handle = open(cfg.LOG_FILE_PATH, "a", buffering=1)
+                streams.append(file_handle)
+            except Exception as e:
+                print(f"Failed to open log file {cfg.LOG_FILE_PATH}: {e}", file=sys.stderr)
+        base_stream = streams[0] if streams else self._log_stream
+        logger = Log(
+            level=cfg.LOG_LEVEL or "INFO",
+            stream=base_stream,
+            name="njyaa",
+            json_mode=False,
         )
+        if len(streams) > 1:
+            logger = _MultiStreamLog(logger, streams)
+        set_global_logger(logger)
 
         # book-keeping
         self._excepthook_installed = False
@@ -674,7 +705,12 @@ class BotEngine:
         console_ui = None
         try:
             if console_enabled:
-                console_ui = ConsoleUI(self)
+                mode = (self.cfg.CONSOLE_MODE or "prompt").lower()
+                if mode == "curses":
+                    from console_curses import CursesConsoleUI
+                    console_ui = CursesConsoleUI(self)
+                else:
+                    console_ui = ConsoleUI(self)
                 self._console_ui = console_ui
                 self._console_thread = threading.Thread(
                     target=console_ui.run, name="njyaa-console", daemon=True

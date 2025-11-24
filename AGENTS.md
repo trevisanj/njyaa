@@ -50,11 +50,12 @@
       loop = self._telegram_loop
       assert loop and loop.is_running(): ...
   ```
-- No defensive coding!!!!!!!!!! **NO DEFENSIVE CODING*** 
+- No defensive coding!!!!!!!!!! **NO DEFENSIVE CODING***
+- Format function signatures with as many arguments on each line as possible up to ~120 chars; avoid one-arg-per-line wrapping.
 
 ## Testing Guidelines
 - No unit-test suite is maintained; rely on manual smoke checks instead of adding tests.
-- Smoke checklist: run `python run_bot.py`, issue `@help`, and confirm price polling, cache refresh, and Telegram/console outputs behave without tracebacks.
+- Smoke checklist: run `python run_bot.py`, issue `?help`, and confirm price polling, cache refresh, and Telegram/console outputs behave without tracebacks.
 
 ## Commit & Pull Request Guidelines
 - Commit messages: short, present-tense imperatives (e.g., “add funding watcher”).

@@ -12,7 +12,6 @@ from datetime import datetime, timezone, timedelta
 from binance_um import BinanceUM
 import threading, time
 from typing import Callable, Dict
-from klines_cache import KlinesCache, rows_to_dataframe
 import tempfile, os, io
 import matplotlib.pyplot as plt
 import mplfinance as mpf
@@ -21,47 +20,6 @@ import numpy as np
 
 if False:
     from bot_api import BotEngine
-
-
-def last_cached_price(eng: "BotEngine", symbol: str) -> Optional[float]:
-    kc = eng.kc
-    tfs = eng.cfg.KLINES_TIMEFRAMES or ["1m"]
-    for tf in tfs:
-        r = kc.last_row(symbol, tf)
-        if r and r["close"] is not None:
-            return float(r["close"])
-    return None
-
-
-def _close_series(eng: BotEngine, symbol: str, timeframe: str, n: int):
-    """Return a Close-price Series for a symbol/timeframe."""
-    cols = eng.kc.last_n(symbol, timeframe, n=n)
-    if not cols["close"]:
-        raise ValueError(f"No cached klines for {symbol} {timeframe}")
-    df = rows_to_dataframe(cols)
-    s = df["Close"].copy()
-    s.name = symbol
-    return s
-
-
-def divide_series(num: pd.Series, den: pd.Series, name: Optional[str] = None) -> pd.Series:
-    """Construct ratio series with index intersection."""
-    aligned_num, aligned_den = num.align(den, join="inner")
-    if aligned_num.empty:
-        raise ValueError("No overlapping timestamps between numerator and denominator series.")
-    ratio = aligned_num / aligned_den
-    ratio.name = name or f"{num.name}/{den.name}"
-    return ratio
-
-
-def pair_close_series(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: int) -> pd.Series:
-    """Return Close-price series for NUM[/DEN], dividing when denominator is provided."""
-    num, den = parse_pair_or_single(eng, pair_or_symbol)
-    num_series = _close_series(eng, num, timeframe, n=n)
-    if not den:
-        return num_series
-    den_series = _close_series(eng, den, timeframe, n=n)
-    return divide_series(num_series, den_series, name=f"{num}/{den}")
 
 
 def klines_cache_summary(eng: BotEngine):
@@ -83,11 +41,9 @@ def klines_cache_summary(eng: BotEngine):
 def render_chart(eng: BotEngine, symbol: str, timeframe: str, n: int = 200, outdir: str = "/tmp") -> str:
     """Render a candlestick+volume chart from KlinesCache → PNG. Returns file path."""
     kc = eng.kc
-    cols = kc.last_n(symbol, timeframe, n=n)
-    if not cols["close"]:
+    df = kc.last_n(symbol, timeframe, n=n, fmt="ohlcv")
+    if df.empty:
         raise ValueError(f"No cached klines for {symbol} {timeframe}")
-
-    df = rows_to_dataframe(cols)
 
     # Simple indicator (20-period MA)
     df["MA20"] = df["Close"].rolling(window=20).mean()
@@ -131,7 +87,14 @@ def render_chart(eng: BotEngine, symbol: str, timeframe: str, n: int = 200, outd
 def render_ratio_chart(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: int = 200,
                        outdir: str = "/tmp") -> str:
     """Render a Close-price line + MA for a symbol or ratio."""
-    series = pair_close_series(eng, pair_or_symbol, timeframe, n=n)
+    num, den = parse_pair_or_single(eng, pair_or_symbol)
+    tfm = tf_ms(timeframe)
+    now_ms = Clock.now_utc_ms()
+    start_ts = max(0, now_ms - n * tfm)
+    df = eng.kc.pair_bars(num, den, timeframe, start_ts, None)
+    if df.empty:
+        raise ValueError(f"No klines for {pair_or_symbol} {timeframe}")
+    series = df["Close"]
     ma = series.rolling(window=20).mean()
 
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -155,20 +118,21 @@ def render_ratio_chart(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: i
 def render_indicator_history_chart(eng: "BotEngine", thinker_id: int, position_id: int, indicator_name: str, symbol: str,
                                    timeframe: str = "1d", n: int = 300, outdir: str = "/tmp") -> str:
     """Overlay price closes with recorded indicator history."""
-    rows = eng.kc.last_n(symbol, timeframe, n=n, include_live=True, asc=True)
-    if not rows:
+    num, den = parse_pair_or_single(eng, symbol)
+    tfm = tf_ms(timeframe)
+    now_ms = Clock.now_utc_ms()
+    start_ts = max(0, now_ms - n * tfm)
+    price_df = eng.kc.pair_bars(num, den, timeframe, start_ts, None)
+    if price_df.empty:
         raise ValueError(f"No klines for {symbol} {timeframe}")
-    df = rows_to_dataframe(rows)
-    hist = eng.ih.list_history(thinker_id, position_id, indicator_name, limit=5000)
-    if not hist:
+
+    hdf = eng.ih.range_by_ts(thinker_id, position_id, indicator_name, start_open_ts=start_ts, fmt="dataframe")
+    if hdf is None or hdf.empty:
         raise ValueError("No history rows")
-    hdf = pd.DataFrame(hist)
-    hdf["dt"] = pd.to_datetime(hdf["ts_ms"], unit="ms")
-    df_idx = pd.to_datetime(df.index)
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(df_idx, df["Close"], label="Close", color="steelblue", linewidth=1.4)
-    ax.plot(hdf["dt"], hdf["value"], label=indicator_name, color="tomato", linewidth=1.2)
+    ax.plot(price_df.index, price_df["Close"], label=f"{symbol} Close", color="steelblue", linewidth=1.4)
+    ax.plot(hdf.index, hdf["value"], label=indicator_name, color="tomato", linestyle="none", marker="x", markersize=6)
     ax.set_title(f"{symbol} {indicator_name} history (pos {position_id})")
     ax.grid(True, linestyle="--", alpha=0.35)
     ax.legend()
@@ -178,6 +142,52 @@ def render_indicator_history_chart(eng: "BotEngine", thinker_id: int, position_i
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     log().info("render_indicator_history_chart", path=out_path, position_id=position_id, indicator=indicator_name)
+    return out_path
+
+
+def render_indicator_chart_multi(eng: "BotEngine", thinker_id: int, position_id: int, indicator_names: list[str],
+                                 symbol: str, timeframe: str, pos_start_ms: int, pos_end_ms: int,
+                                 outdir: str = "/tmp") -> str:
+    """
+    Plot price candles and multiple indicator histories for a position.
+    """
+    num, den = parse_pair_or_single(eng, symbol)
+    # fetch all indicator dfs and collect bounds
+    dfs = []
+    min_ts = pos_start_ms
+    max_ts = pos_end_ms
+    for name in indicator_names:
+        df = eng.ih.range_by_ts(thinker_id, position_id, name, start_open_ts=pos_start_ms,
+                                end_open_ts=pos_end_ms, fmt="dataframe")
+        if df is None or df.empty:
+            continue
+        dfs.append((name, df))
+        ts_min = int(df.index[0].value // 1_000_000)
+        ts_max = int(df.index[-1].value // 1_000_000)
+        min_ts = min(min_ts, ts_min)
+        max_ts = max(max_ts, ts_max)
+    if not dfs:
+        raise ValueError("No indicator history rows")
+
+    price_df = eng.kc.pair_bars(num, den, timeframe, min_ts, max_ts or None)
+    if price_df.empty:
+        raise ValueError(f"No klines for {symbol} {timeframe}")
+
+    aps = []
+    for name, df in dfs:
+        aps.append(mpf.make_addplot(df["value"], scatter=True, markersize=20, marker="x", label=name))
+
+    fig, axlist = mpf.plot(
+        price_df,
+        type="candle",
+        addplot=aps,
+        returnfig=True,
+        title=f"{symbol} indicators ({', '.join(indicator_names)})",
+    )
+    out_path = os.path.join(outdir, f"chart_ind_{thinker_id}_{position_id}_{symbol}_{timeframe}.png".replace("/", "-"))
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    log().info("render_indicator_chart_multi", path=out_path, position_id=position_id, indicators=indicator_names)
     return out_path
 
 
@@ -232,6 +242,7 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
     # window based on union of position lifetimes unless explicitly overridden
     end_ts = end_ms or (max(close_bounds) if close_bounds else now_ms)
     start_ts = start_ms or (min(open_bounds) if open_bounds else end_ts - tfm * 200)
+    end_arg = None if (end_ms is None and end_ts == now_ms) else end_ts
     missing_qty_entry: list[int] = []
     symbols = set()
     for pid, legs in legs_by_pid.items():
@@ -244,7 +255,7 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
     price_rows: dict[str, list[tuple[int, float]]] = {}
     symbols_missing_klines = []
     for sym in symbols:
-        cols = eng.kc.range_by_close(sym, timeframe, start_ts - tfm, end_ts, include_live=False, columns=["close_ts", "close"])
+        cols = eng.kc.range_by_close(sym, timeframe, start_ts - tfm, end_arg, include_live=False, columns=["close_ts", "close"])
         if not cols["close_ts"]:
             symbols_missing_klines.append(sym)
             continue

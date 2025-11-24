@@ -9,14 +9,11 @@ from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CH
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
-from common import log, Clock, AppConfig, leg_pnl, tf_ms
+from common import log, Clock, AppConfig, leg_pnl, tf_ms, ts_human
 from thinkers1 import ThinkerBase
-import enghelpers as eh
 import risk_report
 from indicator_engines import run_indicator
 from trailing_policies import evaluate_policy
-from klines_cache import rows_to_dataframe
-import pandas as pd
 import pandas as pd
 import numpy as np
 
@@ -75,7 +72,7 @@ class ThresholdAlertThinker(ThinkerBase):
 
 
 def _mark_close_now(eng: BotEngine, symbol: str) -> Optional[float]:
-    return eh.last_cached_price(eng, symbol)
+    return eng.kc.last_cached_price(symbol)
 
 
 def _minute_klines(eng: BotEngine, symbol: str, mins: int) -> Dict[str, List[Any]]:
@@ -177,11 +174,6 @@ class TrailingStopThinker(ThinkerBase):
     def _on_init(self) -> None:
         self._runtime.setdefault("positions", {})
 
-    def _fetch_bars(self, symbol: str, start_ts: int, end_ts: int) -> pd.DataFrame:
-        kc = self.eng.kc
-        rows = kc.range_by_open(symbol, self._cfg["timeframe"], start_ts, end_ts, include_live=True, asc=True)
-        return rows_to_dataframe(rows)
-
     def _indicator_configs(self, policies: List[dict]) -> Dict[str, dict]:
         cfgs: Dict[str, dict] = {}
         for p in policies:
@@ -200,7 +192,7 @@ class TrailingStopThinker(ThinkerBase):
         for pos in idxs:
             if pos < start_idx:
                 continue
-            ts_ms = int(bars.index[pos].value // 1_000_000)
+            open_ts = int(bars.index[pos].value // 1_000_000)
             aux = {}
             for k in ("ep", "af", "trend", "tr"):
                 arr = outputs.get(k)
@@ -210,7 +202,7 @@ class TrailingStopThinker(ThinkerBase):
                 "thinker_id": tid,
                 "position_id": pid,
                 "name": name,
-                "ts_ms": ts_ms,
+                "open_ts": open_ts,
                 "value": val_arr[pos],
                 "price": float(bars.iloc[pos]["Close"]),
                 "aux": aux,
@@ -231,29 +223,13 @@ class TrailingStopThinker(ThinkerBase):
         return self._runtime.setdefault("positions", {})
 
 
-    def _pair_bars(self, num: str, den: Optional[str], start_ts: int, end_ts: int) -> pd.DataFrame:
+    def _pair_bars(self, num: str, den: Optional[str], start_ts: int, end_ts: Optional[int] = None) -> pd.DataFrame:
         """
         Return OHLC dataframe for num[/den], aligned on open_ts.
 
         For ratios, divide num o/h/l/c by den o/h/l/c; volume ignored for now.
         """
-        if not den:
-            return self._fetch_bars(num, start_ts, end_ts)
-        kc = self.eng.kc
-        num_df = rows_to_dataframe(kc.range_by_open(num, self._cfg["timeframe"], start_ts, end_ts, include_live=True, asc=True) or [])
-        den_df = rows_to_dataframe(kc.range_by_open(den, self._cfg["timeframe"], start_ts, end_ts, include_live=True, asc=True) or [])
-        if num_df.empty or den_df.empty:
-            return rows_to_dataframe([])
-        num_df, den_df = num_df.align(den_df, join="inner")
-        if num_df.empty:
-            return num_df
-        out = num_df.copy()
-        out["Open"] = num_df["Open"] / den_df["Open"]
-        out["High"] = num_df["High"] / den_df["High"]
-        out["Low"] = num_df["Low"] / den_df["Low"]
-        out["Close"] = num_df["Close"] / den_df["Close"]
-        out["Volume"] = num_df["Volume"]
-        return out
+        return self.eng.kc.pair_bars(num, den, self._cfg["timeframe"], start_ts, end_ts)
 
     def on_tick(self, now_ms: int):
         positions_ctx = self._positions_ctx()
@@ -287,9 +263,9 @@ class TrailingStopThinker(ThinkerBase):
 
             need_n = max(int(ctx.get("lookback_bars", 200)), 5)
             tfms = tf_ms(self._cfg["timeframe"])
-            anchor_ts = ctx.get("last_ts") or ctx.get("attached_at_ms") or now_ms
+            anchor_ts = ctx.get("last_ts") or ctx.get("attached_at_ms")
             start_ts = max(0, int(anchor_ts) - need_n * tfms)
-            bars = self._pair_bars(symbol, den, start_ts, now_ms)
+            bars = self._pair_bars(symbol, den, start_ts, None)
             if bars.empty or len(bars) < need_n:
                 self.notify("DEBUG", f"[trail] Missing klines {tf}, can't calculate stop", symbol=symbol, position_id=pid)  # TODO regular logging instead of notify
                 continue
@@ -304,6 +280,9 @@ class TrailingStopThinker(ThinkerBase):
             if anchor_ts is not None:
                 dt = pd.to_datetime(int(anchor_ts), unit="ms")
                 start_idx = int(bars.index.searchsorted(dt, side="right"))
+                if start_idx >= len(bars):
+                    log().debug("trail.anchor_clamped", anchor_ts=anchor_ts, last_bar=int(bars.index[-1].value // 1_000_000), pid=pid, symbol=symbol)
+                    start_idx = len(bars) - 1
             if start_idx >= len(bars):
                 positions_ctx[pid_str] = ctx
                 continue
@@ -328,7 +307,7 @@ class TrailingStopThinker(ThinkerBase):
                 latest_val = None
                 if val_arr is not None and np.any(~np.isnan(val_arr)):
                     latest_val = float(val_arr[~np.isnan(val_arr)][-1])
-                indicators[ind_name] = {"value": latest_val, "raw": ns}
+                indicators[ind_name] = {"value": latest_val, "raw": ns, "open_ts": ts_val}
                 last_ts_seen = ts_val
 
             if history_rows:
@@ -352,12 +331,12 @@ class TrailingStopThinker(ThinkerBase):
                     self.notify("WARN", f"[trail] {symbol} policy {pname} failed: {e}", symbol=symbol)
                     continue
                 suggestion = decision.get("suggested_stop")
-                trailing[pname] = {"stop": suggestion, "meta": {"reason": decision.get("reason")}, "ts_ms": now_ms}
+                trailing[pname] = {"stop": suggestion, "meta": {"reason": decision.get("reason")}, "open_ts": now_ms}
                 history_rows.append({
                     "thinker_id": tid,
                     "position_id": pid,
                     "name": f"trail:{pname}",
-                    "ts_ms": indicators.get(ind_name, {}).get("ts_ms", now_ms),
+                    "open_ts": indicators.get(ind_name, {}).get("open_ts", now_ms),
                     "value": suggestion,
                     "price": snap["last_price"],
                     "aux": {"policy": pname, "source": ind_name},
@@ -386,12 +365,12 @@ class TrailingStopThinker(ThinkerBase):
                         self.notify("WARN", f"[trail] {symbol} stop hit @ {price:.4f} vs {agg:.4f}", send=True,
                                     symbol=symbol, stop=agg, price=price)
                         meta["last_alert_ts"] = now_ms
-                trailing["__agg__"] = {"stop": agg, "meta": meta, "ts_ms": now_ms}
+                trailing["__agg__"] = {"stop": agg, "meta": meta, "open_ts": now_ms}
                 history_rows.append({
                     "thinker_id": tid,
                     "position_id": pid,
                     "name": "trail:agg",
-                    "ts_ms": now_ms,
+                    "open_ts": now_ms,
                     "value": agg,
                     "price": price,
                     "aux": {"side": snap["side"]},

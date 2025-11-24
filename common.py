@@ -35,6 +35,9 @@ class AppConfig:
 
     # Logging verbosity level: "DEBUG", "INFO", "WARNING", etc.
     LOG_LEVEL: Optional[str] = "INFO"
+    LOG_FILE_PATH: Optional[str] = None
+    LOG_TO_FILE: Optional[bool] = False
+    LOG_TO_STDOUT: Optional[bool] = True
 
     # How many seconds of prices to backfill on startup.
     PRICE_BACKFILL_WINDOW_SEC: Optional[int] = None
@@ -55,6 +58,7 @@ class AppConfig:
     # Enable or disable Telegram integration.
     TELEGRAM_ENABLED: Optional[bool] = False
     CONSOLE_ENABLED: Optional[bool] = False
+    CONSOLE_MODE: Optional[str] = "prompt"   # prompt|curses
 
     # Telegram bot token.
     TELEGRAM_TOKEN: Optional[str] = None

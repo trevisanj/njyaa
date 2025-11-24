@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from common import Clock, pct_of, leg_pnl
-import enghelpers as eh
 import math
 
 
@@ -87,7 +86,7 @@ def build_risk_report(eng, thresholds: RiskThresholds = default_thresholds) -> R
         for lg in eng.store.get_legs(r["position_id"]):
             if lg["symbol"]:
                 involved_syms.add(lg["symbol"])
-    marks: Dict[str, Optional[float]] = {s: eh.last_cached_price(eng, s) for s in involved_syms}
+    marks: Dict[str, Optional[float]] = {s: eng.kc.last_cached_price(s) for s in involved_syms}
 
     positions: List[PositionRiskReport] = []
     total_exposure = 0.0

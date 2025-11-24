@@ -28,7 +28,7 @@ def main():
     acquire_singleton_lock()
     cfg = make_cfg()
 
-    mode = 4
+    mode = 0
 
     match mode:
         case 0:  # console only
