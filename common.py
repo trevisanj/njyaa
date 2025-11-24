@@ -307,14 +307,14 @@ def leg_pnl(entry: Optional[float], qty: Optional[float], mark: Optional[float])
     return (float(mark) - float(entry)) * float(qty)
 
 
-def fmt_pair(num: str, den: str | None) -> str:
+def fmt_pair(num: str, den: str | None, printer_friendly: bool = True) -> str:
     """Human-friendly pair string for display."""
     assert num
-    if den:
-        if num.endswith("USDT") and den.endswith("USDT"):
-            return f"{num.removesuffix('USDT')}/{den.removesuffix('USDT')}"
-        return f"{num}/{den}"
-    return num
+    if not den:
+        return num
+    if printer_friendly and num.endswith("USDT") and den.endswith("USDT"):
+        return f"{num.removesuffix('USDT')}/{den.removesuffix('USDT')}"
+    return f"{num}/{den}"
 
 
 # ---- tiny TF helpers ----

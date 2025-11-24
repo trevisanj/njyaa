@@ -14,16 +14,65 @@ import threading, time
 from typing import Callable, Dict
 from klines_cache import KlinesCache
 import tempfile, os, io
+from dataclasses import dataclass
 
 if False:
     from commands import CommandRegistry
 
-__all__ = ["MarketCatalog", "PricePoint", "PriceOracle", "PositionBook", "Reconciler", "Reporter", "Worker",
+__all__ = ["MarketCatalog", "PricePoint", "PriceOracle", "PositionBook", "Reconciler", "Reporter", "Worker", "Position",
 ]
 
 # =======================
 # == SYMBOL META/CATALOG
 # =======================
+
+
+@dataclass
+class Position:
+    position_id: int
+    num: str
+    den: Optional[str]
+    dir_sign: int
+    target_usd: float
+    risk: float
+    user_ts: Optional[int]
+    status: str
+    note: Optional[str]
+    created_ts: int
+    closed_ts: Optional[int] = None
+
+    @classmethod
+    def from_row(cls, row: Any) -> "Position":
+        return cls(
+            position_id=row["position_id"],
+            num=row["num"],
+            den=row["den"],
+            dir_sign=row["dir_sign"],
+            target_usd=row["target_usd"],
+            risk=row["risk"],
+            user_ts=row["user_ts"],
+            status=row["status"],
+            note=row["note"] if not isinstance(row, dict) else row.get("note"),
+            created_ts=row["created_ts"],
+            closed_ts=row["closed_ts"],
+        )
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def get_side(self) -> int:
+        return self.dir_sign
+
+    def get_pair(self, printer_friendly: bool = True) -> str:
+        return fmt_pair(self.num, self.den, printer_friendly=printer_friendly)
+
+    def is_open(self) -> bool:
+        return self.status == "OPEN"
+
+    @property
+    def id(self):
+        return self.position_id
+
 
 class MarketCatalog:
     def __init__(self, api: BinanceUM):

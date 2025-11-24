@@ -5,7 +5,7 @@ import json
 import threading
 import time
 from contextlib import contextmanager
-from typing import List, Optional
+from typing import List, Optional, Any
 from common import Clock, log
 
 DEFAULT_CONFIG = {
@@ -290,8 +290,14 @@ class Storage:
                     raise
                 return int(r["position_id"])
 
-    def get_position(self, position_id: int) -> Optional[sqlite3.Row]:
-        return self.con.execute("SELECT * FROM positions WHERE position_id=?", (int(position_id),)).fetchone()
+    def get_position(self, position_id: int, fmt: str = "obj") -> Optional[Any]:
+        row = self.con.execute("SELECT * FROM positions WHERE position_id=?", (int(position_id),)).fetchone()
+        if row is None:
+            return None
+        if fmt == "row":
+            return row
+        from engclasses import Position  # lazy to avoid circular import at module load
+        return Position.from_row(row)
 
     def list_open_positions(self) -> List[sqlite3.Row]:
         return self.con.execute("SELECT * FROM positions WHERE status='OPEN'").fetchall()

@@ -14,6 +14,7 @@ import threading, time
 from typing import Callable, Dict
 import tempfile, os, io
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import mplfinance as mpf
 import pandas as pd
 import numpy as np
@@ -157,8 +158,8 @@ def render_indicator_chart_multi(eng: "BotEngine", thinker_id: int, position_id:
     min_ts = pos_start_ms
     max_ts = pos_end_ms
     for name in indicator_names:
-        df = eng.ih.range_by_ts(thinker_id, position_id, name, start_open_ts=pos_start_ms,
-                                end_open_ts=pos_end_ms, fmt="dataframe")
+        df = eng.ih.range_by_ts(thinker_id, position_id, name, start_open_ts=None,
+                                end_open_ts=None, fmt="dataframe")
         if df is None or df.empty:
             continue
         dfs.append((name, df))
@@ -173,17 +174,13 @@ def render_indicator_chart_multi(eng: "BotEngine", thinker_id: int, position_id:
     if price_df.empty:
         raise ValueError(f"No klines for {symbol} {timeframe}")
 
-    aps = []
+    fig, axlist = mpf.plot(price_df, type="candle", returnfig=True,
+                           title=f"{symbol} indicators ({', '.join(indicator_names)})", show_nontrading=True)
+    ax = axlist[0] if isinstance(axlist, (list, tuple)) else axlist
     for name, df in dfs:
-        aps.append(mpf.make_addplot(df["value"], scatter=True, markersize=20, marker="x", label=name))
-
-    fig, axlist = mpf.plot(
-        price_df,
-        type="candle",
-        addplot=aps,
-        returnfig=True,
-        title=f"{symbol} indicators ({', '.join(indicator_names)})",
-    )
+        x = mdates.date2num(df.index.to_pydatetime())
+        ax.scatter(x, df["value"], marker="x", s=20, label=name)
+    ax.legend()
     out_path = os.path.join(outdir, f"chart_ind_{thinker_id}_{position_id}_{symbol}_{timeframe}.png".replace("/", "-"))
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -208,9 +205,9 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
     positions = []
     missing_positions = []
     for pid in position_ids:
-        row = eng.store.get_position(pid)
-        if row:
-            positions.append(row)
+        position = eng.store.get_position(pid)
+        if position:
+            positions.append(position)
         else:
             missing_positions.append(pid)
     if not positions:
@@ -222,19 +219,16 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
     close_bounds: list[int] = []
     for p in positions:
         pid = int(p["position_id"])
-        num = str(p["num"])
-        den = p["den"]
-        open_ms = int(p["user_ts"] or p["created_ts"])
         closed_raw = p["closed_ts"] if "closed_ts" in p.keys() else None
         closed_ms = int(closed_raw) if closed_raw is not None else None
-        open_bounds.append(open_ms)
+        open_bounds.append(p.user_ts)
         close_bounds.append(closed_ms or now_ms)
-        lbl = f"{pid} {fmt_pair(num, den)}"
+        lbl = f"{pid} {p.get_pair()}"
         pos_meta[pid] = {
             "label": lbl,
-            "num": num,
-            "den": den,
-            "open_ms": open_ms,
+            "num": p.num,
+            "den": p.den,
+            "open_ms": p.user_ts,
             "closed_ms": closed_ms,
             "status": p["status"],
         }

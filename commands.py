@@ -768,7 +768,9 @@ def build_registry() -> CommandRegistry:
         pos = eng.store.get_position(pid)
         if not pos:
             return _err("position not found")
-        sym = pos["num"]
+        num = pos["num"]
+        den = pos["den"]
+        sym = f"{num}/{den}" if den else num
 
         try:
             inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
@@ -804,7 +806,9 @@ def build_registry() -> CommandRegistry:
         pos = eng.store.get_position(pid)
         if not pos:
             return _err("position not found")
-        sym = pos["num"]
+        num = pos["num"]
+        den = pos["den"]
+        sym = f"{num}/{den}" if den else num
 
         try:
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")

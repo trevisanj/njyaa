@@ -6,7 +6,21 @@ import numpy as np
 import pandas as pd
 
 
-class PSARIndicator:
+
+class BaseIndicator:
+    """Minimal base for indicator steppers."""
+
+    @classmethod
+    def default_cfg(cls, *, position=None) -> dict:
+        return {}
+
+    @classmethod
+    def lookback_bars(cls, cfg: dict) -> int:
+        return 1
+
+
+
+class PSARIndicator(BaseIndicator):
     """Parabolic SAR indicator with configurable initial trend."""
 
     @classmethod
@@ -14,8 +28,12 @@ class PSARIndicator:
         return 5
 
     @classmethod
-    def default_cfg(cls) -> dict:
-        return {"af": 0.02, "max_af": 0.2, "initial_trend": "UP"}
+    def default_cfg(cls, *, position=None) -> dict:
+        side = None
+        if position and isinstance(position, dict):
+            side = position.get("side")
+        trend = "UP" if side == "LONG" else ("DOWN" if side == "SHORT" else "UP")
+        return {"af": 0.02, "max_af": 0.2, "initial_trend": trend}
 
     @classmethod
     def run(cls, df: pd.DataFrame, state: Optional[dict], cfg: dict, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
@@ -28,8 +46,6 @@ class PSARIndicator:
         if start_idx >= len(df):
             return state or {}, {"value": np.full(len(df), np.nan)}
 
-        base_cfg = cls.default_cfg()
-        cfg = {**base_cfg, **(cfg or {})}
         af0 = cfg["af"]
         afmax = cfg["max_af"]
         init_up = True if str(cfg["initial_trend"]).upper() == "UP" else False
@@ -44,6 +60,10 @@ class PSARIndicator:
         ep_arr = np.full(n_total, np.nan, dtype=float)
         af_arr = np.full(n_total, np.nan, dtype=float)
         trend_arr = np.full(n_total, None, dtype=object)
+
+        stopped = False
+        stop_val: Optional[float] = None
+        stopped_count = int(state.get("stopped_count", 0)) if state else 0
 
         if state is None:
             if start_idx != 0:
@@ -62,8 +82,26 @@ class PSARIndicator:
             psar = float(state["psar"])
             ep = float(state["ep"])
             af = float(state["af"])
-            up = True if state["trend"] == "UP" else False
+            trend = state.get("trend")
+            stopped = bool(state.get("stopped", False)) or trend == "STOPPED"
+            up = True if trend == "UP" else False
+            stop_val = psar if stopped else None
+            stopped_count = int(state.get("stopped_count", 0))
             idx = max(start_idx, 0)
+
+        if stopped and stop_val is not None:
+            for i in range(idx, n_total):
+                val_arr[i] = stop_val
+                ep_arr[i] = ep
+                af_arr[i] = af
+                trend_arr[i] = "STOPPED"
+            stopped_count += max(0, n_total - idx)
+            return {"psar": stop_val, "ep": ep, "af": af, "trend": "STOPPED", "stopped": True, "stopped_count": stopped_count}, {
+                "value": val_arr,
+                "ep": ep_arr,
+                "af": af_arr,
+                "trend": trend_arr,
+            }
 
         for i in range(idx, n_total):
             o, h, l, c = o_arr[i], h_arr[i], l_arr[i], c_arr[i]
@@ -85,10 +123,8 @@ class PSARIndicator:
 
             if up:
                 if l < psar:
-                    up = False
-                    psar = prev_ep
-                    ep = l
-                    af = af0
+                    stop_val = psar
+                    stopped = True
                 else:
                     if h > prev_ep:
                         ep = h
@@ -97,10 +133,8 @@ class PSARIndicator:
                         ep = prev_ep
             else:
                 if h > psar:
-                    up = True
-                    psar = prev_ep
-                    ep = h
-                    af = af0
+                    stop_val = psar
+                    stopped = True
                 else:
                     if l < prev_ep:
                         ep = l
@@ -113,21 +147,31 @@ class PSARIndicator:
             af_arr[i] = af
             trend_arr[i] = "UP" if up else "DOWN"
 
-        new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("UP" if up else "DOWN")}
+            if stopped and stop_val is not None:
+                stopped_count += (n_total - i)
+                for j in range(i, n_total):
+                    val_arr[j] = stop_val
+                    ep_arr[j] = ep
+                    af_arr[j] = af
+                    trend_arr[j] = "STOPPED"
+                psar = stop_val
+                up = prev_up
+                break
+
+        new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("STOPPED" if stopped else ("UP" if up else "DOWN")), "stopped": stopped, "stopped_count": stopped_count}
         outputs = {"value": val_arr, "ep": ep_arr, "af": af_arr, "trend": trend_arr}
         return new_state, outputs
 
 
-class ATRIndicator:
+class ATRIndicator(BaseIndicator):
     """Wilder ATR indicator."""
 
     @classmethod
     def lookback_bars(cls, cfg: dict) -> int:
-        period = int(cfg.get("period", 14))
-        return max(period + 1, 2)
+        return max(cfg["period"] + 1, 2)
 
     @classmethod
-    def default_cfg(cls) -> dict:
+    def default_cfg(cls, *, position=None) -> dict:
         return {"period": 14}
 
     @classmethod
@@ -190,6 +234,8 @@ INDICATOR_DISPATCH = {
     "atr": ATRIndicator,
 }
 
+def ind_name_to_cls(name):
+    return INDICATOR_DISPATCH[name]
 
 def run_indicator(name: str, bars: pd.DataFrame, cfg: dict, state: Optional[dict], start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
     cls = INDICATOR_DISPATCH.get(name)

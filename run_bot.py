@@ -27,6 +27,7 @@ def acquire_singleton_lock():
 def main():
     acquire_singleton_lock()
     cfg = make_cfg()
+    inject_cmd = "?chart-ind 4 3" # os.getenv("NJYAA_INJECT_CMD")
 
     mode = 0
 
@@ -54,7 +55,7 @@ def main():
             raise ValueError(f"Invalid mode: {mode}")
 
     eng = BotEngine(cfg)
-    eng.run()
+    eng.run(inject_command=inject_cmd)
 
 if __name__ == "__main__":
     main()

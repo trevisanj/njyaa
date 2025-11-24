@@ -682,7 +682,7 @@ class BotEngine:
 
         self._print_threads_until_clear()
 
-    def run(self):
+    def run(self, inject_command: Optional[str] = None):
         """
         Convenience entrypoint:
           - start engine (worker, scheduler, telegram)
@@ -720,6 +720,11 @@ class BotEngine:
                 log().info(
                     "BotEngine.run: no console; idle loop. Press Ctrl+C to exit."
                 )
+            if inject_command:
+                try:
+                    self.dispatch_command(inject_command, origin="console")
+                except Exception as e:
+                    log().exc(e, where="engine.inject_command", cmd=inject_command)
             while True:
                 try:
                     target, payload = self._send_queue.get(timeout=0.5)
