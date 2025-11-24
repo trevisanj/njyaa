@@ -51,6 +51,21 @@ class ThinkerManager:
         self.log = sublog("thinking")
         self.factory = ThinkerFactory(self, eng)
 
+    def get_in_carbonite(self, thinker_id: int, expected_kind=None) -> "ThinkerBase":
+        """Returns thinker frozen in carbonite (cannot be tick()'ed)
+
+        Args:
+            thinker_id:
+            expected_kind: if passed, will raise TypeError if thinker's type does not match expected_kind
+        """
+        tr = self.eng.store.get_thinker(thinker_id)
+        if expected_kind and tr["kind"] != expected_kind:
+            raise TypeError(f"Thinker #{thinker_id} is a {tr['kind']} (expected {expected_kind})")
+        inst = self.factory.create(tr["kind"])
+        inst._init_from_row(tr)
+        inst._in_carbonite = True
+        return inst
+
     # --- load/instantiate
     # TODO what when thinkers are activated/deactivated/deleted when the system is running?
     def _load(self) -> List[sqlite3.Row]:
@@ -93,7 +108,7 @@ class ThinkerManager:
             tid = int(tr["id"])
             inst = self._instances[tid]
             try:
-                result = inst.tick(now)
+                result = inst.on_tick(now)
                 if result is not None:
                     self.log_event(tid, "INFO", "thinker.result", result=str(result), thinker_id=tid, kind=tr["kind"])
                 n_ok += 1
@@ -171,6 +186,7 @@ class ThinkerBase(ABC):
         self._cfg: Dict[str, Any] = {}
         self._runtime: Dict[str, Any] = {}
         self._thinker_id: Optional[int] = None
+        self._in_carbonite = False
 
     def _set_def_cfg(self, cfg: Dict[str, Any]) -> None:
         assert isinstance(cfg, dict)
@@ -193,6 +209,10 @@ class ThinkerBase(ABC):
     def save_runtime(self):
         assert self._thinker_id is not None
         self.eng.store.update_thinker_runtime(self._thinker_id, self._runtime)
+
+    def save_config(self):
+        assert self._thinker_id is not None
+        self.eng.store.update_thinker_config(self._thinker_id, self._cfg)
 
     def notify(self, level: str, msg: str, send=False, **kwargs) -> None:
         self.tm.log_event(self._thinker_id, level, msg, **kwargs)
@@ -223,5 +243,11 @@ class ThinkerBase(ABC):
             return cfg_dict
         return dict(cfg)
 
+    def tick(self, now_ms: int):
+        if self._in_carbonite:
+            raise RuntimeError(f"This {self.__class__.__name__} is frozen in carbonite")
+        return self.on_tick(now_ms)
+
+
     @abstractmethod
-    def tick(self, now_ms: int): ...
+    def on_tick(self, now_ms: int): ...

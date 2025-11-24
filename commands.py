@@ -546,32 +546,6 @@ def build_registry() -> CommandRegistry:
         comps.append(OCTable(headers=headers, rows=rows))
         return CO(comps)
 
-    def _trailing_runtime(eng: BotEngine, tid: Optional[int] = None) -> Tuple[int, dict]:
-        if tid is not None and tid > 0:
-            row = eng.store.get_thinker(tid)
-            if not row:
-                raise RuntimeError(f"Thinker {tid} not found")
-            if str(row["kind"]).upper() != "TRAILING_STOP":
-                raise RuntimeError(f"Thinker {tid} is {row['kind']}, expected TRAILING_STOP")
-            rows = [row]
-        else:
-            rows = [r for r in eng.store.list_thinkers() if r["kind"] == "TRAILING_STOP"]
-        if not rows:
-            raise RuntimeError("No TRAILING_STOP thinker found")
-        tid = int(rows[0]["id"])
-        try:
-            rt = json.loads(rows[0]["runtime_json"] or "{}")
-        except Exception:
-            rt = {}
-        if "positions" not in rt:
-            rt["positions"] = {}
-        return tid, rt
-
-    def _save_trailing_runtime(eng: BotEngine, tid: int, rt: dict):
-        eng.store.update_thinker_runtime(tid, rt)
-        inst = eng.tm._instances.get(tid) if hasattr(eng.tm, "_instances") else None
-        if inst and hasattr(inst, "_runtime"):
-            inst._runtime = rt
 
     def _thinker_kind_info(eng: BotEngine) -> List[Dict[str, Any]]:
         infos: List[Dict[str, Any]] = []
@@ -695,35 +669,35 @@ def build_registry() -> CommandRegistry:
             policies = [{"policy": "psar_lock", "indicator": "psar", "indicator_cfg": {"af": 0.02, "max_af": 0.2}}]
         at_ms = Clock.now_utc_ms()
         if at_opt:
-            rel = parse_when(at_opt)
-            if rel is not None:
-                at_ms = Clock.now_utc_ms() + rel
-            else:
-                try:
-                    at_ms = Clock.from_local_iso_to_utc_ms(at_opt)
-                except Exception as e:
-                    return _err(f"Bad at: {e}")
+            try:
+                at_ms = parse_when(at_opt)
+            except Exception as e:
+                return _err(f"Bad at: {e}")
         try:
-            tid, rt = _trailing_runtime(eng, thinker_id)
+            inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
         except Exception as e:
             return _err(str(e))
-        if "positions" not in rt:
-            rt["positions"] = {}
+        rt = inst.runtime()
+        cfg = inst._cfg
+        rt.setdefault("positions", {})
         rt["positions"][str(pid)] = {
             "policies": policies,
             "lookback_bars": lookback,
             "attached_at_ms": at_ms,
+            "timeframe": cfg.get("timeframe"),
         }
-        _save_trailing_runtime(eng, tid, rt)
-        return _txt(f"Attached exit policies to position {pid} ({len(policies)} policy) via thinker {tid} at {at_ms}")
+        inst.save_runtime()
+        return _txt(f"Attached exit policies to position {pid} ({len(policies)} policy) via thinker {thinker_id} at {at_ms}")
 
-    @R.at("exit-list")
+    @R.at("exit-list", argspec=["thinker_id"], nreq=1)
     def _at_exit_list(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List exit/trailing attachments."""
+        thinker_id = int(args["thinker_id"])
         try:
-            tid, rt = _trailing_runtime(eng)
+            inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
         except Exception as e:
             return _err(str(e))
+        rt = inst.runtime()
         positions = rt.get("positions") or {}
         if not positions:
             return _txt("No attachments.")
@@ -735,28 +709,35 @@ def build_registry() -> CommandRegistry:
                 ctx.get("lookback_bars"),
                 ts_human(ctx.get("attached_at_ms")),
             ])
-        return _tbl(["position_id", "policies", "lookback", "attached_at"], tbl_rows, intro=f"Exit attachments (thinker {tid})")
+        return _tbl(["position_id", "policies", "lookback", "attached_at"], tbl_rows, intro=f"Exit attachments (thinker {thinker_id})")
 
-    @R.bang("exit-detach", argspec=["position_id"], nreq=1)
+    @R.bang("exit-detach", argspec=["thinker_id", "position_id"], nreq=2)
     def _bang_exit_detach(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Remove trailing/exit attachment for a position."""
+        tid = int(args["thinker_id"])
         pid = int(args["position_id"])
         try:
-            tid, rt = _trailing_runtime(eng)
+            inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         except Exception as e:
             return _err(str(e))
-        removed = rt.get("positions", {}).pop(str(pid), None)
-        _save_trailing_runtime(eng, tid, rt)
+        rt = inst.runtime()
+        positions = rt.setdefault("positions", {})
+        if str(pid) not in positions:
+            raise ValueError(f"Position {pid} not attached to thinker {tid}")
+        removed = positions.pop(str(pid), None)
+        inst.save_runtime()
         return _txt(f"Detached exit policies from position {pid}" + ("" if removed else " (none existed)"))
 
-    @R.at("exit-state", argspec=["position_id"], nreq=1)
+    @R.at("exit-state", argspec=["thinker_id", "position_id"], nreq=2)
     def _at_exit_state(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Show trailing stop state for a position."""
+        tid = int(args["thinker_id"])
         pid = int(args["position_id"])
         try:
-            _tid, rt = _trailing_runtime(eng)
+            inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         except Exception as e:
             return _err(str(e))
+        rt = inst.runtime()
         ctx = (rt.get("positions") or {}).get(str(pid))
         if not ctx:
             return _txt("No trailing state.")
@@ -771,12 +752,11 @@ def build_registry() -> CommandRegistry:
             ])
         return _tbl(["policy", "stop", "ts", "meta"], table_rows, intro=f"Trailing state for {pid}")
 
-    @R.at("chart-exit", argspec=["thinker_id", "position_id"], options=["timeframe", "n"], nreq=2)
+    @R.at("chart-exit", argspec=["thinker_id", "position_id"], options=["n"], nreq=2)
     def _at_chart_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Plot recorded exit/indicator history against price for a position."""
         thinker_id = int(args["thinker_id"])
         pid = int(args["position_id"])
-        tf = args.get("timeframe", "1d")
         n = int(args.get("n", 300))
 
         pos = eng.store.get_position(pid)
@@ -785,9 +765,13 @@ def build_registry() -> CommandRegistry:
         sym = pos["num"]
 
         try:
-            thinker_id, _ = _trailing_runtime(eng, thinker_id)
+            inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
         except Exception as e:
             return _err(str(e))
+        rt = inst.runtime()
+        cfg = inst._cfg
+        ctx = (rt.get("positions") or {}).get(str(pid)) or {}
+        tf = ctx.get("timeframe") or cfg.get("timeframe") or "1d"
         try:
             path = eh.render_indicator_history_chart(eng, thinker_id, pid, "psar", sym, timeframe=tf, n=n)
         except Exception as e:
@@ -1070,11 +1054,11 @@ def build_registry() -> CommandRegistry:
             return "\n".join([
                 header,
                 "",
-                "```",
+                "```json",
                 cfg,
                 "```",
                 "",
-                "```",
+                "```json",
                 rt,
                 "```",
             ])

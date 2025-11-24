@@ -13,7 +13,7 @@ from prompt_toolkit.styles import Style
 # ====================================================
 # CONFIG
 # ====================================================
-FILE_PATH = Path("STUPID_TEXT.txt")
+FILE_PATH = Path("SAMPLE.txt")
 SCROLLBAR_HEIGHT = 20   # symbolic scrollbar height
 
 

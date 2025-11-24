@@ -153,7 +153,7 @@ def render_ratio_chart(eng: BotEngine, pair_or_symbol: str, timeframe: str, n: i
 
 
 def render_indicator_history_chart(eng: "BotEngine", thinker_id: int, position_id: int, indicator_name: str, symbol: str,
-                                   timeframe: str = "1m", n: int = 300, outdir: str = "/tmp") -> str:
+                                   timeframe: str = "1d", n: int = 300, outdir: str = "/tmp") -> str:
     """Overlay price closes with recorded indicator history."""
     rows = eng.kc.last_n(symbol, timeframe, n=n, include_live=True, asc=True)
     if not rows:

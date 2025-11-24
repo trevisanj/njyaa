@@ -354,11 +354,11 @@ class KlinesCache:
             SELECT {select_cols}
             FROM klines
             WHERE symbol=? AND timeframe=? {live_clause}
-            ORDER BY open_ts DESC
+            ORDER BY open_ts {'ASC' if asc else 'DESC'}
             LIMIT ?
         """
         rows = self.con.execute(q, (symbol, timeframe, n)).fetchall()
-        if asc:
+        if not asc:
             rows = list(reversed(rows))
         return _rows_to_columnar(rows, cols)
 
@@ -370,6 +370,7 @@ class KlinesCache:
         end_open_ts: int,
         columns: Optional[List[str]] = None,
         include_live: bool = True,
+        asc: bool = True,
     ) -> Dict[str, List[Any]]:
         """
         Get klines in [start_open_ts, end_open_ts) by open timestamp (columnar).
@@ -381,7 +382,7 @@ class KlinesCache:
                 FROM klines
                 WHERE symbol=? AND timeframe=?
                   AND open_ts>=? AND open_ts<? {live_clause}
-                ORDER BY open_ts ASC"""
+                ORDER BY open_ts {'ASC' if asc else 'DESC'}"""
         rows = self.con.execute(q, (symbol, timeframe, start_open_ts, end_open_ts)).fetchall()
         return _rows_to_columnar(rows, cols)
 
@@ -393,6 +394,7 @@ class KlinesCache:
         end_close_ts: int,
         columns: Optional[List[str]] = None,
         include_live: bool = True,
+        asc: bool = True,
     ) -> Dict[str, List[Any]]:
         """
         Get klines whose close_ts falls in (start_close_ts, end_close_ts] (columnar).
@@ -404,7 +406,7 @@ class KlinesCache:
                 FROM klines
                 WHERE symbol=? AND timeframe=?
                   AND close_ts>? AND close_ts<=? {live_clause}
-                ORDER BY open_ts ASC"""
+                ORDER BY open_ts {'ASC' if asc else 'DESC'}"""
         rows = self.con.execute(q, (symbol, timeframe, start_close_ts, end_close_ts)).fetchall()
         return _rows_to_columnar(rows, cols)
 

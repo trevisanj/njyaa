@@ -2,9 +2,7 @@
 # FILE: indicator_history.py
 from __future__ import annotations
 import sqlite3, json, threading
-from typing import Iterable, List, Optional, Dict, Any
-
-INDICATOR_COLS_ALL = ["thinker_id", "position_id", "name", "ts_ms", "value", "price", "aux"]
+from typing import List, Optional, Dict
 
 
 class IndicatorHistory:
@@ -46,7 +44,6 @@ class IndicatorHistory:
         except Exception:
             pass
 
-    # ---------- writes ----------
     def insert_history(self, rows: List[dict]) -> int:
         """Bulk insert history rows."""
         if not rows:
@@ -75,10 +72,8 @@ class IndicatorHistory:
             self.con.commit()
             return cur.rowcount or 0
 
-    # ---------- reads ----------
-    def last_n(self, thinker_id: int, position_id: int, name: str, n: int = 200, asc: bool = False,
-               columns: Optional[List[str]] = None) -> Dict[str, list]:
-        """Return last N rows for (thinker,position,name) as columnar dict-of-lists."""
+    def last_n(self, thinker_id: int, position_id: int, name: str, n: int = 200, asc: bool = False) -> List[dict]:
+        """Return last N rows for (thinker,position,name)."""
         order = "ASC" if asc else "DESC"
         rows = self.con.execute(
             f"""
@@ -90,15 +85,24 @@ class IndicatorHistory:
             """,
             (int(thinker_id), int(position_id), name, int(n)),
         ).fetchall()
-        data = _rows_to_columnar(rows, columns)
-        if asc:
-            for key in data:
-                data[key].reverse()
-        return data
+        out = []
+        for r in rows:
+            try:
+                out.append({
+                    "thinker_id": int(r["thinker_id"]),
+                    "position_id": int(r["position_id"]),
+                    "name": r["name"],
+                    "ts_ms": int(r["ts_ms"]),
+                    "value": r["value"],
+                    "price": r["price"],
+                    "aux": json.loads(r["aux_json"]) if r["aux_json"] else {},
+                })
+            except Exception:
+                continue
+        return list(reversed(out)) if asc else out
 
-    def list_history(self, thinker_id: int, position_id: int, name: str, since_ms: Optional[int] = None, limit: int = 500,
-                     columns: Optional[List[str]] = None) -> Dict[str, list]:
-        """Return history rows ascending as columnar dict-of-lists."""
+    def list_history(self, thinker_id: int, position_id: int, name: str, since_ms: Optional[int] = None, limit: int = 500) -> List[dict]:
+        """Return history rows ascending."""
         q = """
             SELECT thinker_id,position_id,name,ts_ms,value,price,aux_json
             FROM indicator_history
@@ -111,11 +115,24 @@ class IndicatorHistory:
         q += " ORDER BY ts_ms ASC LIMIT ?"
         params.append(int(limit))
         rows = self.con.execute(q, params).fetchall()
-        return _rows_to_columnar(rows, columns)
+        out: List[dict] = []
+        for r in rows:
+            try:
+                out.append({
+                    "thinker_id": int(r["thinker_id"]),
+                    "position_id": int(r["position_id"]),
+                    "name": r["name"],
+                    "ts_ms": int(r["ts_ms"]),
+                    "value": r["value"],
+                    "price": r["price"],
+                    "aux": json.loads(r["aux_json"]) if r["aux_json"] else {},
+                })
+            except Exception:
+                continue
+        return out
 
-    def range_by_ts(self, thinker_id: int, position_id: int, name: str, start_ts: int, end_ts: int, limit: int = 5000,
-                    columns: Optional[List[str]] = None) -> Dict[str, list]:
-        """Return rows in [start_ts, end_ts] ascending as columnar dict-of-lists."""
+    def range_by_ts(self, thinker_id: int, position_id: int, name: str, start_ts: int, end_ts: int, limit: int = 5000) -> List[dict]:
+        """Return rows in [start_ts, end_ts] ascending."""
         rows = self.con.execute(
             """
             SELECT thinker_id,position_id,name,ts_ms,value,price,aux_json
@@ -126,9 +143,22 @@ class IndicatorHistory:
             """,
             (int(thinker_id), int(position_id), name, int(start_ts), int(end_ts), int(limit)),
         ).fetchall()
-        return _rows_to_columnar(rows, columns)
+        out = []
+        for r in rows:
+            try:
+                out.append({
+                    "thinker_id": int(r["thinker_id"]),
+                    "position_id": int(r["position_id"]),
+                    "name": r["name"],
+                    "ts_ms": int(r["ts_ms"]),
+                    "value": r["value"],
+                    "price": r["price"],
+                    "aux": json.loads(r["aux_json"]) if r["aux_json"] else {},
+                })
+            except Exception:
+                continue
+        return out
 
-    # ---------- deletes ----------
     def delete_by_position(self, position_id: int) -> int:
         with self._lock:
             cur = self.con.cursor()
@@ -142,27 +172,3 @@ class IndicatorHistory:
             cur.execute("DELETE FROM indicator_history WHERE thinker_id=?", (int(thinker_id),))
             self.con.commit()
             return cur.rowcount or 0
-
-
-def _rows_to_columnar(rows: Iterable[sqlite3.Row], columns: Optional[List[str]]) -> Dict[str, list]:
-    """
-    Convert DB rows -> columnar dict-of-lists (subset selectable).
-    """
-    cols = {k: [] for k in (columns or INDICATOR_COLS_ALL)}
-    rows = list(rows)
-    if not rows:
-        return cols
-    want_aux = "aux" in cols
-    for r in rows:
-        if "thinker_id" in cols: cols["thinker_id"].append(int(r["thinker_id"]))
-        if "position_id" in cols: cols["position_id"].append(int(r["position_id"]))
-        if "name" in cols: cols["name"].append(r["name"])
-        if "ts_ms" in cols: cols["ts_ms"].append(int(r["ts_ms"]))
-        if "value" in cols: cols["value"].append(r["value"])
-        if "price" in cols: cols["price"].append(r["price"])
-        if want_aux: cols["aux"].append(json.loads(r["aux_json"]) if r["aux_json"] else {})
-
-    # sanity lengths
-    lengths = {len(v) for v in cols.values()}
-    assert len(lengths) <= 1, "columnar indicator_history lengths misalign"
-    return cols

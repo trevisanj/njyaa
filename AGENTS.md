@@ -25,6 +25,7 @@
   phrasing; favor single sources of truth and concise code/comments. Two sources of truth means two chances to forget and break things.
 - When a function returns a non-trivial structure, build it once and return from a single exit point. Initialize defaults up front, mutate fields as
   needed, and avoid multiple return statements for different branches so the shape stays consistent and easier to inspect.
+- Do not create helper wrappers around existing methods just to tweak or fallback; call the underlying API directly and use the returned instance/config/runtime as-is.
 - Use `log()` for structured logging with context keys (`position_id`, `symbol`, `job`).
 - Register new commands via `CommandRegistry.at` (read-only) or `CommandRegistry.bang` (writes) and keep docstrings concise for auto-help.
 - Prefer explicit errors over silent fallbacks; fail fast on missing config or schema.

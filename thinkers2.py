@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CH
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
-from common import log, Clock, AppConfig, leg_pnl
+from common import log, Clock, AppConfig, leg_pnl, tf_ms
 from thinkers1 import ThinkerBase
 import enghelpers as eh
 import risk_report
@@ -17,7 +17,6 @@ from indicator_engines import run_indicator
 from trailing_policies import evaluate_policy
 from klines_cache import rows_to_dataframe
 import pandas as pd
-from klines_cache import rows_to_dataframe
 import pandas as pd
 import numpy as np
 
@@ -55,7 +54,7 @@ class ThresholdAlertThinker(ThinkerBase):
         self._cfg["direction"] = d
         self._cfg["price"] = float(self._cfg["price"])
 
-    def tick(self, now_ms: int) -> Any:
+    def on_tick(self, now_ms: int) -> Any:
         sym = self._cfg["symbol"]
         pr = _mark_close_now(self.eng, sym)
         if pr is None:
@@ -109,7 +108,7 @@ class RiskThinker(ThinkerBase):
     def _on_init(self) -> None:
         pass
 
-    def tick(self, now_ms: int):
+    def on_tick(self, now_ms: int):
         thresholds = risk_report.RiskThresholds(
             warn_exposure_ratio=self._cfg["warn_exposure_ratio"],
             warn_loss_mult=self._cfg["warn_loss_mult"],
@@ -178,9 +177,10 @@ class TrailingStopThinker(ThinkerBase):
     def _on_init(self) -> None:
         self._runtime.setdefault("positions", {})
 
-    def _fetch_bars(self, symbol: str, n: int) -> pd.DataFrame:
-        rows = self.eng.kc.last_n(symbol, self._cfg["timeframe"], n=n, include_live=True, asc=True)
-        return rows_to_dataframe(rows) if rows else rows_to_dataframe([])
+    def _fetch_bars(self, symbol: str, start_ts: int, end_ts: int) -> pd.DataFrame:
+        kc = self.eng.kc
+        rows = kc.range_by_open(symbol, self._cfg["timeframe"], start_ts, end_ts, include_live=True, asc=True)
+        return rows_to_dataframe(rows)
 
     def _indicator_configs(self, policies: List[dict]) -> Dict[str, dict]:
         cfgs: Dict[str, dict] = {}
@@ -230,16 +230,18 @@ class TrailingStopThinker(ThinkerBase):
     def _positions_ctx(self) -> Dict[str, dict]:
         return self._runtime.setdefault("positions", {})
 
-    def _pair_bars(self, num: str, den: Optional[str], n: int) -> pd.DataFrame:
+
+    def _pair_bars(self, num: str, den: Optional[str], start_ts: int, end_ts: int) -> pd.DataFrame:
         """
         Return OHLC dataframe for num[/den], aligned on open_ts.
+
         For ratios, divide num o/h/l/c by den o/h/l/c; volume ignored for now.
         """
         if not den:
-            return self._fetch_bars(num, n)
+            return self._fetch_bars(num, start_ts, end_ts)
         kc = self.eng.kc
-        num_df = rows_to_dataframe(kc.last_n(num, self._cfg["timeframe"], n=n, include_live=True, asc=True))
-        den_df = rows_to_dataframe(kc.last_n(den, self._cfg["timeframe"], n=n, include_live=True, asc=True))
+        num_df = rows_to_dataframe(kc.range_by_open(num, self._cfg["timeframe"], start_ts, end_ts, include_live=True, asc=True) or [])
+        den_df = rows_to_dataframe(kc.range_by_open(den, self._cfg["timeframe"], start_ts, end_ts, include_live=True, asc=True) or [])
         if num_df.empty or den_df.empty:
             return rows_to_dataframe([])
         num_df, den_df = num_df.align(den_df, join="inner")
@@ -251,11 +253,9 @@ class TrailingStopThinker(ThinkerBase):
         out["Low"] = num_df["Low"] / den_df["Low"]
         out["Close"] = num_df["Close"] / den_df["Close"]
         out["Volume"] = num_df["Volume"]
-        if len(out) > n:
-            out = out.iloc[-n:]
         return out
 
-    def tick(self, now_ms: int):
+    def on_tick(self, now_ms: int):
         positions_ctx = self._positions_ctx()
         if not positions_ctx:
             return 0
@@ -286,9 +286,12 @@ class TrailingStopThinker(ThinkerBase):
             ind_cfgs = self._indicator_configs(policies)
 
             need_n = max(int(ctx.get("lookback_bars", 200)), 5)
-            bars = self._pair_bars(symbol, den, need_n)
+            tfms = tf_ms(self._cfg["timeframe"])
+            anchor_ts = ctx.get("last_ts") or ctx.get("attached_at_ms") or now_ms
+            start_ts = max(0, int(anchor_ts) - need_n * tfms)
+            bars = self._pair_bars(symbol, den, start_ts, now_ms)
             if bars.empty or len(bars) < need_n:
-                self.notify("DEBUG", f"[trail] {symbol} missing klines {tf}", symbol=symbol)  # TODO regular logging instead of notify
+                self.notify("DEBUG", f"[trail] Missing klines {tf}, can't calculate stop", symbol=symbol, position_id=pid)  # TODO regular logging instead of notify
                 continue
 
             indicators: Dict[str, Dict[str, Any]] = {}
@@ -296,9 +299,14 @@ class TrailingStopThinker(ThinkerBase):
             ind_states = ctx.setdefault("indicators", {})
             ctx_last_ts = ctx.get("last_ts")
             start_idx = 0
-            if ctx_last_ts is not None:
-                dt = pd.to_datetime(int(ctx_last_ts), unit="ms")
+            attach_ts = ctx.get("attached_at_ms")
+            anchor_ts = ctx_last_ts if ctx_last_ts is not None else attach_ts
+            if anchor_ts is not None:
+                dt = pd.to_datetime(int(anchor_ts), unit="ms")
                 start_idx = int(bars.index.searchsorted(dt, side="right"))
+            if start_idx >= len(bars):
+                positions_ctx[pid_str] = ctx
+                continue
 
             last_ts_seen = ctx_last_ts
             for ind_name, cfg in ind_cfgs.items():
@@ -366,11 +374,12 @@ class TrailingStopThinker(ThinkerBase):
             prev_stop = prev_agg.get("stop")
 
             if agg is not None:
+                price = snap["last_price"]
                 hit = price <= agg if snap["side"] == "LONG" else price >= agg
                 meta = dict(prev_agg.get("meta") or {})
                 if _stop_improved(snap["side"], prev_stop, agg, min_move_bp):
                     self.notify("INFO", f"[trail] {symbol} stop -> {agg:.4f} ({snap['side']})", send=True,
-                                symbol=symbol, stop=agg, prev=prev_stop)
+                                symbol=symbol, stop=agg, prev=prev_stop, price=price)
                 if hit:
                     last_alert_ts = meta.get("last_alert_ts")
                     if not last_alert_ts or now_ms - int(last_alert_ts) >= self._cfg["alert_cooldown_ms"]:
@@ -443,7 +452,7 @@ class HorseWithNoName(ThinkerBase):
     def _on_init(self):
         self._cfg["prob"] = float(self._cfg["prob"])
 
-    def tick(self, now_ms: int):
+    def on_tick(self, now_ms: int):
         if random.random() < self._cfg["prob"]:
             line = random.choice(self.LYRICS)
 
