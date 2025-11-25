@@ -81,15 +81,15 @@ class IndicatorHistory:
         Bulk insert history rows from columnar sequences.
         v_aux can be None, or a sequence of dicts (json-dumped) or JSON strings.
         """
-        if not v_open_ts:
+        if len(v_open_ts) == 0:
             return 0
         n = len(v_open_ts)
         assert len(v_value) == n, "v_value length mismatch"
-        aux_seq = [{} for _ in range(n)] if v_aux is None else v_aux
+        aux_seq = [None for _ in range(n)] if v_aux is None else v_aux
         assert len(aux_seq) == n, "v_aux length mismatch"
         payload = []
         for ts, val, aux in zip(v_open_ts, v_value, aux_seq):
-            aux_json = aux if isinstance(aux, str) else json.dumps(aux or {}, ensure_ascii=False)
+            aux_json = aux if isinstance(aux, str) else json.dumps(aux, ensure_ascii=False) if aux is not None else None
             payload.append((int(thinker_id), int(position_id), name, int(ts), val, aux_json))
         with self._lock:
             cur = self.con.cursor()

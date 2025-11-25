@@ -284,6 +284,8 @@ class StopStrategy:
         self.pos = pos
         self.name = name
         self.inds: Dict[str, BaseIndicator] = {}
+        runtime.setdefault("cfg", {})
+        runtime.setdefault("states", {})
         self.cfg: dict = runtime["cfg"]
         self.history_rows: list[dict] = []
         self.setup()
@@ -362,6 +364,7 @@ class SSPSAR(StopStrategy):
         stopper = self.inds["stopper"]
         psar.state = self.runtime.get("states", {}).get("psar")
         stopper.state = self.runtime.get("states", {}).get("stopper")
+        prev_stop_val = self.runtime.get("last_stop_value")
 
         psar_out = psar.run(bars, start_idx=start_idx)
         stop_out = stopper.run(bars, psar_out["value"], start_idx=start_idx)
@@ -383,13 +386,22 @@ class SSPSAR(StopStrategy):
                 "aux": {"flag": stop_out.get("flag")[-1] if stop_out.get("flag") is not None else None},
             })
 
-        self.runtime["last_stop"] = stop_out.get("value") if stop_out else None
-        self.runtime["last_flag"] = stop_out.get("flag") if stop_out else None
+        last_stop_series = stop_out.get("value") if stop_out else None
+        last_flag_series = stop_out.get("flag") if stop_out else None
+        self.runtime["prev_stop_value"] = prev_stop_val
+        self.runtime["last_stop"] = last_stop_series
+        self.runtime["last_flag"] = last_flag_series
+        if last_stop_series is not None and len(last_stop_series) > 0:
+            self.runtime["last_stop_value"] = last_stop_series[-1]
+        if last_flag_series is not None and len(last_flag_series) > 0:
+            self.runtime["last_flag_value"] = last_flag_series[-1]
 
     def on_get_stop_info(self):
         return {
             "stop": self.runtime.get("last_stop"),
             "flag": self.runtime.get("last_flag"),
+            "stop_value": self.runtime.get("last_stop_value"),
+            "prev_stop_value": self.runtime.get("prev_stop_value"),
         }
 
 

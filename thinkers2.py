@@ -176,8 +176,7 @@ class TrailingStopThinker(ThinkerBase):
     def _on_init(self) -> None:
         self._runtime.setdefault("positions", {})
 
-
-    def _pair_bars_pair_bars(self, pos: ec.Position, start_ts: int, end_ts: Optional[int] = None) -> pd.DataFrame:
+    def _pair_bars(self, pos: ec.Position, start_ts: int, end_ts: Optional[int] = None) -> pd.DataFrame:
         """Returns OHLCV data for configured timeframe"""
         return self.eng.kc.pair_bars(pos.num, pos.den, self._cfg["timeframe"], start_ts, end_ts)
 
@@ -221,10 +220,11 @@ class TrailingStopThinker(ThinkerBase):
                 continue
 
             # ---------- run strategy ----------
-            self._sstrat.pos = pos
-            self._sstrat.runtime = sstrat_rt
-            self._sstrat.run(bars)
-            stop_info = self._sstrat.on_get_stop_info()
+            sstrat_rt = ctx.setdefault("sstrat", {})
+            sstrat_name = ctx.get("sstrat_name", "SSPSAR")
+            strat: StopStrategy = SSPSAR(self.eng, self, sstrat_rt, pos, sstrat_name)
+            strat.run(bars)
+            stop_info = strat.on_get_stop_info()
 
             stop_series = stop_info.get("stop") if stop_info else None
             if stop_series is None or len(stop_series) == 0 or np.all(np.isnan(stop_series)):
@@ -233,14 +233,15 @@ class TrailingStopThinker(ThinkerBase):
             price = bars["Close"].iloc[-1]
             hit = price <= latest_stop if pos.dir_sign > 0 else price >= latest_stop
 
-            if _stop_improved(pos.dir_sign, None, latest_stop, min_move_bp):
+            prev_stop_val = stop_info.get("prev_stop_value") if stop_info else None
+            if _stop_improved(pos.dir_sign, prev_stop_val, latest_stop, min_move_bp):
                 self.notify("INFO", f"[trail] {num_den} stop -> {latest_stop:.4f} ({'LONG' if pos.dir_sign>0 else 'SHORT'})", send=True,
-                            symbol=num_den, stop=latest_stop, prev=None, price=price)
+                            symbol=num_den, stop=latest_stop, prev=prev_stop_val, price=price)
             if hit:
                 self.notify("WARN", f"[trail] {num_den} stop hit @ {price:.4f} vs {latest_stop:.4f}", send=True,
                             symbol=num_den, stop=latest_stop, price=price)
 
-            ctx["last_ts"] = int(bars.index[-1].value // 1_000_000)
+            ctx["last_ts"] = sstrat_rt.get("last_ts", int(bars.index[-1].value // 1_000_000))
             pp_ctx[pid_str] = ctx
             processed += 1
             dirty = True
