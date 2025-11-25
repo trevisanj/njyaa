@@ -15,6 +15,7 @@ class BaseIndicator:
     def __init__(self, cfg: dict):
         self.cfg = cfg or {}
         self.state: Optional[dict] = None
+        self.outputs: Optional[Dict[str, np.ndarray]] = None
         self.on_init()
 
     @classmethod
@@ -35,6 +36,14 @@ class BaseIndicator:
         """Inherit to create new instance variables etc."""
         pass
 
+    def run(self, *args, **kwargs) -> Dict[str, np.ndarray]:
+        """Execute indicator, storing outputs for later inspection."""
+        self.outputs = self.on_run(*args, **kwargs)
+        return self.outputs
+
+    def on_run(self, *args, **kwargs) -> Dict[str, np.ndarray]:
+        raise NotImplementedError
+
 
 class PSARIndicator(BaseIndicator):
     """Parabolic SAR indicator with configurable initial trend."""
@@ -49,7 +58,7 @@ class PSARIndicator(BaseIndicator):
         trend = "UP" if position.side > 1 else "DOWN"
         return {"af": 0.02, "max_af": 0.2, "initial_trend": trend}
 
-    def run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
+    def on_run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
         """
         Compute PSAR; returns (new_state, outputs).
         outputs: {"value", "ep", "af", "trend"} aligned to df.index (NaNs where unchanged).
@@ -172,7 +181,7 @@ class ATRIndicator(BaseIndicator):
     def default_cfg(cls, *, position: ec.Position) -> dict:
         return {"period": 14}
 
-    def run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
+    def on_run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
         """
         Compute ATR; returns (new_state, outputs).
         outputs: {"value", "tr"} aligned to df.index (NaNs where unchanged).
@@ -244,7 +253,7 @@ class StopperIndicator(BaseIndicator):
     def on_init(self):
         self._stop_info = None
 
-    def run(self, df: pd.DataFrame, values: np.ndarray, start_idx: int = 0) -> Dict[str, np.ndarray]:
+    def on_run(self, df: pd.DataFrame, values: np.ndarray, start_idx: int = 0) -> Dict[str, np.ndarray]:
         if df is None or df.empty:
             raise ValueError("bars required")
         side = int(self.cfg.get("side") or 0)
