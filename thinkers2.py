@@ -12,7 +12,7 @@ from commands import OCMarkDown
 from common import log, Clock, AppConfig, leg_pnl, tf_ms, ts_human
 from thinkers1 import ThinkerBase
 import risk_report
-from indicator_engines import ind_name_to_cls, BaseIndicator
+from indicator_engines import StopStrategy, SSPSAR
 from trailing_policies import evaluate_policy
 import pandas as pd
 import numpy as np
@@ -176,59 +176,8 @@ class TrailingStopThinker(ThinkerBase):
     def _on_init(self) -> None:
         self._runtime.setdefault("positions", {})
 
-    def _indicator_configs(self, policies: List[dict], pos: ec.Position) -> Dict[str, dict]:
-        """Returns dict {indicator_name: cfg, ...}"""
-        cfgs = {policy["ind_name"]: self._policy_get_indicator_config(policy, pos) for policy in policies}
-        return cfgs
 
-    def _policy_get_indicator_config(self, policy, pos: ec.Position) -> Union[Dict[Any], None]:
-        """Returns indicator configuration Dict for a policy.
-
-        If Policy were a class, this would be one of its methods"""
-        ind_name = policy["ind_name"]
-        cfg = policy.get("ind_cfg")
-        if cfg is None:
-            # first time: we initialize
-            cls: BaseIndicator = ind_name_to_cls(ind_name)
-            cfg = cls.default_cfg(position=pos)
-        return cfg
-
-    def _indicator_history_rows(self, tid: int, pid: int, name: str, outputs: Dict[str, Any], bars: pd.DataFrame, start_idx: int) -> List[dict]:
-        rows = []
-        val_arr = outputs.get("value")
-        if val_arr is None:
-            return rows
-        idxs = np.where(~np.isnan(val_arr))[0]
-        for pos in idxs:
-            if pos < start_idx:
-                continue
-            open_ts = int(bars.index[pos].value // 1_000_000)
-            aux = {}
-            for k in ("ep", "af", "trend", "tr"):
-                arr = outputs.get(k)
-                if arr is not None and pos < len(arr):
-                    aux[k] = arr[pos]
-            rows.append({
-                "thinker_id": tid,
-                "position_id": pid,
-                "name": name,
-                "open_ts": open_ts,
-                "value": val_arr[pos],
-                "price": float(bars.iloc[pos]["Close"]),
-                "aux": aux,
-            })
-        return rows
-
-    def _position_snapshot(self, pos_row, price: float) -> Dict[str, Any]:
-        return {
-            "side": int(pos_row["dir_sign"]),
-            "last_price": price,
-            "position_id": int(pos_row["position_id"]),
-            "num": pos_row["num"],
-            "den": pos_row["den"],
-        }
-
-    def _pair_bars(self, pos: ec.Position, start_ts: int, end_ts: Optional[int] = None) -> pd.DataFrame:
+    def _pair_bars_pair_bars(self, pos: ec.Position, start_ts: int, end_ts: Optional[int] = None) -> pd.DataFrame:
         """Returns OHLCV data for configured timeframe"""
         return self.eng.kc.pair_bars(pos.num, pos.den, self._cfg["timeframe"], start_ts, end_ts)
 
@@ -261,10 +210,6 @@ class TrailingStopThinker(ThinkerBase):
                 dirty = True
                 continue
 
-            policies = ctx.get("policies") or []  # configured trailing policies
-
-            ind_cfgs = self._indicator_configs(policies, pos)  # indicator configs keyed by name
-
             # ---------- build kline window ----------
             need_n = max(int(ctx.get("lookback_bars", 200)), 5)  # minimum bars required
             tfms = tf_ms(self._cfg["timeframe"])  # timeframe in ms
@@ -275,132 +220,30 @@ class TrailingStopThinker(ThinkerBase):
                 log().debug(f"[trail] Missing klines {tf}, can't calculate stop", num_den=num_den, position_id=pos.id)
                 continue
 
-            # ---------- indicator calculation ----------
-            indicators: Dict[str, Dict[str, Any]] = {}
-            history_rows: List[dict] = []
-            ind_states = ctx.setdefault("indicators", {})  # persisted indicator states
-            ctx_last_ts = ctx.get("last_ts")  # last processed bar ts
-            start_idx = 0  # index to start processing
+            # ---------- run strategy ----------
+            self._sstrat.pos = pos
+            self._sstrat.runtime = sstrat_rt
+            self._sstrat.run(bars)
+            stop_info = self._sstrat.on_get_stop_info()
 
-            anchor_ts = ctx_last_ts if ctx_last_ts is not None else ctx["attached_at_ms"]
-            dt = pd.to_datetime(int(anchor_ts), unit="ms")
-            start_idx = int(bars.index.searchsorted(dt, side="right"))  # skip already processed bars
-            if start_idx >= len(bars):
-                self.notify("DEBUG", "trail.anchor_clamped", anchor_ts=anchor_ts, last_bar=int(bars.index[-1].value // 1_000_000), position_id=pos.id, symbol=num_den)
-                start_idx = len(bars) - 1
-            if start_idx >= len(bars):
-                pp_ctx[pid_str] = ctx
+            stop_series = stop_info.get("stop") if stop_info else None
+            if stop_series is None or len(stop_series) == 0 or np.all(np.isnan(stop_series)):
                 continue
+            latest_stop = stop_series[-1]
+            price = bars["Close"].iloc[-1]
+            hit = price <= latest_stop if pos.dir_sign > 0 else price >= latest_stop
 
-            # last_ts_seen = ctx_last_ts  # track most recent processed ts for this position
-            for ind_name, cfg in ind_cfgs.items():
-                st_info = ind_states.get(ind_name, {})  # prior indicator state bundle
-                st_payload = st_info.get("state")  # raw state passed to indicator
-                try:
-                    ns, outputs = run_indicator(ind_name, bars, cfg, st_payload, start_idx=start_idx)  # compute indicator outputs
-                except Exception as e:
-                    self.notify("WARN", f"[trail] indicator {ind_name} failed: {e}", symbol=pos.get_pair(), ind_name=ind_name)
-                    continue
-                val_arr = outputs.get("value")  # main indicator values array
-                # ts_val = last_ts_seen  # default timestamp if no value found
-                if val_arr is not None and np.any(~np.isnan(val_arr)):
-                    last_idx = int(np.nanmax(np.where(~np.isnan(val_arr), np.arange(len(val_arr)), -1)))  # last non-nan index
-                    # ts_val = int(bars.index[last_idx].value // 1_000_000)  # ms timestamp of that bar
-                ind_states[ind_name] = {"state": ns}  # stash updated state
-                history_rows.extend(self._indicator_history_rows(thinker_id, pos.id, ind_name, outputs, bars, start_idx))  # enqueue history rows
-                # latest value = last non-nan in value array
-                latest_val = None
-                if val_arr is not None and np.any(~np.isnan(val_arr)):
-                    latest_val = float(val_arr[~np.isnan(val_arr)][-1])
-                indicators[ind_name] = {"value": latest_val, "raw": ns, "open_ts": ts_val}  # cache latest value/state
-                # last_ts_seen = ts_val  # advance last seen ts
+            if _stop_improved(pos.dir_sign, None, latest_stop, min_move_bp):
+                self.notify("INFO", f"[trail] {num_den} stop -> {latest_stop:.4f} ({'LONG' if pos.dir_sign>0 else 'SHORT'})", send=True,
+                            symbol=num_den, stop=latest_stop, prev=None, price=price)
+            if hit:
+                self.notify("WARN", f"[trail] {num_den} stop hit @ {price:.4f} vs {latest_stop:.4f}", send=True,
+                            symbol=num_den, stop=latest_stop, price=price)
 
-            if history_rows:
-                self.eng.ih.insert_history(history_rows)  # persist indicator traces
-            history_rows = []
-
-            if not indicators or not policies:
-                # nothing to evaluate if no indicators or no policies
-                continue
-
-            # ---------- evaluate trailing policies ----------
-            snap_price = bars["Close"].iloc[-1]  # latest close price for this window
-            trailing = ctx.setdefault("trailing", {})  # per-policy trailing state
-            suggested: List[Dict[str, Any]] = []  # collect suggested stops
-            for p in policies:
-                pname = p.get("policy") or p.get("name")
-                assert pname, "policy name required"
-                ind_name = p.get("indicator") or pname
-                prev_stop = (trailing.get(pname) or {}).get("stop")
-                try:
-                    decision = evaluate_policy(
-                        pname,
-                        p,
-                        {"side": pos.dir_sign, "last_price": snap_price},
-                        indicators,
-                        prev_stop,
-                    )  # policy decision
-                except Exception as e:
-                    self.notify("WARN", f"[trail] policy failed: {e}", num_den=pos.get_pair(), policy_name=pname)
-                    continue
-                suggestion = decision.get("suggested_stop")
-                trailing[pname] = {"stop": suggestion, "meta": {"reason": decision.get("reason")}, "open_ts": now_ms}  # update per-policy state
-                history_rows.append({
-                    "thinker_id": thinker_id,
-                    "position_id": pos.id,
-                    "name": f"trail:{pname}",
-                    "open_ts": indicators.get(ind_name, {}).get("open_ts", now_ms),
-                    "value": suggestion,
-                    "price": snap_price,
-                    "aux": {"policy": pname, "source": ind_name},
-                })  # log policy output
-                if suggestion is not None:
-                    suggested.append({"policy": pname, "stop": suggestion})
-
-            if history_rows:
-                self.eng.ih.insert_history(history_rows)  # persist policy outputs
-
-            # ---------- aggregate across policies + alerting ----------
-            stops = [s["stop"] for s in suggested]
-            agg = _agg_stop(pos.dir_sign, stops)  # aggregate stop across policies
-            prev_agg = trailing.get("__agg__") or {}
-            prev_stop = prev_agg.get("stop")
-
-            if agg is not None:
-                price = snap_price  # current price
-                hit = price <= agg if pos.dir_sign > 0 else price >= agg  # stop hit check
-                meta = dict(prev_agg.get("meta") or {})
-                if _stop_improved(pos.dir_sign, prev_stop, agg, min_move_bp):
-                    # notify when stop improves
-                    self.notify("INFO", f"[trail] {num_den} stop -> {agg:.4f} ({'LONG' if pos.dir_sign>0 else 'SHORT'})", send=True,
-                                symbol=num_den, stop=agg, prev=prev_stop, price=price)
-                if hit:
-                    # throttle repeated alerts
-                    last_alert_ts = meta.get("last_alert_ts")
-                    if not last_alert_ts or now_ms - int(last_alert_ts) >= self._cfg["alert_cooldown_ms"]:
-                        self.notify("WARN", f"[trail] {num_den} stop hit @ {price:.4f} vs {agg:.4f}", send=True,
-                                    symbol=num_den, stop=agg, price=price)
-                        meta["last_alert_ts"] = now_ms
-                trailing["__agg__"] = {"stop": agg, "meta": meta, "open_ts": now_ms}  # store aggregate stop
-                history_rows.append({
-                    "thinker_id": thinker_id,
-                    "position_id": pos.id,
-                    "name": "trail:agg",
-                    "open_ts": now_ms,
-                    "value": agg,
-                    "price": price,
-                    "aux": {"side": pos.dir_sign},
-                })
-
-            if history_rows:
-                self.eng.ih.insert_history(history_rows)  # persist aggregate
-
-            # ---------- wrap up per-position ----------
+            ctx["last_ts"] = int(bars.index[-1].value // 1_000_000)
             pp_ctx[pid_str] = ctx
             processed += 1
             dirty = True
-            latest_bar_ts = int(bars.index[-1].value // 1_000_000)  # timestamp of latest bar
-            ctx["last_ts"] = latest_bar_ts  # track last processed bar ts
 
         if dirty:
             self.save_runtime()  # persist runtime if touched

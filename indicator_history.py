@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from typing import List, Optional
+from typing import List, Optional, Sequence
 from cache_helpers import rows_to_columnar, rows_to_generic_df
 
 
@@ -63,6 +63,34 @@ class IndicatorHistory:
             )
             for r in rows
         ]
+        with self._lock:
+            cur = self.con.cursor()
+            cur.executemany(
+                """
+                INSERT OR REPLACE INTO indicator_history(thinker_id,position_id,name,open_ts,value,aux_json)
+                VALUES(?,?,?,?,?,?)
+                """,
+                payload,
+            )
+            self.con.commit()
+            return cur.rowcount or 0
+
+    def insert_history2(self, thinker_id: int, position_id: int, name: str, v_open_ts: Sequence[int],
+                        v_value: Sequence[float], v_aux: Optional[Sequence] = None) -> int:
+        """
+        Bulk insert history rows from columnar sequences.
+        v_aux can be None, or a sequence of dicts (json-dumped) or JSON strings.
+        """
+        if not v_open_ts:
+            return 0
+        n = len(v_open_ts)
+        assert len(v_value) == n, "v_value length mismatch"
+        aux_seq = [{} for _ in range(n)] if v_aux is None else v_aux
+        assert len(aux_seq) == n, "v_aux length mismatch"
+        payload = []
+        for ts, val, aux in zip(v_open_ts, v_value, aux_seq):
+            aux_json = aux if isinstance(aux, str) else json.dumps(aux or {}, ensure_ascii=False)
+            payload.append((int(thinker_id), int(position_id), name, int(ts), val, aux_json))
         with self._lock:
             cur = self.con.cursor()
             cur.executemany(
