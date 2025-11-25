@@ -137,6 +137,7 @@ class ThinkerFactory:
         self.eng = eng
         import thinkers2
         module = sys.modules["thinkers2"]  # self reference
+        # TODO:chatgpt use ThinkerBase.__subclasses__(), much more elegant
         for _, cls in inspect.getmembers(module, inspect.isclass):
             if issubclass(cls, ThinkerBase) and cls != ThinkerBase:
                 assert cls.kind, f"Please be kind enough to specify {cls.__name__}.kind"

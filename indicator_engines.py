@@ -9,6 +9,11 @@ import pandas as pd
 
 class BaseIndicator:
     """Minimal base for indicator steppers."""
+    kind: str = "BASE"
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg or {}
+        self.state: Optional[dict] = None
 
     @classmethod
     def default_cfg(cls, *, position=None) -> dict:
@@ -18,10 +23,17 @@ class BaseIndicator:
     def lookback_bars(cls, cfg: dict) -> int:
         return 1
 
+    @classmethod
+    def from_kind(cls, kind: str, cfg: dict):
+        if kind not in INDICATOR_CLASSES:
+            raise ValueError(f"Unknown indicator kind: {kind}")
+        return INDICATOR_CLASSES[kind](cfg)
+
 
 
 class PSARIndicator(BaseIndicator):
     """Parabolic SAR indicator with configurable initial trend."""
+    kind = "psar"
 
     @classmethod
     def lookback_bars(cls, cfg: dict) -> int:
@@ -35,11 +47,7 @@ class PSARIndicator(BaseIndicator):
         trend = "UP" if side == "LONG" else ("DOWN" if side == "SHORT" else "UP")
         return {"af": 0.02, "max_af": 0.2, "initial_trend": trend}
 
-    def __init__(self, cfg: dict):
-        base_cfg = self.default_cfg(position=cfg.get("_position") if isinstance(cfg, dict) else None)
-        self.cfg = {**base_cfg, **(cfg or {})}
-
-    def run(self, df: pd.DataFrame, state: Optional[dict], start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
+    def run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
         """
         Compute PSAR; returns (new_state, outputs).
         outputs: {"value", "ep", "af", "trend"} aligned to df.index (NaNs where unchanged).
@@ -47,7 +55,7 @@ class PSARIndicator(BaseIndicator):
         if df is None or df.empty:
             raise ValueError("bars required")
         if start_idx >= len(df):
-            return state or {}, {"value": np.full(len(df), np.nan)}
+            return {"value": np.full(len(df), np.nan)}
 
         af0 = self.cfg["af"]
         afmax = self.cfg["max_af"]
@@ -60,18 +68,15 @@ class PSARIndicator(BaseIndicator):
 
         n_total = len(df)
         val_arr = np.full(n_total, np.nan, dtype=float)
-        ep_arr = np.full(n_total, np.nan, dtype=float)
-        af_arr = np.full(n_total, np.nan, dtype=float)
-        trend_arr = np.full(n_total, None, dtype=object)
 
         stopped = False
         stop_val: Optional[float] = None
-        stopped_count = int(state.get("stopped_count", 0)) if state else 0
+        stopped_count = int(self.state.get("stopped_count", 0)) if self.state else 0
 
-        if state is None:
+        if self.state is None:
             if start_idx != 0:
                 start_idx = 0
-            need = cls.lookback_bars(cfg)
+            need = self.lookback_bars(self.cfg)
             if len(df) < need:
                 raise ValueError(f"Need at least {need} bars to bootstrap PSAR")
             h0 = float(np.max(h_arr[:need]))
@@ -82,29 +87,21 @@ class PSARIndicator(BaseIndicator):
             psar = l0 if up else h0
             idx = need
         else:
-            psar = float(state["psar"])
-            ep = float(state["ep"])
-            af = float(state["af"])
-            trend = state.get("trend")
-            stopped = bool(state.get("stopped", False)) or trend == "STOPPED"
+            psar = float(self.state["psar"])
+            ep = float(self.state["ep"])
+            af = float(self.state["af"])
+            trend = self.state.get("trend")
+            stopped = bool(self.state.get("stopped", False)) or trend == "STOPPED"
             up = True if trend == "UP" else False
             stop_val = psar if stopped else None
-            stopped_count = int(state.get("stopped_count", 0))
+            stopped_count = int(self.state.get("stopped_count", 0))
             idx = max(start_idx, 0)
 
         if stopped and stop_val is not None:
             for i in range(idx, n_total):
                 val_arr[i] = stop_val
-                ep_arr[i] = ep
-                af_arr[i] = af
-                trend_arr[i] = "STOPPED"
             stopped_count += max(0, n_total - idx)
-            return {"psar": stop_val, "ep": ep, "af": af, "trend": "STOPPED", "stopped": True, "stopped_count": stopped_count}, {
-                "value": val_arr,
-                "ep": ep_arr,
-                "af": af_arr,
-                "trend": trend_arr,
-            }
+            return {"value": val_arr}
 
         for i in range(idx, n_total):
             o, h, l, c = o_arr[i], h_arr[i], l_arr[i], c_arr[i]
@@ -146,28 +143,24 @@ class PSARIndicator(BaseIndicator):
                         ep = prev_ep
 
             val_arr[i] = psar
-            ep_arr[i] = ep
-            af_arr[i] = af
-            trend_arr[i] = "UP" if up else "DOWN"
 
             if stopped and stop_val is not None:
                 stopped_count += (n_total - i)
                 for j in range(i, n_total):
                     val_arr[j] = stop_val
-                    ep_arr[j] = ep
-                    af_arr[j] = af
-                    trend_arr[j] = "STOPPED"
                 psar = stop_val
                 up = prev_up
                 break
 
         new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("STOPPED" if stopped else ("UP" if up else "DOWN")), "stopped": stopped, "stopped_count": stopped_count}
-        outputs = {"value": val_arr, "ep": ep_arr, "af": af_arr, "trend": trend_arr}
-        return new_state, outputs
+        outputs = {"value": val_arr}
+        self.state = new_state
+        return outputs
 
 
 class ATRIndicator(BaseIndicator):
     """Wilder ATR indicator."""
+    kind = "atr"
 
     @classmethod
     def lookback_bars(cls, cfg: dict) -> int:
@@ -177,11 +170,7 @@ class ATRIndicator(BaseIndicator):
     def default_cfg(cls, *, position=None) -> dict:
         return {"period": 14}
 
-    def __init__(self, cfg: dict):
-        base_cfg = self.default_cfg(position=cfg.get("_position") if isinstance(cfg, dict) else None)
-        self.cfg = {**base_cfg, **(cfg or {})}
-
-    def run(self, df: pd.DataFrame, state: Optional[dict], start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
+    def run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
         """
         Compute ATR; returns (new_state, outputs).
         outputs: {"value", "tr"} aligned to df.index (NaNs where unchanged).
@@ -189,7 +178,7 @@ class ATRIndicator(BaseIndicator):
         if df is None or df.empty:
             raise ValueError("bars required")
         if start_idx >= len(df):
-            return state or {}, {"value": np.full(len(df), np.nan)}
+            return {"value": np.full(len(df), np.nan)}
 
         period = int(self.cfg["period"])
         need = self.lookback_bars(self.cfg)
@@ -201,10 +190,9 @@ class ATRIndicator(BaseIndicator):
 
         n_total = len(df)
         val_arr = np.full(n_total, np.nan, dtype=float)
-        tr_arr = np.full(n_total, np.nan, dtype=float)
         idx = max(start_idx, 0)
 
-        if state is None:
+        if self.state is None:
             if len(df) < need:
                 raise ValueError(f"Need at least {need} bars to bootstrap ATR(p={period})")
             prev_close = c_arr[0]
@@ -217,8 +205,8 @@ class ATRIndicator(BaseIndicator):
             atr = sum(trs) / float(period)
             idx = need
         else:
-            atr = float(state["atr"])
-            prev_close = float(state["prev_close"])
+            atr = float(self.state["atr"])
+            prev_close = float(self.state["prev_close"])
 
         for i in range(idx, n_total):
             h = h_arr[i]; l = l_arr[i]; c = c_arr[i]
@@ -226,20 +214,60 @@ class ATRIndicator(BaseIndicator):
             atr = ((atr * (period - 1)) + tr) / period
             prev_close = c
             val_arr[i] = atr
-            tr_arr[i] = tr
 
         new_state = {"atr": atr, "prev_close": prev_close}
-        outputs = {"value": val_arr, "tr": tr_arr}
-        return new_state, outputs
+        outputs = {"value": val_arr}
+        self.state = new_state
+        return outputs
 
 
-INDICATOR_DISPATCH = {
-    "psar": PSARIndicator,
-    "atr": ATRIndicator,
-}
+class StopperIndicator(BaseIndicator):
+    """
+    Protective stop ratchet based on upstream proposed levels.
+    cfg:
+      side: +1 for long, -1 for short
+    run inputs:
+      bars: DataFrame with Close
+      values: np.ndarray of proposed stop levels (same length as bars)
+    outputs:
+      value: ratcheted stop series
+      flag: 1.0 when stop is hit, NaN otherwise
+    """
+    @classmethod
+    def default_cfg(cls, *, position=None) -> dict:
+        side = 0
+        if position:
+            side = position.get("side", 0)
+        return {"side": side or 0}
 
-def ind_name_to_cls(name):
-    return INDICATOR_DISPATCH[name]
+    def run(self, df: pd.DataFrame, values: np.ndarray, start_idx: int = 0) -> Dict[str, np.ndarray]:
+        if df is None or df.empty:
+            raise ValueError("bars required")
+        side = int(self.cfg.get("side") or 0)
+        if side == 0:
+            raise ValueError("Stopper side must be +1 or -1")
+        n_total = len(df)
+        val_arr = np.full(n_total, np.nan, dtype=float)
+        flag_arr = np.full(n_total, np.nan, dtype=float)
+        stop = None if self.state is None else self.state.get("stop")
+        closes = df["Close"].values
+
+        for i in range(start_idx, n_total):
+            candidate = values[i] if values is not None and i < len(values) else np.nan
+            if not np.isnan(candidate):
+                if stop is None:
+                    stop = candidate
+                else:
+                    stop = max(stop, candidate) if side > 0 else min(stop, candidate)
+            val_arr[i] = stop if stop is not None else np.nan
+            if stop is None:
+                continue
+            hit = closes[i] <= stop if side > 0 else closes[i] >= stop
+            if hit:
+                flag_arr[i] = 1.0
+
+        self.state = {"stop": stop}
+        return {"value": val_arr, "flag": flag_arr}
 
 
 class StopStrategy:
@@ -248,9 +276,6 @@ class StopStrategy:
       - holds indicators (instantiated once)
       - owns runtime slice (states, cfg)
       - runs indicators, saves their state/history, and returns suggested stop + history rows
-    Subclasses should:
-      - implement on_setup() to configure indicators and any extra state
-      - implement on_run(bars) to compute stop suggestion
     """
     def __init__(self, eng, thinker, runtime: dict, pos, name: str):
         self.eng = eng
@@ -258,14 +283,43 @@ class StopStrategy:
         self.runtime = runtime
         self.pos = pos
         self.name = name
-        self.indicators: Dict[str, BaseIndicator] = {}
-        self.states: Dict[str, dict] = runtime.setdefault("states", {})
-        self.cfg: dict = runtime.setdefault("cfg", {})
+        self.inds: Dict[str, BaseIndicator] = {}
+        self.cfg: dict = runtime["cfg"]
         self.history_rows: list[dict] = []
-        self.on_setup()
+        self.setup()
+
+    ind_map = None  # subclass can set to list of kinds or dict {kind: name}
 
     def on_setup(self):
         raise NotImplementedError
+
+    def on_conf_ind(self):
+        """Hook to tweak indicator configs after auto-build."""
+
+    def on_get_default_cfg(self, ind_kind: str) -> dict:
+        """
+        Return default cfg for a given indicator kind.
+        Override if strategy needs custom defaults.
+        """
+        cls = INDICATOR_CLASSES[ind_kind]
+        return cls.default_cfg(position=self.pos)
+
+    def setup(self):
+        """Convenience wrapper to configure indicators and perform extra setup."""
+        self._build_indicators()
+        self.on_conf_ind()
+        # no on_setup hook; subclasses can override on_conf_ind/on_run
+
+    def _build_indicators(self):
+        items = [(k, v) for k, v in self.ind_map.items()] if isinstance(self.ind_map, dict) else \
+                [(k, k) for k in self.ind_map]
+        states = self.runtime["states"]
+        for kind, name in items:
+            cfg = self.on_get_default_cfg(kind)
+            ind = BaseIndicator.from_kind(kind, cfg)
+            if name in states:
+                ind.state = states[name]
+            self.inds[name] = ind
 
     def on_run(self, bars: pd.DataFrame):
         raise NotImplementedError
@@ -275,8 +329,36 @@ class StopStrategy:
         Execute strategy: run indicators, collect history, then delegate to on_run.
         """
         self.history_rows = []
-        result = self.on_run(bars)
-        self.runtime["states"] = self.states
+        self.on_run(bars)
+
+        self.runtime["states"] = {name: ind.state for name, ind in self.inds.items()}
+        if not bars.empty:
+            self.runtime["last_ts"] = int(bars.index[-1].value // 1_000_000)
         if self.history_rows:
             self.eng.ih.insert_history(self.history_rows)
-        return result
+        return None
+
+
+class SSPSAR(StopStrategy):
+    """
+    Stop strategy: PSAR feeding Stopper (protective, one-sided).
+    """
+    ind_map = ["psar", "stopper"]
+
+    def on_setup(self):
+        pass
+
+    def on_run(self, bars: pd.DataFrame):
+        psar = self.inds["psar"]
+        stopper = self.inds["stopper"]
+        psar.state = self.runtime.get("states", {}).get("psar")
+        stopper.state = self.runtime.get("states", {}).get("stopper")
+
+        psar_out = psar.run(bars, start_idx=0)
+        stop_out = stopper.run(bars, psar_out["value"], start_idx=0)
+
+        return {"stop": stop_out.get("value"), "flag": stop_out.get("flag")}
+
+
+# registry
+INDICATOR_CLASSES = {cls.kind: cls for cls in BaseIndicator.__subclasses__()}

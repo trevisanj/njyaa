@@ -19,6 +19,8 @@
 - `python -m compileall .` — quick syntax/import sanity check without hitting external APIs.
 
 ## Coding Style & Naming Conventions
+- Don't precipitate: ask questions if you feel that there might be something missing in my request
+- No fallbacks or silent defaults. Assume required keys/classes exist; use direct indexing (e.g., INDICATOR_CLASSES[kind]) and let it fail fast if missing. Initialize upfront so later code can trust values. Avoid .get()/.getattr(..., None) unless explicitly handling a missing case.
 - PEP 8, 4-space indents, snake_case for functions/vars, PascalCase for classes; keep type hints consistent.
 - Avoid code repetition: use control variables at will to control flux, assemble result parts aiming fewer lines of code
 - Don’t restate the same data or constants in multiple places—define them once and reuse. Eliminate redundant
@@ -52,6 +54,7 @@
   ```
 - No defensive coding!!!!!!!!!! **NO DEFENSIVE CODING***
 - Format function signatures with as many arguments on each line as possible up to ~120 chars; avoid one-arg-per-line wrapping.
+- I prefer looped operations as much as possible (rather than if's)
 
 ## Testing Guidelines
 - No unit-test suite is maintained; rely on manual smoke checks instead of adding tests.
