@@ -194,13 +194,13 @@ class TrailingStopThinker(ThinkerBase):
         alert_cooldown_ms: int = field(default=60_000, metadata={"help": "Cooldown between repeated hit alerts"})
         sstrat: str = field(default="SSPSAR", metadata={"help": "Stop strategy kind"})
 
+    def get_timeframe(self):
+        # won't make this a property so that it doesn't suppress errors
+        return self._cfg["timeframe"]
+
     def _on_init(self) -> None:
         self._runtime.setdefault(PP_CTX, {})
         self._strats: Dict[str, StopStrategy] = {}
-
-    def _pair_bars(self, pos: ec.Position, start_ts: int, end_ts: Optional[int] = None) -> pd.DataFrame:
-        """Returns OHLCV data for configured timeframe"""
-        return self.eng.kc.pair_bars(pos.num, pos.den, self._cfg["timeframe"], start_ts, end_ts)
 
     def _reset(self, targets):
         """Reset strategy/runtime for selected positions or all."""
@@ -230,7 +230,6 @@ class TrailingStopThinker(ThinkerBase):
 
         min_move_bp = float(self._cfg["min_move_bp"])  # min bps improvement to log
         tf = self._cfg["timeframe"]  # timeframe string
-        thinker_id = self._thinker_id  # cached id for history rows
         dirty = False  # whether we must save runtime at end
 
         processed = 0  # counter of processed attachments
@@ -259,13 +258,15 @@ class TrailingStopThinker(ThinkerBase):
                 dirty = True
                 continue
 
+            # ------------ retrieve/initialize strategy -------------
             sstrat_ctx = p_ctx.setdefault(SSTRAT_CTX, {})
             sstrat_kind = p_ctx.get(SSTRAT_KIND, self._cfg.get("sstrat", "SSPSAR"))
             sstrat = self._strats.get(pid_str)
             if sstrat is None:
                 # TODO: sstrat needs a unique name, i guess
                 sstrat_name = sstrat_kind
-                sstrat = StopStrategy.from_kind(sstrat_kind, self.eng, self, sstrat_ctx, pos, sstrat_name)
+                sstrat = StopStrategy.from_kind(sstrat_kind, self.eng, self, sstrat_ctx, pos, sstrat_name,
+                                                p_ctx[ATTACHED_AT])
                 self._strats[pid_str] = sstrat
             elif sstrat.kind != sstrat_kind:
                 raise RuntimeError(f"sstrat is a {sstrat.kind} but should be {sstrat_kind}")
@@ -273,23 +274,12 @@ class TrailingStopThinker(ThinkerBase):
                 sstrat.ctx = sstrat_ctx
                 sstrat.pos = pos
 
-            # ---------- build kline window ----------
-            lookback_bars = sstrat.get_lookback_bars()
-
-            tfms = tf_ms(self._cfg["timeframe"])  # timeframe in ms
-            anchor_ts = sstrat_ctx.get(LAST_TS) or p_ctx.get(ATTACHED_AT)
-
-            start_ts = max(0, int(anchor_ts) - lookback_bars * tfms)  # start window so we have enough bars
-            bars = self._pair_bars(pos, start_ts, None)  # fetch num[/den] bars as dataframe
-
-            if bars.empty or len(bars) < lookback_bars:
-                log().warn(f"[trail] Missing klines {tf}, can't calculate stop", num_den=num_den, position_id=pos.id)
-                continue
-            log().debug("trail.tick.bars", pid=pid_str, rows=len(bars), lookback=lookback_bars, anchor=anchor_ts)
-
             # ---------- run strategy ----------
-            log().debug("trail.tick.run_sstrat", pid=pid_str, strat=sstrat_kind)
-            sstrat.run(bars)
+            log().debug("trail.tick.run_sstrat", stamp=stamp())
+            try:
+                sstrat.run()
+            except Exception as e:
+                log().exc(e, stamp=stamp())
 
             # ----------- interpret stops -----------
             stop_info = sstrat.get_stop_info()

@@ -4,15 +4,17 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple, Sequence
 import numpy as np
 import pandas as pd
-from common import LAST_TS, log, LOOKBACK_BARS
+from common import LAST_TS, log, LOOKBACK_BARS, tf_ms, TooFewDataPoints, ts_human
 import engclasses as ec
+from collections import OrderedDict
 
 
 class BaseIndicator:
     """Minimal base for indicator steppers."""
     kind: str = "BASE"
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, sstrat: "StopStrategy"):
+        self.sstrat = sstrat
         self.cfg = cfg or {}
         self.state: Optional[dict] = None
         self.outputs: Optional[Dict[str, np.ndarray]] = None
@@ -38,10 +40,11 @@ class BaseIndicator:
 
     def run(self, *args, **kwargs) -> Dict[str, np.ndarray]:
         """Execute indicator, storing outputs for later inspection."""
-        self.outputs = self.on_run(*args, **kwargs)
+        state =
+        new_state, self.outputs = self.on_run(*args, **kwargs)
         return self.outputs
 
-    def on_run(self, *args, **kwargs) -> Dict[str, np.ndarray]:
+    def on_run(self, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
         raise NotImplementedError
 
 
@@ -58,7 +61,7 @@ class PSARIndicator(BaseIndicator):
         trend = "UP" if position.side > 1 else "DOWN"
         return {"af": 0.02, "max_af": 0.2, "initial_trend": trend}
 
-    def on_run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
+    def on_run(self, df: pd.DataFrame, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
         """
         Compute PSAR; returns (new_state, outputs).
         outputs: {"value", "ep", "af", "trend"} aligned to df.index (NaNs where unchanged).
@@ -163,8 +166,7 @@ class PSARIndicator(BaseIndicator):
 
         new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("STOPPED" if stopped else ("UP" if up else "DOWN")), "stopped": stopped, "stopped_count": stopped_count}
         outputs = {"value": val_arr}
-        self.state = new_state
-        return outputs
+        return new_state, outputs
 
 
 class ATRIndicator(BaseIndicator):
@@ -179,7 +181,7 @@ class ATRIndicator(BaseIndicator):
     def default_cfg(cls, *, position: ec.Position) -> dict:
         return {"period": 14}
 
-    def on_run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
+    def on_run(self, df: pd.DataFrame, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
         """
         Compute ATR; returns (new_state, outputs).
         outputs: {"value", "tr"} aligned to df.index (NaNs where unchanged).
@@ -226,8 +228,7 @@ class ATRIndicator(BaseIndicator):
 
         new_state = {"atr": atr, "prev_close": prev_close}
         outputs = {"value": val_arr}
-        self.state = new_state
-        return outputs
+        return new_state, outputs
 
 
 class StopperIndicator(BaseIndicator):
@@ -251,7 +252,7 @@ class StopperIndicator(BaseIndicator):
     def on_init(self):
         self._stop_info = None
 
-    def on_run(self, df: pd.DataFrame, values: np.ndarray, start_idx: int = 0) -> Dict[str, np.ndarray]:
+    def on_run(self, df: pd.DataFrame, values: np.ndarray, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
         if df is None or df.empty:
             raise ValueError("bars required")
         side = int(self.cfg.get("side") or 0)
@@ -277,10 +278,10 @@ class StopperIndicator(BaseIndicator):
             if hit:
                 flag_arr[i] = 1.0
 
-        self.state = {"stop": stop}
+        newstate = {"stop": stop}
         # makes it retrievable to the sstrat later
         self._stop_info = {"value": val_arr, "flag": flag_arr}
-        return self._stop_info
+        return newstate, self._stop_info
 
 
 class StopStrategy:
@@ -291,13 +292,16 @@ class StopStrategy:
       - runs indicators, saves their state/history, and returns suggested stop + history rows
     """
     kind: str = "BASE_STRAT"
-    def __init__(self, eng, thinker, ctx: dict, pos, name: str):
+    def __init__(self, eng, thinker, ctx: dict, pos, name: str, attached_at):
         self.eng = eng
         self.thinker = thinker
         self.ctx = ctx
         self.pos = pos
         self.name = name
+        self.timeframe = thinker.get_timeframe()
+        self.attached_at = attached_at
         self.inds: Dict[str, BaseIndicator] = {}
+        self.ind_states = {}
         self._stopper: Optional["StopperIndicator"] = None
         self._stop_info: Optional[Dict[str, Sequence]] = None
         ctx.setdefault("cfg", {})
@@ -324,15 +328,30 @@ class StopStrategy:
         self._build_indicators()
         self.on_conf_ind()
 
+    def idx_to_ts(self, idx):
+        ts_ms = int(self._bars_index[idx].value // 1_000_000)
+        return ts_ms
+
+    def set_ind_state(self, ind, idx, state):
+        """Stores indicator state in its states dict, keeping only the two latest"""
+        ts_ms = self.idx_to_ts(idx)
+        states = self.ind_states.setdefault(ind.name, OrderedDict())
+        states[ts_ms] = state
+        if len(states) > 2:
+            states.popitem(last=False)
+
+    def get_ind_state(self, ind, idx):
+        ts_ms = self.idx_to_ts(idx)
+        states = self.ind_states.setdefault(ind.name, OrderedDict())
+        return states.get(ts_ms)
+
     def _build_indicators(self):
         items = [(k, v) for k, v in self.ind_map.items()] if isinstance(self.ind_map, dict) else \
                 [(k, k) for k in self.ind_map]
-        states = self.ctx["states"]
+        self.ind_states = self.ctx["states"]
         for kind, name in items:
             cfg = self.on_get_default_cfg(kind)
             ind = BaseIndicator.from_kind(kind, cfg)
-            if name in states:
-                ind.state = states[name]
             self.inds[name] = ind
 
             if kind == "stopper":
@@ -348,20 +367,38 @@ class StopStrategy:
         """Return dict with value/flag keys from last run."""
         return self._stopper._stop_info
 
+
+
     def get_lookback_bars(self) -> int:
         """Return minimum bars needed based on contained indicators."""
         if not LOOKBACK_BARS in self.ctx:
             self.ctx[LOOKBACK_BARS] = max(ind.__class__.lookback_bars(ind.cfg) for ind in self.inds.values())
         return self.ctx[LOOKBACK_BARS]
 
-    def run(self, bars: pd.DataFrame):
+    def run(self):
         """
         Execute strategy: compute start_idx, run indicators/stop logic, persist state/history.
         """
         log().debug("sstrat.run.start", strat=self.kind, position_id=self.pos.id, bars=len(bars))
+
+        # --- build klines dataframe
         last_ts = self.ctx.get(LAST_TS)
+        lookback_bars = self.get_lookback_bars()
+
+        # -------------- fetches bars from cache
+        tfms = tf_ms(self.timeframe)
+        anchor_ts = self.ctx.get(LAST_TS) or self.attached_at
+        start_ts = max(0, int(anchor_ts) - lookback_bars * tfms)  # start window so we have enough bars
+        bars = self.eng.kc.pair_bars(self.pos.num, self.pos.den, self.timeframe, start_ts)
+        if bars.empty or len(bars) < lookback_bars:
+            raise TooFewDataPoints(f"[trail] Not enough klines ({len(bars)} < {lookback_bars}, can't run strategy!")
+        self._bars_index = bars.index  # saves reference to datetime index
+        log().debug("sstrat.bars", sstrat_kind=self.kind, rows=len(bars), lookback=lookback_bars,
+                    anchor_ts=ts_human(anchor_ts))
+
         start_idx = 0
         if last_ts is not None:
+            # TODO: investigate if better to work with index as milliseconds instead
             dt = pd.to_datetime(int(last_ts), unit="ms")
             start_idx = int(bars.index.searchsorted(dt, side="left"))
             if start_idx >= len(bars):
@@ -388,11 +425,11 @@ class StopStrategy:
         return None
 
     @classmethod
-    def from_kind(cls, kind: str, eng, thinker, ctx: dict, pos, name: str = ""):
+    def from_kind(cls, kind: str, eng, thinker, ctx: dict, pos, name, attached_at: int):
         if kind not in SSTRAT_CLASSES:
             raise ValueError(f"Unknown strategy kind: {kind}")
         strat_cls = SSTRAT_CLASSES[kind]
-        return strat_cls(eng, thinker, ctx, pos, name)
+        return strat_cls(eng, thinker, ctx, pos, name, attached_at)
 
 
 class SSPSAR(StopStrategy):

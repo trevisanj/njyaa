@@ -30,8 +30,11 @@ __all__ = [
     "SSTRAT_KIND",
     "LAST_TS",
     "float2str",
+    "TooFewDataPoints"
 ]
 
+class TooFewDataPoints(Exception):
+    pass
 
 LV = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 
