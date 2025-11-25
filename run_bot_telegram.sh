@@ -1,0 +1,8 @@
+export NJYAA_CONSOLE_ENABLED=False
+export NJYAA_LOG_CONSOLE_MODE=prompt
+export NJYAA_TELEGRAM_ENABLED=True
+export NJYAA_LOG_TO_STDOUT=FALSE
+export NJYAA_LOG_TO_FILE=TRUE
+export NJYAA_LOG_FILE_PATH=./njyaa.log
+
+./run_bot.py
