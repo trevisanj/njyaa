@@ -196,10 +196,6 @@ class TrailingStopThinker(ThinkerBase):
 
     def _on_init(self) -> None:
         self._runtime.setdefault(PP_CTX, {})
-        resets = list(self._runtime.pop("reset", []))
-        if resets:
-            self._reset(resets)
-            self.save_runtime()
         self._strats: Dict[str, StopStrategy] = {}
 
     def _pair_bars(self, pos: ec.Position, start_ts: int, end_ts: Optional[int] = None) -> pd.DataFrame:
@@ -209,24 +205,20 @@ class TrailingStopThinker(ThinkerBase):
     def _reset(self, targets):
         """Reset strategy/runtime for selected positions or all."""
         pp_ctx = self._runtime.setdefault(PP_CTX, {})
-        if targets == "__all__" or "__all__" in targets:
+        if targets == "all" or "all" in targets:
             target_keys = list(pp_ctx.keys())
         else:
             target_keys = [str(pid) for pid in targets if str(pid) in pp_ctx]
-        for pid_key in target_keys:
-            p_ctx = pp_ctx.get(pid_key) or {}
+        for pid_str in target_keys:
+            p_ctx = pp_ctx.get(pid_str) or {}
             p_ctx.pop(SSTRAT_CTX, None)
-            self.eng.ih.delete_by_thinker_position(self._thinker_id, int(pid_key))
-        self._runtime[PP_CTX] = pp_ctx
+            log().debug("trail.reset", pid=pid_str)
+            self.eng.ih.delete_by_thinker_position(self._thinker_id, int(pid_str))
 
     def on_tick(self, now_ms: int):
         # ---------- tick-level setup ----------
 
-        resets = list(self._runtime.pop("reset", []))
-        msgs = self.tm.consume_messages(self._thinker_id) if self._thinker_id else []
-        for m in msgs:
-            if isinstance(m, dict) and "reset" in m:
-                resets.extend(m["reset"])
+        resets = self._runtime.pop("reset", None)
         if resets:
             self._reset(resets)
             self.save_runtime()
@@ -265,7 +257,6 @@ class TrailingStopThinker(ThinkerBase):
             sstrat_kind = p_ctx.get(SSTRAT_KIND, self._cfg.get("sstrat", "SSPSAR"))
             sstrat = self._strats.get(pid_str)
             # TODO: think about situations when it is better to invalidate the whole state
-            # TODO: at bootstrapping, the indicator history probably needs to be deleted
             if sstrat is None or sstrat.kind != sstrat_kind:
                 # TODO: sstrat needs a unique name, i guess
                 sstrat_name = sstrat_kind
@@ -302,13 +293,19 @@ class TrailingStopThinker(ThinkerBase):
 
             latest_stop = stop_series[-1]
             prev_stop_val = stop_series[-2] if len(stop_series) >= 2 else None
+            now = now_ms
+            cooldown_ms = int(self._cfg["alert_cooldown_ms"])
+            last_alert = p_ctx.get("last_alert_ts", 0)
             if _stop_improved(pos.dir_sign, prev_stop_val, latest_stop, min_move_bp):
-                msg = f"[trail] {num_den} stop -> {latest_stop:.4f} ({'LONG' if pos.dir_sign>0 else 'SHORT'})"
+                msg = f"🟢 [trail] {num_den} stop -> {latest_stop:.4f} ({'LONG' if pos.dir_sign>0 else 'SHORT'})"
                 self.notify("INFO", msg, send=True,
                             num_den=num_den, stop=latest_stop, prev=prev_stop_val, price=price)
-            if hit:
-                self.notify("WARN", f"[trail] {num_den} stop hit @ {price:.4f} vs {latest_stop:.4f}",
+                last_alert = now
+            if hit and (now - last_alert) >= cooldown_ms:
+                self.notify("WARN", f"🛑 [trail] {num_den} stop hit @ {price:.4f} vs {latest_stop:.4f}",
                             send=True, num_den=num_den, stop=latest_stop, price=price)
+                last_alert = now
+            p_ctx["last_alert_ts"] = last_alert
             log().debug("trail.tick.done", pid=pid_str, stop=latest_stop, prev=prev_stop_val, hit=hit)
 
             pp_ctx[pid_str] = p_ctx

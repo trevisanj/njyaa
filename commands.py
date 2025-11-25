@@ -545,6 +545,15 @@ def build_registry() -> CommandRegistry:
         body = "\n".join(["**Error**", "", f"- {text.strip()}"])
         return CO(OCMarkDown(body))
 
+    def _require_thinker_offline(eng: BotEngine, tid: int) -> Optional[CO]:
+        row = eng.store.get_thinker(tid)
+        if row and row["enabled"]:
+            return _err(f"Thinker {tid} is enabled; disable it before proceeding.")
+        with eng.tm._lock:
+            if tid in eng.tm._instances:
+                return _err(f"Thinker {tid} is live; disable it before proceeding.")
+        return None
+
     def _tbl(headers: List[str], rows: List[Sequence[Any]], intro: str | None = None) -> CO:
         comps: List[OC] = []
         if intro:
@@ -659,15 +668,17 @@ def build_registry() -> CommandRegistry:
             options=["at"], nreq=2, freeform=True)
     def _bang_attach_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
-        Attach trailing/exit watcher to a position.
+        Attach trailing/exit watcher to a position or all positions for a thinker.
 
         Usage:
-          !exit-attach <thinker_id> <position_id> [sstrat_kind] [at:<iso|rel>]
+          !exit-attach <thinker_id> <position_id|all> [sstrat_kind] [at:<iso|rel>]
 
         at: iso (local) like 2024-08-20T15:30 or relative like -5m/+2h; defaults to now.
         """
         thinker_id = int(args["thinker_id"])
-        pid = int(args["position_id"])
+        pid_raw = args["position_id"]
+        attach_all = str(pid_raw).lower() == "all"
+        pid = int(pid_raw) if not attach_all else None
         sstrat_kind = args.get("sstrat_kind", "SSPSAR").upper()
         at_opt = args.get("at")
         cfg_freeform = args["__freeform__"]
@@ -677,6 +688,9 @@ def build_registry() -> CommandRegistry:
                 at_ms = parse_when(at_opt)
             except Exception as e:
                 return _err(f"Bad at: {e}")
+        offline_err = _require_thinker_offline(eng, thinker_id)
+        if offline_err:
+            return offline_err
         try:
             inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
         except Exception as e:
@@ -684,16 +698,38 @@ def build_registry() -> CommandRegistry:
         rt = inst.runtime()
         pp_ctx = rt.setdefault(PP_CTX, {})
 
-        pid_str = str(pid)
-        ctx = {
-            ATTACHED_AT: at_ms,
-            "cfg": cfg_freeform,
-            "sstrat_kind": sstrat_kind,
-        }
-        pp_ctx[pid_str] = ctx
+        def _attach_one(pid_val: int):
+            pid_str = str(pid_val)
+            ctx = {
+                ATTACHED_AT: at_ms,
+                "cfg": cfg_freeform,
+                "sstrat_kind": sstrat_kind,
+            }
+            pp_ctx[pid_str] = ctx
+
+        if attach_all:
+            rows = eng.store.list_open_positions()
+            total = len(rows)
+            attached = 0
+            skipped = 0
+            for row in rows:
+                pid_val = int(row["position_id"])
+                if str(pid_val) in pp_ctx:
+                    skipped += 1
+                    continue
+                _attach_one(pid_val)
+                attached += 1
+            msg_target = f"all ({attached}/{total} attached, {skipped} skipped)"
+        else:
+            pid_key = str(pid)
+            if pid_key in pp_ctx:
+                msg_target = f"position {pid} (already attached)"
+            else:
+                _attach_one(pid)
+                msg_target = f"position {pid}"
         inst.save_runtime()
         eng.tm.reload(thinker_id)
-        return _txt(f"Attached exit watcher to position {pid} via thinker {thinker_id} ({sstrat_kind}) at {ts_human(at_ms)}")
+        return _txt(f"Attached exit watcher to {msg_target} via thinker {thinker_id} ({sstrat_kind}) at {ts_human(at_ms)}")
 
     @R.at("exit-list", argspec=["thinker_id"], nreq=1)
     def _at_exit_list(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -718,40 +754,63 @@ def build_registry() -> CommandRegistry:
 
     @R.bang("exit-detach", argspec=["thinker_id", "position_id"], nreq=2)
     def _bang_exit_detach(eng: BotEngine, args: Dict[str, str]) -> CO:
-        """Remove trailing/exit attachment for a position."""
+        """Remove trailing/exit attachment for a position or all."""
         tid = int(args["thinker_id"])
-        pid = int(args["position_id"])
+        pid_raw = args["position_id"]
+        all_positions = str(pid_raw).lower() == "all"
+        pid = int(pid_raw) if not all_positions else None
+        offline_err = _require_thinker_offline(eng, tid)
+        if offline_err:
+            return offline_err
         try:
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         except Exception as e:
             return _err_exc("exit_detach.get_thinker", e)
         rt = inst.runtime()
         pp_ctx = rt.setdefault(PP_CTX, {})
-        pid_key = str(pid)
-        if pid_key not in pp_ctx:
-            raise ValueError(f"Position {pid} not attached to thinker {tid}")
-        removed = pp_ctx.pop(pid_key, None)
+        if all_positions:
+            removed_count = len(pp_ctx)
+            pp_ctx.clear()
+            removed = removed_count > 0
+        else:
+            pid_key = str(pid)
+            if pid_key not in pp_ctx:
+                raise ValueError(f"Position {pid} not attached to thinker {tid}")
+            removed = pp_ctx.pop(pid_key, None)
         inst.save_runtime()
         eng.tm.reload(tid)
+        if all_positions:
+            return _txt(f"Detached exit policies from all positions for thinker {tid}" + ("" if removed else " (none existed)"))
         return _txt(f"Detached exit policies from position {pid}" + ("" if removed else " (none existed)"))
 
     @R.bang("exit-reset", argspec=["thinker_id", "position_id"], nreq=2)
     def _bang_exit_reset(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
-        Reset trailing context so it reboots on next tick: clears strategy state and indicator history.
+        Reset trailing context so it reboots on next tick: clears strategy state and indicator history for one position or all.
         """
         tid = int(args["thinker_id"])
-        pid = int(args["position_id"])
+        pid_raw = args["position_id"]
+        all_positions = str(pid_raw).lower() == "all"
+        pid = int(pid_raw) if not all_positions else None
+        offline_err = _require_thinker_offline(eng, tid)
+        if offline_err:
+            return offline_err
         try:
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         except Exception as e:
             return _err_exc("exit_reset.get_thinker", e)
         rt = inst.runtime()
         resets = rt.setdefault("reset", [])
-        pid_key = str(pid)
-        if pid_key not in resets and "__all__" not in resets:
-            resets.append(pid_key)
+        if all_positions:
+            if "all" not in resets:
+                resets.append("all")
+        else:
+            pid_key = str(pid)
+            if pid_key not in resets and "all" not in resets:
+                resets.append(pid_key)
         inst.save_runtime()
+        if all_positions:
+            return _txt(f"Requested reset of trailing context for ALL positions on thinker {tid}; will rebuild on next tick")
         return _txt(f"Requested reset of trailing context for position {pid}; will rebuild on next tick")
 
     @R.at("exit-state", argspec=["thinker_id", "position_id"], nreq=2)
@@ -1170,6 +1229,40 @@ def build_registry() -> CommandRegistry:
         blocks = [fmt_block(r, heading_level) for r in rows]
         return _md("\n\n".join(blocks))
 
+    @R.at("thinkers-live", options=["detail"])
+    def _at_thinkers_live(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """List live ThinkerManager instances (in-memory)."""
+        detail = int(args.get("detail", "1"))
+        tm = eng.tm
+        with tm._lock:
+            items = sorted(tm._instances.items(), key=lambda kv: kv[0])
+            reload_pending = set(tm._reload_pending)
+        if not items:
+            return _txt("No live thinkers.")
+
+        if detail <= 1:
+            lines = ["# Thinkers (live)", ""]
+            for tid, inst in items:
+                pending = " (reload pending)" if tid in reload_pending else ""
+                lines.append(f"- `#{tid}` {inst.kind} ticks={inst._tick_count}{pending}")
+            return _md("\n".join(lines))
+
+        blocks: List[str] = []
+        for tid, inst in items:
+            pending = " (reload pending)" if tid in reload_pending else ""
+            blocks.append("\n".join([
+                f"# #{tid} {inst.kind}{pending}",
+                "",
+                "```json",
+                json.dumps(inst._cfg, indent=2, ensure_ascii=False),
+                "```",
+                "",
+                "```json",
+                json.dumps(inst._runtime, indent=2, ensure_ascii=False),
+                "```",
+            ]))
+        return _md("\n\n".join(blocks))
+
     # ----------------------- THINKER KINDS -----------------------
     @R.at("thinker-kinds", options=["detail"])
     def _at_thinker_kinds(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -1195,6 +1288,7 @@ def build_registry() -> CommandRegistry:
         if not tid.isdigit():
             return _txt("Usage: !thinker-enable <id>")
         eng.store.update_thinker_enabled(int(tid), True)
+        eng.tm.reload(int(tid))
         return _txt(f"Thinker #{tid} enabled.")
 
     # ----------------------- THINKER DISABLE -----------------------
@@ -1206,7 +1300,9 @@ def build_registry() -> CommandRegistry:
         tid = args["id"].strip()
         if not tid.isdigit():
             return _txt("Usage: !thinker-disable <id>")
-        eng.store.update_thinker_enabled(int(tid), False)
+        tid_i = int(tid)
+        eng.store.update_thinker_enabled(tid_i, False)
+        eng.tm.disable(tid_i)
         return _txt(f"Thinker #{tid} disabled.")
 
     # ----------------------- THINKER REMOVE -----------------------

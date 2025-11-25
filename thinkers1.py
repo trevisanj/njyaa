@@ -47,6 +47,7 @@ class ThinkerManager:
         self.store = eng.store
         self._instances: Dict[int, ThinkerBase] = {}    # id -> instance
         self._reload_pending: set[int] = set()
+        self._disable_pending: set[int] = set()
         self._messages: Dict[int, list] = {}
         self._lock = threading.RLock()
         self.log = sublog("thinking")
@@ -102,14 +103,23 @@ class ThinkerManager:
         now = now_ms or Clock.now_utc_ms()
 
         n_ok, n_fail = 0, 0
+        with self._lock:
+            disable_batch = list(self._disable_pending)
+        for tid in disable_batch:
+            self._drop(tid, None)
+
         rows = self._load()
         self.log.debug(f"Thinking ... {len(rows)} thinkers ...")
         for tr in rows:
-            self._ensure_instantiated(tr)
             tid = int(tr["id"])
+            with self._lock:
+                if tid in self._disable_pending:
+                    self._drop(tid, tr)
+                    continue
+            self._ensure_instantiated(tr)
             inst = self._instances[tid]
             try:
-                result = inst.on_tick(now)
+                result = inst.tick(now)
                 if result is not None:
                     self.log_event(tid, "INFO", "thinker.result", result=str(result), thinker_id=tid, kind=tr["kind"])
                 n_ok += 1
@@ -120,10 +130,23 @@ class ThinkerManager:
 
         return n_ok, n_fail
 
+    def _drop(self, tid: int, tr=None):
+        self._disable_pending.discard(tid)
+        removed = self._instances.pop(tid, None)
+        kind = removed.kind if removed else (tr["kind"] if tr is not None else "?")
+        self._reload_pending.discard(tid)
+        self.log.info("thinker.disabled", id=tid, kind=kind)
+
     def log_event(self, tid, level, message, **kwargs):
         assert level in common.LV
         self.store.log_thinker_event(tid, level, message, payload=kwargs)
         log()._emit(level, message, **kwargs)
+
+    def disable(self, thinker_id: int):
+        """Mark a thinker to be disabled/purged on the next run_once pass."""
+        tid = int(thinker_id)
+        with self._lock:
+            self._disable_pending.add(tid)
 
 
 # -----------------------------
@@ -189,6 +212,7 @@ class ThinkerBase(ABC):
         self._runtime: Dict[str, Any] = {}
         self._thinker_id: Optional[int] = None
         self._in_carbonite = False
+        self._tick_count = 0
 
     def _set_def_cfg(self, cfg: Dict[str, Any]) -> None:
         assert isinstance(cfg, dict)
@@ -248,7 +272,9 @@ class ThinkerBase(ABC):
     def tick(self, now_ms: int):
         if self._in_carbonite:
             raise RuntimeError(f"This {self.__class__.__name__} is frozen in carbonite")
-        return self.on_tick(now_ms)
+        ret = self.on_tick(now_ms)
+        self._tick_count += 1
+        return ret
 
 
     @abstractmethod
