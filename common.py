@@ -7,13 +7,45 @@ from typing import List, Optional, Any, Literal, Union
 import re
 from datetime import datetime, timezone, timedelta, tzinfo
 import threading
-from typing import Optional, Union
 
 
-__all__ = ["AppConfig", "Clock", "Log", "log", "set_global_logger", "sublog", "tf_ms", "parse_when", "ts_human", "LV", "coerce_to_type", "pct_of", "leg_pnl", "fmt_pair"]
+__all__ = [
+    "AppConfig",
+    "Clock",
+    "Log",
+    "log",
+    "set_global_logger",
+    "sublog",
+    "tf_ms",
+    "parse_when",
+    "ts_human",
+    "LV",
+    "coerce_to_type",
+    "pct_of",
+    "leg_pnl",
+    "fmt_pair",
+    "PP_CTX",
+    "SSTRAT_CTX",
+    "ATTACHED_AT",
+    "SSTRAT_KIND",
+    "LAST_TS",
+]
 
 
 LV = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
+
+# Runtime key for per-position context in trailing thinkers
+PP_CTX = "pp_ctx"
+# Runtime key for per-strategy context under a position
+SSTRAT_CTX = "sstrat_ctx"
+# Attachment timestamp key
+ATTACHED_AT = "attached_at"
+# Strategy kind key
+SSTRAT_KIND = "sstrat_kind"
+# Last timestamp key
+LAST_TS = "last_ts"
+# Time of attachment of a position into a thinker
+ATTACHED_AT = "attached_at"
 
 # =======================
 # ====== CONFIG =========

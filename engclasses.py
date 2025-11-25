@@ -60,7 +60,8 @@ class Position:
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
 
-    def get_side(self) -> int:
+    @property
+    def side(self) -> int:
         return self.dir_sign
 
     def get_pair(self, printer_friendly: bool = True) -> str:

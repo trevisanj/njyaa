@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, Tuple, Optional, List, Sequence, Literal
 import json
 import os
 
-from common import parse_when, log, ts_human
+from common import parse_when, log, ts_human, PP_CTX, ATTACHED_AT
 from datetime import datetime, timezone, timedelta
 import textwrap
 from binance_um import BinanceUM
@@ -391,15 +391,16 @@ class CommandRegistry:
         toks = tail.split() if tail else []
         result: Dict[str, str] = {}
         errors: List[str] = []
+        freeform_kv: Dict[str, str] = {}
 
         # Fill positionals
         for name in argspec:
             if not toks:
                 break
             # If the next token looks like an option and the key is known, don't consume it as positional
-            if ":" in toks[0]:
-                k = toks[0].split(":", 1)[0].strip().lower()
-                if not options or k in options:
+            if ":" in toks[0] or "=" in toks[0]:
+                k = re.split(r"[:=]", toks[0], 1)[0].strip().lower()
+                if (options and k in options) or freeform:
                     break
             result[name] = toks.pop(0)
 
@@ -412,12 +413,17 @@ class CommandRegistry:
                     k, v = tok.split("=", 1)
                 k = k.strip().lower()
                 v = v.strip()
-                if k in options or freeform:
+                if k in options:
                     result[k] = v
+                elif freeform:
+                    freeform_kv[k] = v
                 else:
                     errors.append(f"Unknown option '{k}'")
             else:
                 errors.append(f"Unexpected token '{tok}'")
+
+        if freeform:
+            result["__freeform__"] = freeform_kv
 
         return result, errors
 
@@ -649,28 +655,22 @@ def build_registry() -> CommandRegistry:
         return _txt(f"{summary} ({changed})")
 
     # ----------------------- TRAILING / EXIT ATTACHMENTS -----------------------
-    @R.bang("exit-attach", argspec=["thinker_id", "position_id"], options=["policies", "lookback", "at"], nreq=2)
+    @R.bang("exit-attach", argspec=["thinker_id", "position_id", "sstrat_kind"],
+            options=["at"], nreq=2, freeform=True)
     def _bang_attach_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
-        Attach trailing/exit policies to a position.
+        Attach trailing/exit watcher to a position.
 
         Usage:
-          !exit-attach <thinker_id> <position_id> [policies:<json>] [lookback:200] [at:<iso|rel>]
+          !exit-attach <thinker_id> <position_id> [sstrat_kind] [at:<iso|rel>]
 
         at: iso (local) like 2024-08-20T15:30 or relative like -5m/+2h; defaults to now.
         """
         thinker_id = int(args["thinker_id"])
         pid = int(args["position_id"])
-        lookback = int(args.get("lookback", 200))
+        sstrat_kind = args.get("sstrat_kind", "SSPSAR").upper()
         at_opt = args.get("at")
-        policies_raw = args.get("policies")
-        if policies_raw:
-            try:
-                policies = json.loads(policies_raw)
-            except Exception as e:
-                return _err(f"Bad policies JSON: {e}")
-        else:
-            policies = [{"policy_name": "psar_lock"}]
+        cfg_freeform = args["__freeform__"]
         at_ms = Clock.now_utc_ms()
         if at_opt:
             try:
@@ -682,17 +682,18 @@ def build_registry() -> CommandRegistry:
         except Exception as e:
             return _err_exc("exit_attach.get_thinker", e)
         rt = inst.runtime()
-        cfg = inst._cfg
-        rt.setdefault("positions", {})
-        rt["positions"][str(pid)] = {
-            "policies": policies,
-            "lookback_bars": lookback,
-            "attached_at_ms": at_ms,
-            "timeframe": cfg.get("timeframe"),
+        pp_ctx = rt.setdefault(PP_CTX, {})
+
+        pid_str = str(pid)
+        ctx = {
+            ATTACHED_AT: at_ms,
+            "cfg": cfg_freeform,
+            "sstrat_kind": sstrat_kind,
         }
+        pp_ctx[pid_str] = ctx
         inst.save_runtime()
         eng.tm.reload(thinker_id)
-        return _txt(f"Attached exit policies to position {pid} ({len(policies)} policy) via thinker {thinker_id} at {ts_human(at_ms)}")
+        return _txt(f"Attached exit watcher to position {pid} via thinker {thinker_id} ({sstrat_kind}) at {ts_human(at_ms)}")
 
     @R.at("exit-list", argspec=["thinker_id"], nreq=1)
     def _at_exit_list(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -703,18 +704,17 @@ def build_registry() -> CommandRegistry:
         except Exception as e:
             return _err_exc("exit_list.get_thinker", e)
         rt = inst.runtime()
-        positions = rt.get("positions") or {}
-        if not positions:
+        pp_ctx = rt.get(PP_CTX) or {}
+        if not pp_ctx:
             return _txt("No attachments.")
         tbl_rows = []
-        for pid_str, ctx in positions.items():
+        for pid_str, ctx in pp_ctx.items():
             tbl_rows.append([
                 int(pid_str),
-                len(ctx.get("policies") or []),
-                ctx.get("lookback_bars"),
-                ts_human(ctx.get("attached_at_ms")),
+                ctx.get("sstrat_kind") or "-",
+                ts_human(ctx.get(ATTACHED_AT)),
             ])
-        return _tbl(["position_id", "policies", "lookback", "attached_at"], tbl_rows, intro=f"Exit attachments (thinker {thinker_id})")
+        return _tbl(["position_id", "sstrat", "attached_at"], tbl_rows, intro=f"Exit attachments (thinker {thinker_id})")
 
     @R.bang("exit-detach", argspec=["thinker_id", "position_id"], nreq=2)
     def _bang_exit_detach(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -726,10 +726,11 @@ def build_registry() -> CommandRegistry:
         except Exception as e:
             return _err_exc("exit_detach.get_thinker", e)
         rt = inst.runtime()
-        positions = rt.setdefault("positions", {})
-        if str(pid) not in positions:
+        pp_ctx = rt.setdefault(PP_CTX, {})
+        pid_key = str(pid)
+        if pid_key not in pp_ctx:
             raise ValueError(f"Position {pid} not attached to thinker {tid}")
-        removed = positions.pop(str(pid), None)
+        removed = pp_ctx.pop(pid_key, None)
         inst.save_runtime()
         eng.tm.reload(tid)
         return _txt(f"Detached exit policies from position {pid}" + ("" if removed else " (none existed)"))
@@ -744,7 +745,7 @@ def build_registry() -> CommandRegistry:
         except Exception as e:
             return _err_exc("exit_state.get_thinker", e)
         rt = inst.runtime()
-        ctx = (rt.get("positions") or {}).get(str(pid))
+        ctx = (rt.get(PP_CTX) or {}).get(str(pid))
         if not ctx:
             return _txt("No trailing state.")
         trailing = ctx.get("trailing") or {}
@@ -776,7 +777,7 @@ def build_registry() -> CommandRegistry:
             inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
             rt = inst.runtime()
             cfg = inst._cfg
-            ctx = (rt.get("positions") or {}).get(str(pid)) or {}
+            ctx = (rt.get(PP_CTX) or {}).get(str(pid)) or {}
             tf = ctx.get("timeframe") or cfg.get("timeframe") or "1d"
             path = eh.render_indicator_history_chart(eng, thinker_id, pid, "psar", sym, timeframe=tf, n=n)
         except Exception as e:
@@ -814,7 +815,7 @@ def build_registry() -> CommandRegistry:
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
             rt = inst.runtime()
             cfg = inst._cfg
-            ctx = (rt.get("positions") or {}).get(str(pid)) or {}
+            ctx = (rt.get(PP_CTX) or {}).get(str(pid)) or {}
             tf = ctx.get("timeframe") or cfg.get("timeframe") or "1d"
 
             ind_rows = eng.ih.list_indicators(tid, pid, fmt="columnar")
@@ -1197,7 +1198,7 @@ def build_registry() -> CommandRegistry:
             return _txt("Usage: !thinker-set <id> <key>=<val> ...")
         tid = int(tid_raw)
 
-        updates = {k: v for k, v in args.items() if k != "id"}
+        updates = args["__freeform__"]
         if not updates:
             return _txt("Provide at least one key=val")
 
@@ -1261,7 +1262,7 @@ def build_registry() -> CommandRegistry:
         else:
             kind = kind_arg.upper()
             if kind not in kinds:
-                return _txt(f"Unknown thinker kind '{kind}'. Use @thinker-kinds for a list.")
+                return _txt(f"Unknown thinker kind '{kind}'. Use ?thinker-kinds for a list.")
 
         enabled_opt = args.get("enabled")
         enabled_val = 1

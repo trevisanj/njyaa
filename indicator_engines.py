@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # FILE: indicator_engines.py
 from __future__ import annotations
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Sequence
 import numpy as np
 import pandas as pd
-
+from common import LAST_TS
+import engclasses as ec
 
 
 class BaseIndicator:
@@ -14,9 +15,10 @@ class BaseIndicator:
     def __init__(self, cfg: dict):
         self.cfg = cfg or {}
         self.state: Optional[dict] = None
+        self.on_init()
 
     @classmethod
-    def default_cfg(cls, *, position=None) -> dict:
+    def default_cfg(cls, *, position: ec.Position) -> dict:
         return {}
 
     @classmethod
@@ -29,6 +31,9 @@ class BaseIndicator:
             raise ValueError(f"Unknown indicator kind: {kind}")
         return INDICATOR_CLASSES[kind](cfg)
 
+    def on_init(self):
+        """Inherit to create new instance variables etc."""
+        pass
 
 
 class PSARIndicator(BaseIndicator):
@@ -40,11 +45,8 @@ class PSARIndicator(BaseIndicator):
         return 5
 
     @classmethod
-    def default_cfg(cls, *, position=None) -> dict:
-        side = None
-        if position and isinstance(position, dict):
-            side = position.get("side")
-        trend = "UP" if side == "LONG" else ("DOWN" if side == "SHORT" else "UP")
+    def default_cfg(cls, *, position: ec.Position) -> dict:
+        trend = "UP" if position.side > 1 else "DOWN"
         return {"af": 0.02, "max_af": 0.2, "initial_trend": trend}
 
     def run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
@@ -167,7 +169,7 @@ class ATRIndicator(BaseIndicator):
         return max(cfg["period"] + 1, 2)
 
     @classmethod
-    def default_cfg(cls, *, position=None) -> dict:
+    def default_cfg(cls, *, position: ec.Position) -> dict:
         return {"period": 14}
 
     def run(self, df: pd.DataFrame, start_idx: int = 0) -> Dict[str, np.ndarray]:
@@ -233,12 +235,14 @@ class StopperIndicator(BaseIndicator):
       value: ratcheted stop series
       flag: 1.0 when stop is hit, NaN otherwise
     """
+    kind = "stopper"
+
     @classmethod
-    def default_cfg(cls, *, position=None) -> dict:
-        side = 0
-        if position:
-            side = position.get("side", 0)
-        return {"side": side or 0}
+    def default_cfg(cls, *, position: ec.Position) -> dict:
+        return {"side": position.side}
+
+    def on_init(self):
+        self._stop_info = None
 
     def run(self, df: pd.DataFrame, values: np.ndarray, start_idx: int = 0) -> Dict[str, np.ndarray]:
         if df is None or df.empty:
@@ -267,7 +271,9 @@ class StopperIndicator(BaseIndicator):
                 flag_arr[i] = 1.0
 
         self.state = {"stop": stop}
-        return {"value": val_arr, "flag": flag_arr}
+        # makes it retrievable to the sstrat later
+        self._stop_info = {"value": val_arr, "flag": flag_arr}
+        return self._stop_info
 
 
 class StopStrategy:
@@ -278,16 +284,18 @@ class StopStrategy:
       - runs indicators, saves their state/history, and returns suggested stop + history rows
     """
     kind: str = "BASE_STRAT"
-    def __init__(self, eng, thinker, runtime: dict, pos, name: str):
+    def __init__(self, eng, thinker, ctx: dict, pos, name: str):
         self.eng = eng
         self.thinker = thinker
-        self.runtime = runtime
+        self.ctx = ctx
         self.pos = pos
         self.name = name
         self.inds: Dict[str, BaseIndicator] = {}
-        runtime.setdefault("cfg", {})
-        runtime.setdefault("states", {})
-        self.cfg: dict = runtime["cfg"]
+        self._stopper: Optional["StopperIndicator"] = None
+        self._stop_info: Optional[Dict[str, Sequence]] = None
+        ctx.setdefault("cfg", {})
+        ctx.setdefault("states", {})
+        self.cfg: dict = ctx["cfg"]
         self.history_rows: list[dict] = []
         self.setup()
 
@@ -312,7 +320,7 @@ class StopStrategy:
     def _build_indicators(self):
         items = [(k, v) for k, v in self.ind_map.items()] if isinstance(self.ind_map, dict) else \
                 [(k, k) for k in self.ind_map]
-        states = self.runtime["states"]
+        states = self.ctx["states"]
         for kind, name in items:
             cfg = self.on_get_default_cfg(kind)
             ind = BaseIndicator.from_kind(kind, cfg)
@@ -320,19 +328,31 @@ class StopStrategy:
                 ind.state = states[name]
             self.inds[name] = ind
 
+            if kind == "stopper":
+                # Grabs last stopper
+                self._stopper = ind
+
+        assert self._stopper, f"sstrat.init.fail.no_stopper: sstrat_kind={self.kind}"
+
     def on_run(self, bars: pd.DataFrame, start_idx: int):
         raise NotImplementedError
 
-    def on_get_stop_info(self):
-        """Return dict with stop/flag series from last run."""
-        return {}
+    def get_stop_info(self):
+        """Return dict with value/flag keys from last run."""
+        return self._stopper._stop_info
+
+    def get_lookback_bars(self) -> int:
+        """Return minimum bars needed based on contained indicators."""
+        if not self.inds:
+            raise ValueError("Indicators not initialized for strategy")
+        return max(ind.__class__.lookback_bars(ind.cfg) for ind in self.inds.values())
 
     def run(self, bars: pd.DataFrame):
         """
         Execute strategy: compute start_idx, run indicators/stop logic, persist state/history.
         """
         self.history_rows = []
-        last_ts = self.runtime.get("last_ts")
+        last_ts = self.ctx.get(LAST_TS)
         start_idx = 0
         if last_ts is not None:
             dt = pd.to_datetime(int(last_ts), unit="ms")
@@ -342,19 +362,19 @@ class StopStrategy:
 
         self.on_run(bars, start_idx=start_idx)
 
-        self.runtime["states"] = {name: ind.state for name, ind in self.inds.items()}
+        self.ctx["states"] = {name: ind.state for name, ind in self.inds.items()}
         if not bars.empty:
-            self.runtime["last_ts"] = int(bars.index[-1].value // 1_000_000)
+            self.ctx[LAST_TS] = int(bars.index[-1].value // 1_000_000)
         if self.history_rows:
             self.eng.ih.insert_history(self.history_rows)
         return None
 
     @classmethod
-    def from_kind(cls, kind: str, eng, thinker, runtime: dict, pos, name: str = ""):
+    def from_kind(cls, kind: str, eng, thinker, ctx: dict, pos, name: str = ""):
         if kind not in SSTRAT_CLASSES:
             raise ValueError(f"Unknown strategy kind: {kind}")
         strat_cls = SSTRAT_CLASSES[kind]
-        return strat_cls(eng, thinker, runtime, pos, name)
+        return strat_cls(eng, thinker, ctx, pos, name)
 
 
 class SSPSAR(StopStrategy):
@@ -367,12 +387,12 @@ class SSPSAR(StopStrategy):
     def on_run(self, bars: pd.DataFrame, start_idx: int):
         psar = self.inds["psar"]
         stopper = self.inds["stopper"]
-        psar.state = self.runtime.get("states", {}).get("psar")
-        stopper.state = self.runtime.get("states", {}).get("stopper")
-        prev_stop_val = self.runtime.get("last_stop_value")
+        psar.state = self.ctx.get("states", {}).get("psar")
+        stopper.state = self.ctx.get("states", {}).get("stopper")
+        prev_stop_val = self.ctx.get("last_stop_value")
 
         psar_out = psar.run(bars, start_idx=start_idx)
-        stop_out = stopper.run(bars, psar_out["value"], start_idx=start_idx)
+        stopper_out = stopper.run(bars, psar_out["value"], start_idx=start_idx)
 
         # record indicator history from start_idx onward
         tid = self.thinker._thinker_id
@@ -381,32 +401,30 @@ class SSPSAR(StopStrategy):
             self.history_rows.extend(
                 self.thinker._indicator_history_rows(tid, pid, "psar", psar_out, bars, start_idx)
             )
-        if stop_out:
+        if stopper_out:
             self.history_rows.append({
                 "thinker_id": tid,
                 "position_id": pid,
                 "name": "stopper",
                 "open_ts": int(bars.index[-1].value // 1_000_000),
-                "value": stop_out.get("value")[-1] if stop_out.get("value") is not None else None,
-                "aux": {"flag": stop_out.get("flag")[-1] if stop_out.get("flag") is not None else None},
+                "value": stopper_out.get("value")[-1] if stopper_out.get("value") is not None else None,
+                "aux": {"flag": stopper_out.get("flag")[-1] if stopper_out.get("flag") is not None else None},
             })
 
-        last_stop_series = stop_out.get("value") if stop_out else None
-        last_flag_series = stop_out.get("flag") if stop_out else None
-        self.runtime["prev_stop_value"] = prev_stop_val
-        self.runtime["last_stop"] = last_stop_series
-        self.runtime["last_flag"] = last_flag_series
+        last_stop_series = stopper_out.get("value") if stopper_out else None
+        last_flag_series = stopper_out.get("flag") if stopper_out else None
+        self.ctx["prev_stop_value"] = prev_stop_val
+        self.ctx["last_stop"] = last_stop_series
+        self.ctx["last_flag"] = last_flag_series
         if last_stop_series is not None and len(last_stop_series) > 0:
-            self.runtime["last_stop_value"] = last_stop_series[-1]
+            self.ctx["last_stop_value"] = last_stop_series[-1]
         if last_flag_series is not None and len(last_flag_series) > 0:
-            self.runtime["last_flag_value"] = last_flag_series[-1]
+            self.ctx["last_flag_value"] = last_flag_series[-1]
 
     def on_get_stop_info(self):
         return {
-            "stop": self.runtime.get("last_stop"),
-            "flag": self.runtime.get("last_flag"),
-            "stop_value": self.runtime.get("last_stop_value"),
-            "prev_stop_value": self.runtime.get("prev_stop_value"),
+            "stop": self.ctx.get("last_stop"),
+            "flag": self.ctx.get("last_flag"),
         }
 
 

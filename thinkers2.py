@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CH
 
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
-from common import log, Clock, AppConfig, leg_pnl, tf_ms, ts_human
+from common import (log, Clock, AppConfig, leg_pnl, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, SSTRAT_KIND, ATTACHED_AT,
+                    LAST_TS)
 from thinkers1 import ThinkerBase
 import risk_report
 from indicator_engines import StopStrategy, SSPSAR
@@ -164,6 +165,27 @@ class TrailingStopThinker(ThinkerBase):
     """
     Orchestrates per-position trailing policies fed by indicator steppers.
     Attachments + state live in this thinker's runtime, keyed by position id.
+
+    position context example schematic: TODO update this
+    ```
+    {
+      "123": {
+        "attached_at_ms": 1732450000000,
+        "lookback_bars": 200,
+        "sstrat_kind": "SSPSAR",
+        "sstrat": {
+          "cfg": {...},
+          "states": {
+            "psar": {...},
+            "stopper": {...}
+          },
+          "last_ts": 1732450600000,
+          "last_stop": [1.2345, 1.2350],
+          "last_flag": [NaN, 1],
+        }
+      }
+    }
+    ```
     """
     kind = "TRAILING_STOP"
 
@@ -175,7 +197,7 @@ class TrailingStopThinker(ThinkerBase):
         sstrat: str = field(default="SSPSAR", metadata={"help": "Stop strategy kind"})
 
     def _on_init(self) -> None:
-        self._runtime.setdefault("positions", {})
+        self._strats: Dict[str, StopStrategy] = {}
 
     def _pair_bars(self, pos: ec.Position, start_ts: int, end_ts: Optional[int] = None) -> pd.DataFrame:
         """Returns OHLCV data for configured timeframe"""
@@ -184,12 +206,8 @@ class TrailingStopThinker(ThinkerBase):
     def on_tick(self, now_ms: int):
         # ---------- tick-level setup ----------
 
-        # runtime keys
-        PP_CTX = "pp_ctx"
-
-        pp_ctx = self._runtime.get(PP_CTX, {})  # per-position runtime state map
+        pp_ctx = self._runtime.get(PP_CTX) or {}
         if not pp_ctx:
-            # no positions attached
             return 0
 
         min_move_bp = float(self._cfg["min_move_bp"])  # min bps improvement to log
@@ -212,47 +230,66 @@ class TrailingStopThinker(ThinkerBase):
                 p_ctx["invalid"] = True
                 p_ctx["invalid_msg"] = "Closed" if pos else "Inexistent"
                 pp_ctx[pid_str] = p_ctx
+                self._strats.pop(pid_str, None)
                 dirty = True
                 continue
 
+            sstrat_ctx = p_ctx.setdefault(SSTRAT_CTX, {})
+            sstrat_kind = p_ctx.get(SSTRAT_KIND, self._cfg.get("sstrat", "SSPSAR"))
+            sstrat = self._strats.get(pid_str)
+            # TODO: think about situations when it is better to invalidate the whole state
+            # TODO: at bootstrapping, the indicator history probably needs to be deleted
+            if sstrat is None or sstrat.kind != sstrat_kind:
+                # TODO: sstrat needs a unique name, i guess
+                sstrat_name = sstrat_kind
+                sstrat = StopStrategy.from_kind(sstrat_kind, self.eng, self, sstrat_ctx, pos, sstrat_name)
+                self._strats[pid_str] = sstrat
+            else:
+                sstrat.ctx = sstrat_ctx
+                sstrat.pos = pos
+
             # ---------- build kline window ----------
-            need_n = max(int(p_ctx.get("lookback_bars", 200)), 5)  # minimum bars required
+            if "lookback_bars" not in p_ctx:
+                lookback_bars = p_ctx["lookback_bars"] = sstrat.get_lookback_bars()  # minimum bars required
+            else:
+                lookback_bars = p_ctx["lookback_bars"]
+
             tfms = tf_ms(self._cfg["timeframe"])  # timeframe in ms
-            anchor_ts = p_ctx.get("last_ts") or p_ctx.get("attached_at_ms")  # last processed or attach time
-            start_ts = max(0, int(anchor_ts) - need_n * tfms)  # start window so we have enough bars
+            anchor_ts = sstrat_ctx.get(LAST_TS) or p_ctx.get(ATTACHED_AT)
+
+            start_ts = max(0, int(anchor_ts) - lookback_bars * tfms)  # start window so we have enough bars
             bars = self._pair_bars(pos, start_ts, None)  # fetch num[/den] bars as dataframe
-            if bars.empty or len(bars) < need_n:
-                log().debug(f"[trail] Missing klines {tf}, can't calculate stop", num_den=num_den, position_id=pos.id)
+
+            if bars.empty or len(bars) < lookback_bars:
+                log().warn(f"[trail] Missing klines {tf}, can't calculate stop", num_den=num_den, position_id=pos.id)
                 continue
 
             # ---------- run strategy ----------
-            sstrat_rt = p_ctx.setdefault("sstrat", {})
-            sstrat_kind = p_ctx.get("sstrat_kind", self._cfg.get("sstrat", "SSPSAR"))
-            strat = StopStrategy.from_kind(sstrat_kind, self.eng, self, sstrat_rt, pos, sstrat_kind)
-            strat.run(bars)
-            stop_info = strat.on_get_stop_info()
+            sstrat.run(bars)
 
-            stop_series = stop_info.get("stop") if stop_info else None
-            if stop_series is None or len(stop_series) == 0 or np.all(np.isnan(stop_series)):
-                continue
-            latest_stop = stop_series[-1]
+            # ----------- interpret stops -----------
+            stop_info = sstrat.get_stop_info()
+            stop_series = stop_info["value"]
             price = bars["Close"].iloc[-1]
-            hit = price <= latest_stop if pos.dir_sign > 0 else price >= latest_stop
+            flag_series = stop_info["flag"]
+            hit = bool(flag_series[-1] == 1)
 
-            prev_stop_val = stop_info.get("prev_stop_value") if stop_info else None
+            latest_stop = stop_series[-1]
+            prev_stop_val = stop_series[-2] if len(stop_series) >= 2 else None
             if _stop_improved(pos.dir_sign, prev_stop_val, latest_stop, min_move_bp):
-                self.notify("INFO", f"[trail] {num_den} stop -> {latest_stop:.4f} ({'LONG' if pos.dir_sign>0 else 'SHORT'})", send=True,
-                            symbol=num_den, stop=latest_stop, prev=prev_stop_val, price=price)
+                msg = f"[trail] {num_den} stop -> {latest_stop:.4f} ({'LONG' if pos.dir_sign>0 else 'SHORT'})"
+                self.notify("INFO", msg, send=True,
+                            num_den=num_den, stop=latest_stop, prev=prev_stop_val, price=price)
             if hit:
-                self.notify("WARN", f"[trail] {num_den} stop hit @ {price:.4f} vs {latest_stop:.4f}", send=True,
-                            symbol=num_den, stop=latest_stop, price=price)
+                self.notify("WARN", f"[trail] {num_den} stop hit @ {price:.4f} vs {latest_stop:.4f}",
+                            send=True, num_den=num_den, stop=latest_stop, price=price)
 
-            p_ctx["last_ts"] = sstrat_rt.get("last_ts", int(bars.index[-1].value // 1_000_000))
             pp_ctx[pid_str] = p_ctx
             processed += 1
             dirty = True
 
         if dirty:
+            self._runtime[PP_CTX] = pp_ctx
             self.save_runtime()  # persist runtime if touched
         return
 
