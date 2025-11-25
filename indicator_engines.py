@@ -277,6 +277,7 @@ class StopStrategy:
       - owns runtime slice (states, cfg)
       - runs indicators, saves their state/history, and returns suggested stop + history rows
     """
+    kind: str = "BASE_STRAT"
     def __init__(self, eng, thinker, runtime: dict, pos, name: str):
         self.eng = eng
         self.thinker = thinker
@@ -291,9 +292,6 @@ class StopStrategy:
         self.setup()
 
     ind_map = None  # subclass can set to list of kinds or dict {kind: name}
-
-    def on_setup(self):
-        raise NotImplementedError
 
     def on_conf_ind(self):
         """Hook to tweak indicator configs after auto-build."""
@@ -310,7 +308,6 @@ class StopStrategy:
         """Convenience wrapper to configure indicators and perform extra setup."""
         self._build_indicators()
         self.on_conf_ind()
-        # no on_setup hook; subclasses can override on_conf_ind/on_run
 
     def _build_indicators(self):
         items = [(k, v) for k, v in self.ind_map.items()] if isinstance(self.ind_map, dict) else \
@@ -352,11 +349,19 @@ class StopStrategy:
             self.eng.ih.insert_history(self.history_rows)
         return None
 
+    @classmethod
+    def from_kind(cls, kind: str, eng, thinker, runtime: dict, pos, name: str = ""):
+        if kind not in SSTRAT_CLASSES:
+            raise ValueError(f"Unknown strategy kind: {kind}")
+        strat_cls = SSTRAT_CLASSES[kind]
+        return strat_cls(eng, thinker, runtime, pos, name)
+
 
 class SSPSAR(StopStrategy):
     """
     Stop strategy: PSAR feeding Stopper (protective, one-sided).
     """
+    kind = "SSPSAR"
     ind_map = ["psar", "stopper"]
 
     def on_run(self, bars: pd.DataFrame, start_idx: int):
@@ -403,6 +408,9 @@ class SSPSAR(StopStrategy):
             "stop_value": self.runtime.get("last_stop_value"),
             "prev_stop_value": self.runtime.get("prev_stop_value"),
         }
+
+
+SSTRAT_CLASSES = {cls.kind: cls for cls in StopStrategy.__subclasses__()}
 
 
 # registry

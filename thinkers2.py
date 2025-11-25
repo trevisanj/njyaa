@@ -172,6 +172,7 @@ class TrailingStopThinker(ThinkerBase):
         timeframe: str = field(default="1d", metadata={"help": "Timeframe for indicator klines"})
         min_move_bp: float = field(default=1.0, metadata={"help": "Minimum bps improvement to log stop moves"})
         alert_cooldown_ms: int = field(default=60_000, metadata={"help": "Cooldown between repeated hit alerts"})
+        sstrat: str = field(default="SSPSAR", metadata={"help": "Stop strategy kind"})
 
     def _on_init(self) -> None:
         self._runtime.setdefault("positions", {})
@@ -186,12 +187,13 @@ class TrailingStopThinker(ThinkerBase):
         if not pp_ctx:
             # no positions attached
             return 0
-        processed = 0  # counter of processed attachments
+
         min_move_bp = float(self._cfg["min_move_bp"])  # min bps improvement to log
         tf = self._cfg["timeframe"]  # timeframe string
         thinker_id = self._thinker_id  # cached id for history rows
         dirty = False  # whether we must save runtime at end
 
+        processed = 0  # counter of processed attachments
         for pid_str, ctx in pp_ctx.items():
             # ---------- fetch position + validate attachment ----------
             if ctx.get("invalid"):
@@ -221,8 +223,8 @@ class TrailingStopThinker(ThinkerBase):
 
             # ---------- run strategy ----------
             sstrat_rt = ctx.setdefault("sstrat", {})
-            sstrat_name = ctx.get("sstrat_name", "SSPSAR")
-            strat: StopStrategy = SSPSAR(self.eng, self, sstrat_rt, pos, sstrat_name)
+            sstrat_kind = ctx.get("sstrat_kind", self._cfg.get("sstrat", "SSPSAR"))
+            strat = StopStrategy.from_kind(sstrat_kind, self.eng, self, sstrat_rt, pos, sstrat_kind)
             strat.run(bars)
             stop_info = strat.on_get_stop_info()
 
