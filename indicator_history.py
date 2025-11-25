@@ -110,6 +110,17 @@ class IndicatorHistory:
             self.con.commit()
             return cur.rowcount or 0
 
+    def delete_by_thinker_position(self, thinker_id: int, position_id: int) -> int:
+        """Delete rows for a specific thinker and position."""
+        with self._lock:
+            cur = self.con.cursor()
+            cur.execute(
+                "DELETE FROM indicator_history WHERE thinker_id=? AND position_id=?",
+                (int(thinker_id), int(position_id)),
+            )
+            self.con.commit()
+            return cur.rowcount or 0
+
     def delete_by_thinker(self, thinker_id: int) -> int:
         with self._lock:
             cur = self.con.cursor()

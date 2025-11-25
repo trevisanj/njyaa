@@ -46,6 +46,8 @@ SSTRAT_KIND = "sstrat_kind"
 LAST_TS = "last_ts"
 # Time of attachment of a position into a thinker
 ATTACHED_AT = "attached_at"
+# Number of bars needed for all indicators in a sstrat to work
+LOOKBACK_BARS = "lookback_bars"
 
 # =======================
 # ====== CONFIG =========

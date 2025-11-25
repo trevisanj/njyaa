@@ -47,6 +47,7 @@ class ThinkerManager:
         self.store = eng.store
         self._instances: Dict[int, ThinkerBase] = {}    # id -> instance
         self._reload_pending: set[int] = set()
+        self._messages: Dict[int, list] = {}
         self._lock = threading.RLock()
         self.log = sublog("thinking")
         self.factory = ThinkerFactory(self, eng)

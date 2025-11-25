@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple, Sequence
 import numpy as np
 import pandas as pd
-from common import LAST_TS, log
+from common import LAST_TS, log, LOOKBACK_BARS
 import engclasses as ec
 
 
@@ -352,9 +352,9 @@ class StopStrategy:
 
     def get_lookback_bars(self) -> int:
         """Return minimum bars needed based on contained indicators."""
-        if not self.inds:
-            raise ValueError("Indicators not initialized for strategy")
-        return max(ind.__class__.lookback_bars(ind.cfg) for ind in self.inds.values())
+        if not LOOKBACK_BARS in self.ctx:
+            self.ctx[LOOKBACK_BARS] = max(ind.__class__.lookback_bars(ind.cfg) for ind in self.inds.values())
+        return self.ctx[LOOKBACK_BARS]
 
     def run(self, bars: pd.DataFrame):
         """

@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, Tuple, Optional, List, Sequence, Literal
 import json
 import os
 
-from common import parse_when, log, ts_human, PP_CTX, ATTACHED_AT
+from common import parse_when, log, ts_human, PP_CTX, ATTACHED_AT, SSTRAT_KIND
 from datetime import datetime, timezone, timedelta
 import textwrap
 from binance_um import BinanceUM
@@ -734,6 +734,25 @@ def build_registry() -> CommandRegistry:
         inst.save_runtime()
         eng.tm.reload(tid)
         return _txt(f"Detached exit policies from position {pid}" + ("" if removed else " (none existed)"))
+
+    @R.bang("exit-reset", argspec=["thinker_id", "position_id"], nreq=2)
+    def _bang_exit_reset(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Reset trailing context so it reboots on next tick: clears strategy state and indicator history.
+        """
+        tid = int(args["thinker_id"])
+        pid = int(args["position_id"])
+        try:
+            inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
+        except Exception as e:
+            return _err_exc("exit_reset.get_thinker", e)
+        rt = inst.runtime()
+        resets = rt.setdefault("reset", [])
+        pid_key = str(pid)
+        if pid_key not in resets and "__all__" not in resets:
+            resets.append(pid_key)
+        inst.save_runtime()
+        return _txt(f"Requested reset of trailing context for position {pid}; will rebuild on next tick")
 
     @R.at("exit-state", argspec=["thinker_id", "position_id"], nreq=2)
     def _at_exit_state(eng: BotEngine, args: Dict[str, str]) -> CO:

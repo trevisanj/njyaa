@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CH
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
 from common import (log, Clock, AppConfig, leg_pnl, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, SSTRAT_KIND, ATTACHED_AT,
-                    LAST_TS)
+                    LAST_TS, LOOKBACK_BARS)
 from thinkers1 import ThinkerBase
 import risk_report
 from indicator_engines import StopStrategy, SSPSAR
@@ -195,14 +195,41 @@ class TrailingStopThinker(ThinkerBase):
         sstrat: str = field(default="SSPSAR", metadata={"help": "Stop strategy kind"})
 
     def _on_init(self) -> None:
+        self._runtime.setdefault(PP_CTX, {})
+        resets = list(self._runtime.pop("reset", []))
+        if resets:
+            self._reset(resets)
+            self.save_runtime()
         self._strats: Dict[str, StopStrategy] = {}
 
     def _pair_bars(self, pos: ec.Position, start_ts: int, end_ts: Optional[int] = None) -> pd.DataFrame:
         """Returns OHLCV data for configured timeframe"""
         return self.eng.kc.pair_bars(pos.num, pos.den, self._cfg["timeframe"], start_ts, end_ts)
 
+    def _reset(self, targets):
+        """Reset strategy/runtime for selected positions or all."""
+        pp_ctx = self._runtime.setdefault(PP_CTX, {})
+        if targets == "__all__" or "__all__" in targets:
+            target_keys = list(pp_ctx.keys())
+        else:
+            target_keys = [str(pid) for pid in targets if str(pid) in pp_ctx]
+        for pid_key in target_keys:
+            p_ctx = pp_ctx.get(pid_key) or {}
+            p_ctx.pop(SSTRAT_CTX, None)
+            self.eng.ih.delete_by_thinker_position(self._thinker_id, int(pid_key))
+        self._runtime[PP_CTX] = pp_ctx
+
     def on_tick(self, now_ms: int):
         # ---------- tick-level setup ----------
+
+        resets = list(self._runtime.pop("reset", []))
+        msgs = self.tm.consume_messages(self._thinker_id) if self._thinker_id else []
+        for m in msgs:
+            if isinstance(m, dict) and "reset" in m:
+                resets.extend(m["reset"])
+        if resets:
+            self._reset(resets)
+            self.save_runtime()
 
         pp_ctx = self._runtime.get(PP_CTX) or {}
         if not pp_ctx:
@@ -249,10 +276,7 @@ class TrailingStopThinker(ThinkerBase):
                 sstrat.pos = pos
 
             # ---------- build kline window ----------
-            if "lookback_bars" not in p_ctx:
-                lookback_bars = p_ctx["lookback_bars"] = sstrat.get_lookback_bars()  # minimum bars required
-            else:
-                lookback_bars = p_ctx["lookback_bars"]
+            lookback_bars = sstrat.get_lookback_bars()
 
             tfms = tf_ms(self._cfg["timeframe"])  # timeframe in ms
             anchor_ts = sstrat_ctx.get(LAST_TS) or p_ctx.get(ATTACHED_AT)
