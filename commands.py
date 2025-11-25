@@ -784,6 +784,23 @@ def build_registry() -> CommandRegistry:
             return _err_exc("chart_exit", e)
         return CO(OCPhoto(path, caption=f"exit history for pos {pid}"))
 
+    @R.at("ih-stats")
+    def _at_ih_stats(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Indicator history counts grouped by thinker/position/name."""
+        with eng.ih._lock:
+            rows = eng.ih.con.execute(
+                """
+                SELECT thinker_id, position_id, name, COUNT(*) AS count
+                FROM indicator_history
+                GROUP BY thinker_id, position_id, name
+                ORDER BY thinker_id, position_id, name
+                """
+            ).fetchall()
+        if not rows:
+            return _txt("No indicator history.")
+        tbl_rows = [[r["thinker_id"], r["position_id"], r["name"], r["count"]] for r in rows]
+        return _tbl(["thinker_id", "position_id", "name", "count"], tbl_rows, intro="Indicator history stats")
+
     @R.at("ind", argspec=["thinker_id", "position_id"], nreq=0)
     def _at_ind(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List recorded indicators (distinct by thinker/position/name)."""
@@ -797,12 +814,12 @@ def build_registry() -> CommandRegistry:
         tbl_rows = list(zip(rows["thinker_id"], rows["position_id"], rows["name"]))
         return _tbl(["thinker_id", "position_id", "name"], tbl_rows, intro="Indicator history keys")
 
-    @R.at("chart-ind", argspec=["thinker_id", "position_id", "name"], nreq=2)
+    @R.at("chart-ind", argspec=["thinker_id", "position_id", "names"], nreq=2)
     def _at_chart_ind(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Plot indicator history with candles for a position (all or filtered by name)."""
         tid = int(args["thinker_id"])
         pid = int(args["position_id"])
-        name = args.get("name")
+        names_raw = args.get("names")
 
         pos = eng.store.get_position(pid)
         if not pos:
@@ -820,10 +837,12 @@ def build_registry() -> CommandRegistry:
 
             ind_rows = eng.ih.list_indicators(tid, pid, fmt="columnar")
             names = ind_rows.get("name") if ind_rows else []
-            if name:
-                if name not in names:
-                    return _err(f"indicator {name} not found for thinker {tid}, position {pid}")
-                names = [name]
+            if names_raw:
+                wanted = [n.strip() for n in names_raw.split(",") if n.strip()]
+                missing = [n for n in wanted if n not in (names or [])]
+                if missing:
+                    return _err(f"indicator(s) {', '.join(missing)} not found for thinker {tid}, position {pid}")
+                names = wanted
             else:
                 names = list(names or [])
             if not names:

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple, Sequence
 import numpy as np
 import pandas as pd
-from common import LAST_TS
+from common import LAST_TS, log
 import engclasses as ec
 
 
@@ -360,6 +360,7 @@ class StopStrategy:
         """
         Execute strategy: compute start_idx, run indicators/stop logic, persist state/history.
         """
+        log().debug("sstrat.run.start", strat=self.kind, position_id=self.pos.id, bars=len(bars))
         last_ts = self.ctx.get(LAST_TS)
         start_idx = 0
         if last_ts is not None:
@@ -367,6 +368,7 @@ class StopStrategy:
             start_idx = int(bars.index.searchsorted(dt, side="left"))
             if start_idx >= len(bars):
                 start_idx = max(0, len(bars) - 1)
+        log().debug("sstrat.run.window", strat=self.kind, position_id=self.pos.id, start_idx=start_idx, last_ts=last_ts)
 
         self.on_run(bars, start_idx=start_idx)
 
@@ -381,7 +383,9 @@ class StopStrategy:
             if not ind.outputs: continue
             for out_name, arr in ind.outputs.items():
                 vals = arr[start_idx:]
-                self.eng.ih.insert_history2(self.thinker._thinker_id, self.pos.id, f"{ind_name}:{out_name}",
+                log().debug("sstrat.hist.write", strat=self.kind, ind=ind_name, out=out_name,
+                            position_id=self.pos.id, points=len(vals))
+                self.eng.ih.insert_history2(self.thinker._thinker_id, self.pos.id, f"{ind_name}-{out_name}",
                                             ts_ms, vals,)
         return None
 

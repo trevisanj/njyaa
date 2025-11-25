@@ -207,6 +207,7 @@ class TrailingStopThinker(ThinkerBase):
         pp_ctx = self._runtime.get(PP_CTX) or {}
         if not pp_ctx:
             return 0
+        log().debug("trail.tick.start", attachments=len(pp_ctx))
 
         min_move_bp = float(self._cfg["min_move_bp"])  # min bps improvement to log
         tf = self._cfg["timeframe"]  # timeframe string
@@ -222,6 +223,7 @@ class TrailingStopThinker(ThinkerBase):
 
             pos = self.eng.store.get_position(int(pid_str))  # Position object (or None)
             num_den = pos.get_pair()
+            log().debug("trail.tick.pos", pid=pid_str, num_den=num_den)
 
             if not pos or pos.status != "OPEN":
                 # mark invalid if missing/closed; skip
@@ -261,8 +263,10 @@ class TrailingStopThinker(ThinkerBase):
             if bars.empty or len(bars) < lookback_bars:
                 log().warn(f"[trail] Missing klines {tf}, can't calculate stop", num_den=num_den, position_id=pos.id)
                 continue
+            log().debug("trail.tick.bars", pid=pid_str, rows=len(bars), lookback=lookback_bars, anchor=anchor_ts)
 
             # ---------- run strategy ----------
+            log().debug("trail.tick.run_sstrat", pid=pid_str, strat=sstrat_kind)
             sstrat.run(bars)
 
             # ----------- interpret stops -----------
@@ -281,6 +285,7 @@ class TrailingStopThinker(ThinkerBase):
             if hit:
                 self.notify("WARN", f"[trail] {num_den} stop hit @ {price:.4f} vs {latest_stop:.4f}",
                             send=True, num_den=num_den, stop=latest_stop, price=price)
+            log().debug("trail.tick.done", pid=pid_str, stop=latest_stop, prev=prev_stop_val, hit=hit)
 
             pp_ctx[pid_str] = p_ctx
             processed += 1
