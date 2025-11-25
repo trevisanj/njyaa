@@ -35,8 +35,11 @@ class PSARIndicator(BaseIndicator):
         trend = "UP" if side == "LONG" else ("DOWN" if side == "SHORT" else "UP")
         return {"af": 0.02, "max_af": 0.2, "initial_trend": trend}
 
-    @classmethod
-    def run(cls, df: pd.DataFrame, state: Optional[dict], cfg: dict, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
+    def __init__(self, cfg: dict):
+        base_cfg = self.default_cfg(position=cfg.get("_position") if isinstance(cfg, dict) else None)
+        self.cfg = {**base_cfg, **(cfg or {})}
+
+    def run(self, df: pd.DataFrame, state: Optional[dict], start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
         """
         Compute PSAR; returns (new_state, outputs).
         outputs: {"value", "ep", "af", "trend"} aligned to df.index (NaNs where unchanged).
@@ -46,9 +49,9 @@ class PSARIndicator(BaseIndicator):
         if start_idx >= len(df):
             return state or {}, {"value": np.full(len(df), np.nan)}
 
-        af0 = cfg["af"]
-        afmax = cfg["max_af"]
-        init_up = True if str(cfg["initial_trend"]).upper() == "UP" else False
+        af0 = self.cfg["af"]
+        afmax = self.cfg["max_af"]
+        init_up = True if str(self.cfg["initial_trend"]).upper() == "UP" else False
 
         o_arr = df["Open"].values
         h_arr = df["High"].values
@@ -174,8 +177,11 @@ class ATRIndicator(BaseIndicator):
     def default_cfg(cls, *, position=None) -> dict:
         return {"period": 14}
 
-    @classmethod
-    def run(cls, df: pd.DataFrame, state: Optional[dict], cfg: dict, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
+    def __init__(self, cfg: dict):
+        base_cfg = self.default_cfg(position=cfg.get("_position") if isinstance(cfg, dict) else None)
+        self.cfg = {**base_cfg, **(cfg or {})}
+
+    def run(self, df: pd.DataFrame, state: Optional[dict], start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
         """
         Compute ATR; returns (new_state, outputs).
         outputs: {"value", "tr"} aligned to df.index (NaNs where unchanged).
@@ -185,10 +191,8 @@ class ATRIndicator(BaseIndicator):
         if start_idx >= len(df):
             return state or {}, {"value": np.full(len(df), np.nan)}
 
-        base_cfg = cls.default_cfg()
-        cfg = {**base_cfg, **(cfg or {})}
-        period = int(cfg["period"])
-        need = cls.lookback_bars(cfg)
+        period = int(self.cfg["period"])
+        need = self.lookback_bars(self.cfg)
 
         h_arr = df["High"].values
         l_arr = df["Low"].values
@@ -237,8 +241,42 @@ INDICATOR_DISPATCH = {
 def ind_name_to_cls(name):
     return INDICATOR_DISPATCH[name]
 
-def run_indicator(name: str, bars: pd.DataFrame, cfg: dict, state: Optional[dict], start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
-    cls = INDICATOR_DISPATCH.get(name)
-    if not cls:
-        raise ValueError(f"Unknown indicator: {name}")
-    return cls.run(bars, state, cfg, start_idx=start_idx)
+
+class StopStrategy:
+    """
+    Base stop strategy:
+      - holds indicators (instantiated once)
+      - owns runtime slice (states, cfg)
+      - runs indicators, saves their state/history, and returns suggested stop + history rows
+    Subclasses should:
+      - implement on_setup() to configure indicators and any extra state
+      - implement on_run(bars) to compute stop suggestion
+    """
+    def __init__(self, eng, thinker, runtime: dict, pos, name: str):
+        self.eng = eng
+        self.thinker = thinker
+        self.runtime = runtime
+        self.pos = pos
+        self.name = name
+        self.indicators: Dict[str, BaseIndicator] = {}
+        self.states: Dict[str, dict] = runtime.setdefault("states", {})
+        self.cfg: dict = runtime.setdefault("cfg", {})
+        self.history_rows: list[dict] = []
+        self.on_setup()
+
+    def on_setup(self):
+        raise NotImplementedError
+
+    def on_run(self, bars: pd.DataFrame):
+        raise NotImplementedError
+
+    def run(self, bars: pd.DataFrame):
+        """
+        Execute strategy: run indicators, collect history, then delegate to on_run.
+        """
+        self.history_rows = []
+        result = self.on_run(bars)
+        self.runtime["states"] = self.states
+        if self.history_rows:
+            self.eng.ih.insert_history(self.history_rows)
+        return result

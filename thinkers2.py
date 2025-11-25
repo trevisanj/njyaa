@@ -12,7 +12,7 @@ from commands import OCMarkDown
 from common import log, Clock, AppConfig, leg_pnl, tf_ms, ts_human
 from thinkers1 import ThinkerBase
 import risk_report
-from indicator_engines import run_indicator, ind_name_to_cls, BaseIndicator
+from indicator_engines import ind_name_to_cls, BaseIndicator
 from trailing_policies import evaluate_policy
 import pandas as pd
 import numpy as np
