@@ -360,7 +360,6 @@ class StopStrategy:
         """
         Execute strategy: compute start_idx, run indicators/stop logic, persist state/history.
         """
-        self.history_rows = []
         last_ts = self.ctx.get(LAST_TS)
         start_idx = 0
         if last_ts is not None:
@@ -374,8 +373,16 @@ class StopStrategy:
         self.ctx["states"] = {name: ind.state for name, ind in self.inds.items()}
         if not bars.empty:
             self.ctx[LAST_TS] = int(bars.index[-1].value // 1_000_000)
-        if self.history_rows:
-            self.eng.ih.insert_history(self.history_rows)
+
+        # auto-record indicator outputs from start_idx onward
+        ts_slice = bars.index[start_idx:]
+        ts_ms = (ts_slice.astype("datetime64[ns]").astype("int64") // 1_000_000)
+        for ind_name, ind in self.inds.items():
+            if not ind.outputs: continue
+            for out_name, arr in ind.outputs.items():
+                vals = arr[start_idx:]
+                self.eng.ih.insert_history2(self.thinker._thinker_id, self.pos.id, f"{ind_name}:{out_name}",
+                                            ts_ms, vals,)
         return None
 
     @classmethod
@@ -396,45 +403,10 @@ class SSPSAR(StopStrategy):
     def on_run(self, bars: pd.DataFrame, start_idx: int):
         psar = self.inds["psar"]
         stopper = self.inds["stopper"]
-        psar.state = self.ctx.get("states", {}).get("psar")
-        stopper.state = self.ctx.get("states", {}).get("stopper")
-        prev_stop_val = self.ctx.get("last_stop_value")
 
         psar_out = psar.run(bars, start_idx=start_idx)
-        stopper_out = stopper.run(bars, psar_out["value"], start_idx=start_idx)
+        _ = stopper.run(bars, psar_out["value"], start_idx=start_idx)
 
-        # record indicator history from start_idx onward
-        tid = self.thinker._thinker_id
-        pid = self.pos.id
-        if psar_out:
-            self.history_rows.extend(
-                self.thinker._indicator_history_rows(tid, pid, "psar", psar_out, bars, start_idx)
-            )
-        if stopper_out:
-            self.history_rows.append({
-                "thinker_id": tid,
-                "position_id": pid,
-                "name": "stopper",
-                "open_ts": int(bars.index[-1].value // 1_000_000),
-                "value": stopper_out.get("value")[-1] if stopper_out.get("value") is not None else None,
-                "aux": {"flag": stopper_out.get("flag")[-1] if stopper_out.get("flag") is not None else None},
-            })
-
-        last_stop_series = stopper_out.get("value") if stopper_out else None
-        last_flag_series = stopper_out.get("flag") if stopper_out else None
-        self.ctx["prev_stop_value"] = prev_stop_val
-        self.ctx["last_stop"] = last_stop_series
-        self.ctx["last_flag"] = last_flag_series
-        if last_stop_series is not None and len(last_stop_series) > 0:
-            self.ctx["last_stop_value"] = last_stop_series[-1]
-        if last_flag_series is not None and len(last_flag_series) > 0:
-            self.ctx["last_flag_value"] = last_flag_series[-1]
-
-    def on_get_stop_info(self):
-        return {
-            "stop": self.ctx.get("last_stop"),
-            "flag": self.ctx.get("last_flag"),
-        }
 
 
 SSTRAT_CLASSES = {cls.kind: cls for cls in StopStrategy.__subclasses__()}

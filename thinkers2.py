@@ -180,8 +180,6 @@ class TrailingStopThinker(ThinkerBase):
             "stopper": {...}
           },
           "last_ts": 1732450600000,
-          "last_stop": [1.2345, 1.2350],
-          "last_flag": [NaN, 1],
         }
       }
     }
