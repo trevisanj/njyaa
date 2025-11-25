@@ -183,7 +183,11 @@ class TrailingStopThinker(ThinkerBase):
 
     def on_tick(self, now_ms: int):
         # ---------- tick-level setup ----------
-        pp_ctx = self._runtime.get("positions", {})  # per-position runtime state map
+
+        # runtime keys
+        PP_CTX = "pp_ctx"
+
+        pp_ctx = self._runtime.get(PP_CTX, {})  # per-position runtime state map
         if not pp_ctx:
             # no positions attached
             return 0
@@ -194,9 +198,9 @@ class TrailingStopThinker(ThinkerBase):
         dirty = False  # whether we must save runtime at end
 
         processed = 0  # counter of processed attachments
-        for pid_str, ctx in pp_ctx.items():
+        for pid_str, p_ctx in pp_ctx.items():
             # ---------- fetch position + validate attachment ----------
-            if ctx.get("invalid"):
+            if p_ctx.get("invalid"):
                 # position does not exist or is closed (see below)
                 continue
 
@@ -205,16 +209,16 @@ class TrailingStopThinker(ThinkerBase):
 
             if not pos or pos.status != "OPEN":
                 # mark invalid if missing/closed; skip
-                ctx["invalid"] = True
-                ctx["invalid_msg"] = "Closed" if pos else "Inexistent"
-                pp_ctx[pid_str] = ctx
+                p_ctx["invalid"] = True
+                p_ctx["invalid_msg"] = "Closed" if pos else "Inexistent"
+                pp_ctx[pid_str] = p_ctx
                 dirty = True
                 continue
 
             # ---------- build kline window ----------
-            need_n = max(int(ctx.get("lookback_bars", 200)), 5)  # minimum bars required
+            need_n = max(int(p_ctx.get("lookback_bars", 200)), 5)  # minimum bars required
             tfms = tf_ms(self._cfg["timeframe"])  # timeframe in ms
-            anchor_ts = ctx.get("last_ts") or ctx.get("attached_at_ms")  # last processed or attach time
+            anchor_ts = p_ctx.get("last_ts") or p_ctx.get("attached_at_ms")  # last processed or attach time
             start_ts = max(0, int(anchor_ts) - need_n * tfms)  # start window so we have enough bars
             bars = self._pair_bars(pos, start_ts, None)  # fetch num[/den] bars as dataframe
             if bars.empty or len(bars) < need_n:
@@ -222,8 +226,8 @@ class TrailingStopThinker(ThinkerBase):
                 continue
 
             # ---------- run strategy ----------
-            sstrat_rt = ctx.setdefault("sstrat", {})
-            sstrat_kind = ctx.get("sstrat_kind", self._cfg.get("sstrat", "SSPSAR"))
+            sstrat_rt = p_ctx.setdefault("sstrat", {})
+            sstrat_kind = p_ctx.get("sstrat_kind", self._cfg.get("sstrat", "SSPSAR"))
             strat = StopStrategy.from_kind(sstrat_kind, self.eng, self, sstrat_rt, pos, sstrat_kind)
             strat.run(bars)
             stop_info = strat.on_get_stop_info()
@@ -243,8 +247,8 @@ class TrailingStopThinker(ThinkerBase):
                 self.notify("WARN", f"[trail] {num_den} stop hit @ {price:.4f} vs {latest_stop:.4f}", send=True,
                             symbol=num_den, stop=latest_stop, price=price)
 
-            ctx["last_ts"] = sstrat_rt.get("last_ts", int(bars.index[-1].value // 1_000_000))
-            pp_ctx[pid_str] = ctx
+            p_ctx["last_ts"] = sstrat_rt.get("last_ts", int(bars.index[-1].value // 1_000_000))
+            pp_ctx[pid_str] = p_ctx
             processed += 1
             dirty = True
 
