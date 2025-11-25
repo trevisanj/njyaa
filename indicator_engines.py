@@ -85,8 +85,6 @@ class PSARIndicator(BaseIndicator):
         stopped_count = int(self.state.get("stopped_count", 0)) if self.state else 0
 
         if self.state is None:
-            if start_idx != 0:
-                start_idx = 0
             need = self.lookback_bars(self.cfg)
             if len(df) < need:
                 raise ValueError(f"Need at least {need} bars to bootstrap PSAR")

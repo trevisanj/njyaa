@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CH
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
 from common import (log, Clock, AppConfig, leg_pnl, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, SSTRAT_KIND, ATTACHED_AT,
-                    LAST_TS, LOOKBACK_BARS)
+                    LAST_TS, LOOKBACK_BARS, float2str)
 from thinkers1 import ThinkerBase
 import risk_report
 from indicator_engines import StopStrategy, SSPSAR
@@ -235,6 +235,7 @@ class TrailingStopThinker(ThinkerBase):
 
         processed = 0  # counter of processed attachments
         for pid_str, p_ctx in pp_ctx.items():
+
             # ---------- fetch position + validate attachment ----------
             if p_ctx.get("invalid"):
                 # position does not exist or is closed (see below)
@@ -242,6 +243,11 @@ class TrailingStopThinker(ThinkerBase):
 
             pos = self.eng.store.get_position(int(pid_str))  # Position object (or None)
             num_den = pos.get_pair()
+
+            def stamp():
+                # Produces a "stamp" of the reporting context
+                return f"t#{self._thinker_id} p#{pid_str} {num_den} sstrat={sstrat.name}"
+
             log().debug("trail.tick.pos", pid=pid_str, num_den=num_den)
 
             if not pos or pos.status != "OPEN":
@@ -256,12 +262,13 @@ class TrailingStopThinker(ThinkerBase):
             sstrat_ctx = p_ctx.setdefault(SSTRAT_CTX, {})
             sstrat_kind = p_ctx.get(SSTRAT_KIND, self._cfg.get("sstrat", "SSPSAR"))
             sstrat = self._strats.get(pid_str)
-            # TODO: think about situations when it is better to invalidate the whole state
-            if sstrat is None or sstrat.kind != sstrat_kind:
+            if sstrat is None:
                 # TODO: sstrat needs a unique name, i guess
                 sstrat_name = sstrat_kind
                 sstrat = StopStrategy.from_kind(sstrat_kind, self.eng, self, sstrat_ctx, pos, sstrat_name)
                 self._strats[pid_str] = sstrat
+            elif sstrat.kind != sstrat_kind:
+                raise RuntimeError(f"sstrat is a {sstrat.kind} but should be {sstrat_kind}")
             else:
                 sstrat.ctx = sstrat_ctx
                 sstrat.pos = pos
@@ -297,12 +304,12 @@ class TrailingStopThinker(ThinkerBase):
             cooldown_ms = int(self._cfg["alert_cooldown_ms"])
             last_alert = p_ctx.get("last_alert_ts", 0)
             if _stop_improved(pos.dir_sign, prev_stop_val, latest_stop, min_move_bp):
-                msg = f"🟢 [trail] {num_den} stop -> {latest_stop:.4f} ({'LONG' if pos.dir_sign>0 else 'SHORT'})"
+                msg = f"🟢 [trail] {stamp()} stop -> {float2str(latest_stop)} ({'LONG' if pos.dir_sign>0 else 'SHORT'})"
                 self.notify("INFO", msg, send=True,
                             num_den=num_den, stop=latest_stop, prev=prev_stop_val, price=price)
                 last_alert = now
             if hit and (now - last_alert) >= cooldown_ms:
-                self.notify("WARN", f"🛑 [trail] {num_den} stop hit @ {price:.4f} vs {latest_stop:.4f}",
+                self.notify("WARN", f"🛑 [trail] {stamp()} stop hit @ {float2str(price)} vs {float2str(latest_stop)}",
                             send=True, num_den=num_den, stop=latest_stop, price=price)
                 last_alert = now
             p_ctx["last_alert_ts"] = last_alert

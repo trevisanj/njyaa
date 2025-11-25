@@ -100,6 +100,8 @@ def _configure_ptb_logging():
     for name in PTB_LOGGERS:
         logger = logging.getLogger(name)
         logger.setLevel(PTB_LOG_LEVEL)
+        logger.propagate = False
+        logger.addHandler(logging.NullHandler())
         if PTB_STRIP_TRACEBACK:
             logger.addFilter(filt)
     _PTB_LOG_CONFIGURED = True

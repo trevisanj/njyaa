@@ -7,7 +7,7 @@ from typing import List, Optional, Any, Literal, Union
 import re
 from datetime import datetime, timezone, timedelta, tzinfo
 import threading
-
+import math
 
 __all__ = [
     "AppConfig",
@@ -29,6 +29,7 @@ __all__ = [
     "ATTACHED_AT",
     "SSTRAT_KIND",
     "LAST_TS",
+    "float2str",
 ]
 
 
@@ -375,6 +376,36 @@ def tf_ms(tf: str) -> int:
     if tf not in _TF_MS:
         raise ValueError(f"Unknown timeframe '{tf}'. Supported: {', '.join(_TF_MS)}")
     return _TF_MS[tf]
+
+
+def float2str(
+    x: float,
+    *,
+    max_total: int = 7,
+    max_frac_lt1: int = 5,
+    sig_small: int = 4,
+) -> str:
+    """
+    Pragmatic float formatter:
+      - if |x| >= 1: show all digits before dot, cap fractional digits so total digits ~ max_total
+      - if 0.1 <= |x| < 1: up to max_frac_lt1 fractional digits
+      - if |x| < 0.1: show sig_small significant digits after leading zeros
+    """
+    if x == 0 or not isinstance(x, (int, float)):
+        return str(x)
+    sign = "-" if x < 0 else ""
+    ax = abs(x)
+    if ax >= 1:
+        s_int = f"{int(ax)}"
+        frac_digits = max(0, max_total - len(s_int))
+        fmt = f"{{:.{frac_digits}f}}" if frac_digits > 0 else "{:.0f}"
+        return sign + fmt.format(ax)
+    if ax >= 0.1:
+        return sign + f"{ax:.{max_frac_lt1}f}".rstrip("0").rstrip(".")
+    # ax < 0.1: compute leading zeros after decimal and keep sig_small significant digits
+    leading_zeros = int(math.floor(-math.log10(ax))) if ax > 0 else 0
+    frac_digits = max(0, leading_zeros + sig_small)
+    return sign + f"{ax:.{frac_digits}f}".rstrip("0").rstrip(".")
 
 
 def parse_when(s: str) -> int:
