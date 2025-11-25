@@ -110,18 +110,9 @@ class IndicatorHistory:
             ).fetchall()
         return self._format_rows(rows, cols, fmt)
 
-    def range_by_ts(
-        self,
-        thinker_id: int,
-        position_id: int,
-        name: str,
-        start_open_ts: Optional[int] = None,
-        end_open_ts: Optional[int] = None,
-        columns: Optional[List[str]] = None,
-        asc: bool = True,
-        limit: int = 5000,
-        fmt: str = "columnar",
-    ):
+    def range_by_ts(self, thinker_id: int, position_id: int, name: str, start_open_ts: Optional[int] = None,
+                    end_open_ts: Optional[int] = None, columns: Optional[List[str]] = None, asc: bool = True,
+                    limit: int = 5000, fmt: str = "columnar"):
         """Return rows within optional [start_ts, end_ts] bounds."""
         assert fmt in ("columnar", "dataframe")
         cols = columns or DEFAULT_COLUMNS
@@ -148,8 +139,7 @@ class IndicatorHistory:
             rows = self.con.execute(query, params).fetchall()
         return self._format_rows(rows, cols, fmt)
 
-    def list_indicators(self, thinker_id: Optional[int] = None, position_id: Optional[int] = None,
-                        fmt: str = "columnar"):
+    def list_indicators(self, thinker_id: Optional[int] = None, position_id: Optional[int] = None, fmt: str = "columnar"):
         """Distinct indicator names grouped by thinker/position."""
         where = []
         params: list = []

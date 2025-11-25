@@ -321,15 +321,27 @@ class StopStrategy:
                 ind.state = states[name]
             self.inds[name] = ind
 
-    def on_run(self, bars: pd.DataFrame):
+    def on_run(self, bars: pd.DataFrame, start_idx: int):
         raise NotImplementedError
+
+    def on_get_stop_info(self):
+        """Return dict with stop/flag series from last run."""
+        return {}
 
     def run(self, bars: pd.DataFrame):
         """
-        Execute strategy: run indicators, collect history, then delegate to on_run.
+        Execute strategy: compute start_idx, run indicators/stop logic, persist state/history.
         """
         self.history_rows = []
-        self.on_run(bars)
+        last_ts = self.runtime.get("last_ts")
+        start_idx = 0
+        if last_ts is not None:
+            dt = pd.to_datetime(int(last_ts), unit="ms")
+            start_idx = int(bars.index.searchsorted(dt, side="left"))
+            if start_idx >= len(bars):
+                start_idx = max(0, len(bars) - 1)
+
+        self.on_run(bars, start_idx=start_idx)
 
         self.runtime["states"] = {name: ind.state for name, ind in self.inds.items()}
         if not bars.empty:
@@ -345,19 +357,40 @@ class SSPSAR(StopStrategy):
     """
     ind_map = ["psar", "stopper"]
 
-    def on_setup(self):
-        pass
-
-    def on_run(self, bars: pd.DataFrame):
+    def on_run(self, bars: pd.DataFrame, start_idx: int):
         psar = self.inds["psar"]
         stopper = self.inds["stopper"]
         psar.state = self.runtime.get("states", {}).get("psar")
         stopper.state = self.runtime.get("states", {}).get("stopper")
 
-        psar_out = psar.run(bars, start_idx=0)
-        stop_out = stopper.run(bars, psar_out["value"], start_idx=0)
+        psar_out = psar.run(bars, start_idx=start_idx)
+        stop_out = stopper.run(bars, psar_out["value"], start_idx=start_idx)
 
-        return {"stop": stop_out.get("value"), "flag": stop_out.get("flag")}
+        # record indicator history from start_idx onward
+        tid = self.thinker._thinker_id
+        pid = self.pos.id
+        if psar_out:
+            self.history_rows.extend(
+                self.thinker._indicator_history_rows(tid, pid, "psar", psar_out, bars, start_idx)
+            )
+        if stop_out:
+            self.history_rows.append({
+                "thinker_id": tid,
+                "position_id": pid,
+                "name": "stopper",
+                "open_ts": int(bars.index[-1].value // 1_000_000),
+                "value": stop_out.get("value")[-1] if stop_out.get("value") is not None else None,
+                "aux": {"flag": stop_out.get("flag")[-1] if stop_out.get("flag") is not None else None},
+            })
+
+        self.runtime["last_stop"] = stop_out.get("value") if stop_out else None
+        self.runtime["last_flag"] = stop_out.get("flag") if stop_out else None
+
+    def on_get_stop_info(self):
+        return {
+            "stop": self.runtime.get("last_stop"),
+            "flag": self.runtime.get("last_flag"),
+        }
 
 
 # registry
