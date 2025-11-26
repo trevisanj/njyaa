@@ -31,7 +31,8 @@ __all__ = [
     "LAST_TS",
     "float2str",
     "IND_STATES",
-    "TooFewDataPoints"
+    "TooFewDataPoints",
+    "STATE_TS",
 ]
 
 class TooFewDataPoints(Exception):
@@ -43,18 +44,19 @@ LV = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 PP_CTX = "pp_ctx"
 # Runtime key for per-strategy context under a position
 SSTRAT_CTX = "sstrat_ctx"
-# Attachment timestamp key
-ATTACHED_AT = "attached_at"
 # Strategy kind key
 SSTRAT_KIND = "sstrat_kind"
 # Last timestamp key
 LAST_TS = "last_ts"
+# Timestamp of last saved indicator states
+STATE_TS = "state_ts"
 # Indicator states key
 IND_STATES = "ind_states"
-# Time of attachment of a position into a thinker
+# *User* time of attachment of a position into a thinker
 ATTACHED_AT = "attached_at"
 # Number of bars needed for all indicators in a sstrat to work
 LOOKBACK_BARS = "lookback_bars"
+
 
 # =======================
 # ====== CONFIG =========

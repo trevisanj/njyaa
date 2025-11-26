@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CH
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
 from common import (log, Clock, AppConfig, leg_pnl, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, SSTRAT_KIND, ATTACHED_AT,
-                    LAST_TS, LOOKBACK_BARS, float2str)
+                    LAST_TS, LOOKBACK_BARS, float2str, TooFewDataPoints)
 from thinkers1 import ThinkerBase
 import risk_report
 from indicator_engines import StopStrategy, SSPSAR
@@ -278,13 +278,14 @@ class TrailingStopThinker(ThinkerBase):
             log().debug("trail.tick.run_sstrat", stamp=stamp())
             try:
                 sstrat.run()
-            except Exception as e:
+            except TooFewDataPoints as e:
                 log().exc(e, stamp=stamp())
+                continue
 
             # ----------- interpret stops -----------
             stop_info = sstrat.get_stop_info()
             stop_series = stop_info["value"]
-            price = bars["Close"].iloc[-1]
+            price = sstrat.last_bars["Close"].iloc[-1]
             flag_series = stop_info["flag"]
             hit = bool(flag_series[-1] == 1)
 

@@ -5,7 +5,7 @@ from typing import Dict, Optional, Tuple, Sequence
 import numpy as np
 import pandas as pd
 import copy
-from common import LAST_TS, log, LOOKBACK_BARS, tf_ms, TooFewDataPoints, ts_human, IND_STATES
+from common import LAST_TS, log, LOOKBACK_BARS, tf_ms, TooFewDataPoints, ts_human, IND_STATES, STATE_TS
 import engclasses as ec
 from collections import OrderedDict
 
@@ -14,9 +14,10 @@ class BaseIndicator:
     """Minimal base for indicator steppers."""
     kind: str = "BASE"
 
-    def __init__(self, cfg: dict, sstrat: "StopStrategy"):
+    def __init__(self, cfg: dict, name: str, sstrat: "StopStrategy"):
         self.sstrat = sstrat
         self.cfg = cfg or {}
+        self.name = name
         self.state: Optional[dict] = None
         self.outputs: Optional[Dict[str, np.ndarray]] = None
         self.on_init()
@@ -30,26 +31,27 @@ class BaseIndicator:
         return 1
 
     @classmethod
-    def from_kind(cls, kind: str, cfg: dict, sstrat):
+    def from_kind(cls, kind: str, name, cfg: dict, sstrat):
         if kind not in INDICATOR_CLASSES:
             raise ValueError(f"Unknown indicator kind: {kind}")
-        return INDICATOR_CLASSES[kind](cfg, sstrat)
+        return INDICATOR_CLASSES[kind](cfg, name, sstrat)
 
     def on_init(self):
         """Inherit to create new instance variables etc."""
         pass
 
-    def run(self, bars: pd.DataFrame, start_idx: int, end_idx: int, *args, **kwargs) -> Dict[str, np.ndarray]:
+    def run(self, *args, **kwargs) -> Dict[str, np.ndarray]:
         """Execute indicator, storing outputs for later inspection; returns outputs only."""
-        new_state, outs = self.on_run(bars, start_idx=start_idx, end_idx=end_idx, *args, **kwargs)
+        new_state, outs = self.on_run(self.sstrat._start_idx, self.sstrat._end_idx, *args, **kwargs)
         self.outputs = outs
         self.state = new_state
-        if bars is not None and end_idx > 0:
-            self.state["state_ts"] = int(bars.index[end_idx - 1].value // 1_000_000)
         return outs
 
-    def on_run(self, bars: pd.DataFrame, start_idx: int, end_idx: int, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
+    def on_run(self, start_idx: int, end_idx: int, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
         raise NotImplementedError
+
+    def get_my_state(self):
+        return self.sstrat.get_ind_state(self.name)
 
 
 class PSARIndicator(BaseIndicator):
@@ -65,7 +67,8 @@ class PSARIndicator(BaseIndicator):
         trend = "UP" if position.side > 1 else "DOWN"
         return {"af": 0.02, "max_af": 0.2, "initial_trend": trend}
 
-    def on_run(self, df: pd.DataFrame, start_idx: int, end_idx: int, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
+    # noinspection PyMethodOverriding
+    def on_run(self, start_idx: int, end_idx: int, df: pd.DataFrame, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
         af0 = self.cfg["af"]
         afmax = self.cfg["max_af"]
         init_up = True if str(self.cfg["initial_trend"]).upper() == "UP" else False
@@ -78,28 +81,29 @@ class PSARIndicator(BaseIndicator):
         n_total = len(df)
         val_arr = np.full(n_total, np.nan, dtype=float)
 
+        state = self.get_my_state()
         stopped = False
         stop_val: Optional[float] = None
-        stopped_count = int(self.state.get("stopped_count", 0)) if self.state else 0
+        stopped_count = int(state.get("stopped_count", 0)) if state else 0
 
-        if self.state is None:
+        if state is None:
             need = self.lookback_bars(self.cfg)
-            win_start = max(0, start_idx - need)
-            h0 = float(np.max(h_arr[win_start:start_idx]))
-            l0 = float(np.min(l_arr[win_start:start_idx]))
+            win_start = start_idx - need
+            h0 = np.max(h_arr[win_start:start_idx])
+            l0 = np.min(l_arr[win_start:start_idx])
             up = init_up
             ep = h0 if up else l0
             af = af0
             psar = l0 if up else h0
         else:
-            psar = float(self.state["psar"])
-            ep = float(self.state["ep"])
-            af = float(self.state["af"])
-            trend = self.state.get("trend")
-            stopped = bool(self.state.get("stopped", False)) or trend == "STOPPED"
+            psar = state["psar"]
+            ep = state["ep"]
+            af = state["af"]
+            trend = state.get("trend")
+            stopped = state["stopped"] or trend == "STOPPED"
             up = True if trend == "UP" else False
             stop_val = psar if stopped else None
-            stopped_count = int(self.state.get("stopped_count", 0))
+            stopped_count = state["stopped_count"]
 
         if stopped and stop_val is not None:
             for i in range(start_idx, end_idx):
@@ -177,24 +181,25 @@ class ATRIndicator(BaseIndicator):
     def default_cfg(cls, *, position: ec.Position) -> dict:
         return {"period": 14}
 
-    def on_run(self, df: pd.DataFrame, start_idx: int, end_idx: int, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
+    # noinspection PyMethodOverriding
+    def on_run(self, start_idx: int, end_idx: int, df: pd.DataFrame, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
         """
         Compute ATR; returns (new_state, outputs).
         outputs: {"value", "tr"} aligned to df.index (NaNs where unchanged).
         """
         period = int(self.cfg["period"])
         need = self.lookback_bars(self.cfg)
+        state = self.get_my_state()
 
         h_arr = df["High"].values
         l_arr = df["Low"].values
         c_arr = df["Close"].values
-        o_arr = df["Open"].values
 
         n_total = len(df)
         val_arr = np.full(n_total, np.nan, dtype=float)
         idx = start_idx
 
-        if self.state is None:
+        if state is None:
             prev_close = c_arr[0]
             trs: list[float] = []
             for i in range(1, need):
@@ -202,11 +207,11 @@ class ATRIndicator(BaseIndicator):
                 tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
                 trs.append(tr)
                 prev_close = c
-            atr = sum(trs) / float(period)
+            atr = sum(trs) / period
             idx = max(idx, need)
         else:
-            atr = float(self.state["atr"])
-            prev_close = float(self.state["prev_close"])
+            atr = state["atr"]
+            prev_close = state["prev_close"]
 
         for i in range(idx, end_idx):
             h = h_arr[i]; l = l_arr[i]; c = c_arr[i]
@@ -241,7 +246,9 @@ class StopperIndicator(BaseIndicator):
     def on_init(self):
         self._stop_info = None
 
-    def on_run(self, df: pd.DataFrame, values: np.ndarray, start_idx: int, end_idx: int, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
+    # noinspection PyMethodOverriding
+    def on_run(self, start_idx: int, end_idx: int, df: pd.DataFrame, values: np.ndarray, *args, **kwargs) \
+            -> Tuple[dict, Dict[str, np.ndarray]]:
         if df is None or df.empty:
             raise ValueError("bars required")
         side = int(self.cfg.get("side") or 0)
@@ -290,11 +297,15 @@ class StopStrategy:
         self.timeframe = thinker.get_timeframe()
         self.attached_at = attached_at
         self.inds: Dict[str, BaseIndicator] = {}
-        self.ind_states = ctx.setdefault(IND_STATES, {})
+        # {ts_ms: {ind_name: state, ...}, ...} with maximum 2 elements
+        self.ind_states = ctx.setdefault(IND_STATES, OrderedDict())
         self._stopper: Optional["StopperIndicator"] = None
         self._stop_info: Optional[Dict[str, Sequence]] = None
         self.cfg = ctx.setdefault("cfg", {})
         self.history_rows: list[dict] = []
+
+        ctx.setdefault(STATE_TS, -1)
+
         self.setup()
 
     ind_map = None  # subclass can set to list of kinds or dict {kind: name}
@@ -320,17 +331,15 @@ class StopStrategy:
                 [(k, k) for k in self.ind_map]
         for kind, name in items:
             cfg = self.on_get_default_cfg(kind)
-            ind = self.inds[name] = BaseIndicator.from_kind(kind, cfg, self)
-            if name in self.ind_states:
-                ind.state = self.ind_states[name]
-
+            ind = self.inds[name] = BaseIndicator.from_kind(kind, name, cfg, self)
             if kind == "stopper":
                 # Grabs last stopper
                 self._stopper = ind
 
         assert self._stopper, f"sstrat.init.fail.no_stopper: sstrat_kind={self.kind}"
 
-    def on_run(self, bars: pd.DataFrame, start_idx: int):
+    def on_run(self, bars: pd.DataFrame):
+        """Override this to implement the actual strategy"""
         raise NotImplementedError
 
     def get_stop_info(self):
@@ -354,13 +363,13 @@ class StopStrategy:
         # -------------- fetches bars from cache
         anchor_ts = last_ts or self.attached_at
         start_ts = max(0, int(anchor_ts) - lookback_bars * tfms)  # start window so we have enough bars
-        bars = self.eng.kc.pair_bars(self.pos.num, self.pos.den, self.timeframe, start_ts)
+        self.last_bars = bars = self.eng.kc.pair_bars(self.pos.num, self.pos.den, self.timeframe, start_ts)
+        # TODO perhaps lookback_bars+1 here
         if bars.empty or len(bars) < lookback_bars:
             raise TooFewDataPoints(f"[trail] Not enough klines ({len(bars)} < {lookback_bars}), can't run strategy!")
-        log().debug("sstrat.bars", sstrat_kind=self.kind, rows=len(bars), lookback=lookback_bars,
-                    anchor_ts=ts_human(anchor_ts))
-
-        log().debug("sstrat.run.start", strat=self.kind, position_id=self.pos.id, bars=len(bars))
+        log().debug("sstrat.bars", sstrat_kind=self.kind, n_bars=len(bars), lookback=lookback_bars,
+                    anchor_ts=ts_human(anchor_ts), position_id=self.pos.id, )
+        self._v_ts = bars.index.astype("int64") // 1_000_000  # for get_ind_state()
 
         # pass 1: finalized bars (exclude last bar)
         bars_final = bars.iloc[:-1]
@@ -377,14 +386,15 @@ class StopStrategy:
         #     ind.state = copy.deepcopy(ctx_states[name])
 
         tail = bars.iloc[-lookback_bars:] if lookback_bars < len(bars) else bars
-        start_idx_live = self._calc_start_idx(tail, self.ctx.get(LAST_TS))
+        start_idx_live = lookback_bars-1
         self._run_pass("live", tail, start_idx_live, persist_state=False, save_history=True)
 
         # restore persisted states (no change)
         ctx_states = self.ctx[IND_STATES]
         for name, ind in self.inds.items():
             if name in ctx_states:
-                ind.state = ctx_states[name]
+                st = ctx_states[name]
+                ind.state = st[1] if isinstance(st, tuple) else st
         return None
 
     def _calc_start_idx(self, bars: pd.DataFrame, last_ts: Optional[int]) -> int:
@@ -399,13 +409,18 @@ class StopStrategy:
     def _run_pass(self, label: str, bars: pd.DataFrame, start_idx: int, *, persist_state: bool, save_history: bool):
         log().debug(f"sstrat.run.{label}", strat=self.kind, position_id=self.pos.id,
                     start_idx=start_idx, last_ts=self.ctx.get(LAST_TS), rows=len(bars))
-        self.on_run(bars, start_idx=start_idx, end_idx=len(bars))
+        self._start_idx = start_idx
+        self._end_idx = len(bars)
+        (self.on_run
+         (bars))
         if persist_state:
+            ts_ms = int(bars.index[-1].value // 1_000_000)
+            self.ctx[STATE_TS] = ts_ms
             self.ctx[IND_STATES] = {name: ind.state for name, ind in self.inds.items()}
-            self.ctx[LAST_TS] = int(bars.index[-1].value // 1_000_000)
+            self.ctx[LAST_TS] = ts_ms
         if save_history:
             ts_slice = bars.index[start_idx:]
-            ts_ms = (ts_slice.astype("datetime64[ns]").astype("int64") // 1_000_000)
+            ts_ms = ts_slice.astype("int64") // 1_000_000
             for ind_name, ind in self.inds.items():
                 if not ind.outputs:
                     continue
@@ -413,13 +428,8 @@ class StopStrategy:
                     vals = arr[start_idx:]
                     log().debug(f"sstrat.hist.write.{label}", strat=self.kind, ind=ind_name, out=out_name,
                                 position_id=self.pos.id, points=len(vals))
-                    self.eng.ih.insert_history2(
-                        self.thinker._thinker_id,
-                        self.pos.id,
-                        f"{ind_name}-{out_name}",
-                        ts_ms,
-                        vals,
-                    )
+                    self.eng.ih.insert_history2(self.thinker._thinker_id, self.pos.id, f"{ind_name}-{out_name}", ts_ms,
+                                                vals,)
 
     @classmethod
     def from_kind(cls, kind: str, eng, thinker, ctx: dict, pos, name, attached_at: int):
@@ -427,6 +437,17 @@ class StopStrategy:
             raise ValueError(f"Unknown strategy kind: {kind}")
         strat_cls = SSTRAT_CLASSES[kind]
         return strat_cls(eng, thinker, ctx, pos, name, attached_at)
+
+    def get_ind_state(self, ind_name: str):
+        idx = self._start_idx
+        ts_ms = int(self._v_ts[idx - 1]) if idx > 0 else "OUT_OF_BOUNDS"
+        have_ts = self.ctx[STATE_TS]
+
+        if ts_ms == have_ts:
+            return self.ctx[IND_STATES][ind_name]
+
+        log().debug("sstrat.state.miss", ind=ind_name, idx_minus_1=idx-1, ts=ts_human(ts_ms), have_ts=have_ts)
+        return None
 
 
 class SSPSAR(StopStrategy):
@@ -436,12 +457,12 @@ class SSPSAR(StopStrategy):
     kind = "SSPSAR"
     ind_map = ["psar", "stopper"]
 
-    def on_run(self, bars: pd.DataFrame, start_idx: int):
+    def on_run(self, bars: pd.DataFrame):
         psar = self.inds["psar"]
         stopper = self.inds["stopper"]
 
-        psar_out = psar.run(bars, start_idx=start_idx)
-        _ = stopper.run(bars, psar_out["value"], start_idx=start_idx)
+        psar_out = psar.run(bars)
+        _ = stopper.run(bars, psar_out["value"])
 
 
 
