@@ -4,7 +4,8 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple, Sequence
 import numpy as np
 import pandas as pd
-from common import LAST_TS, log, LOOKBACK_BARS, tf_ms, TooFewDataPoints, ts_human
+import copy
+from common import LAST_TS, log, LOOKBACK_BARS, tf_ms, TooFewDataPoints, ts_human, IND_STATES
 import engclasses as ec
 from collections import OrderedDict
 
@@ -39,10 +40,11 @@ class BaseIndicator:
         pass
 
     def run(self, *args, **kwargs) -> Dict[str, np.ndarray]:
-        """Execute indicator, storing outputs for later inspection."""
-        state =
-        new_state, self.outputs = self.on_run(*args, **kwargs)
-        return self.outputs
+        """Execute indicator, storing outputs for later inspection; returns outputs only."""
+        new_state, outs = self.on_run(*args, **kwargs)
+        self.outputs = outs
+        self.state = new_state
+        return outs
 
     def on_run(self, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
         raise NotImplementedError
@@ -164,7 +166,8 @@ class PSARIndicator(BaseIndicator):
                 up = prev_up
                 break
 
-        new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("STOPPED" if stopped else ("UP" if up else "DOWN")), "stopped": stopped, "stopped_count": stopped_count}
+        new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("STOPPED" if stopped else ("UP" if up else "DOWN")),
+                     "stopped": stopped, "stopped_count": stopped_count}
         outputs = {"value": val_arr}
         return new_state, outputs
 
@@ -278,10 +281,10 @@ class StopperIndicator(BaseIndicator):
             if hit:
                 flag_arr[i] = 1.0
 
-        newstate = {"stop": stop}
+        new_state = {"stop": stop}
         # makes it retrievable to the sstrat later
         self._stop_info = {"value": val_arr, "flag": flag_arr}
-        return newstate, self._stop_info
+        return new_state, self._stop_info
 
 
 class StopStrategy:
@@ -301,12 +304,10 @@ class StopStrategy:
         self.timeframe = thinker.get_timeframe()
         self.attached_at = attached_at
         self.inds: Dict[str, BaseIndicator] = {}
-        self.ind_states = {}
+        self.ind_states = ctx.setdefault(IND_STATES, {})
         self._stopper: Optional["StopperIndicator"] = None
         self._stop_info: Optional[Dict[str, Sequence]] = None
-        ctx.setdefault("cfg", {})
-        ctx.setdefault("states", {})
-        self.cfg: dict = ctx["cfg"]
+        self.cfg = ctx.setdefault("cfg", {})
         self.history_rows: list[dict] = []
         self.setup()
 
@@ -328,31 +329,14 @@ class StopStrategy:
         self._build_indicators()
         self.on_conf_ind()
 
-    def idx_to_ts(self, idx):
-        ts_ms = int(self._bars_index[idx].value // 1_000_000)
-        return ts_ms
-
-    def set_ind_state(self, ind, idx, state):
-        """Stores indicator state in its states dict, keeping only the two latest"""
-        ts_ms = self.idx_to_ts(idx)
-        states = self.ind_states.setdefault(ind.name, OrderedDict())
-        states[ts_ms] = state
-        if len(states) > 2:
-            states.popitem(last=False)
-
-    def get_ind_state(self, ind, idx):
-        ts_ms = self.idx_to_ts(idx)
-        states = self.ind_states.setdefault(ind.name, OrderedDict())
-        return states.get(ts_ms)
-
     def _build_indicators(self):
         items = [(k, v) for k, v in self.ind_map.items()] if isinstance(self.ind_map, dict) else \
                 [(k, k) for k in self.ind_map]
-        self.ind_states = self.ctx["states"]
         for kind, name in items:
             cfg = self.on_get_default_cfg(kind)
-            ind = BaseIndicator.from_kind(kind, cfg)
-            self.inds[name] = ind
+            ind = self.inds[name] = BaseIndicator.from_kind(kind, cfg)
+            if name in self.ind_states:
+                ind.state = self.ind_states[name]
 
             if kind == "stopper":
                 # Grabs last stopper
@@ -367,8 +351,6 @@ class StopStrategy:
         """Return dict with value/flag keys from last run."""
         return self._stopper._stop_info
 
-
-
     def get_lookback_bars(self) -> int:
         """Return minimum bars needed based on contained indicators."""
         if not LOOKBACK_BARS in self.ctx:
@@ -379,50 +361,79 @@ class StopStrategy:
         """
         Execute strategy: compute start_idx, run indicators/stop logic, persist state/history.
         """
-        log().debug("sstrat.run.start", strat=self.kind, position_id=self.pos.id, bars=len(bars))
-
-        # --- build klines dataframe
         last_ts = self.ctx.get(LAST_TS)
         lookback_bars = self.get_lookback_bars()
+        tfms = tf_ms(self.timeframe)
 
         # -------------- fetches bars from cache
-        tfms = tf_ms(self.timeframe)
-        anchor_ts = self.ctx.get(LAST_TS) or self.attached_at
+        anchor_ts = last_ts or self.attached_at
         start_ts = max(0, int(anchor_ts) - lookback_bars * tfms)  # start window so we have enough bars
         bars = self.eng.kc.pair_bars(self.pos.num, self.pos.den, self.timeframe, start_ts)
         if bars.empty or len(bars) < lookback_bars:
-            raise TooFewDataPoints(f"[trail] Not enough klines ({len(bars)} < {lookback_bars}, can't run strategy!")
-        self._bars_index = bars.index  # saves reference to datetime index
+            raise TooFewDataPoints(f"[trail] Not enough klines ({len(bars)} < {lookback_bars}), can't run strategy!")
         log().debug("sstrat.bars", sstrat_kind=self.kind, rows=len(bars), lookback=lookback_bars,
                     anchor_ts=ts_human(anchor_ts))
 
-        start_idx = 0
-        if last_ts is not None:
-            # TODO: investigate if better to work with index as milliseconds instead
-            dt = pd.to_datetime(int(last_ts), unit="ms")
-            start_idx = int(bars.index.searchsorted(dt, side="left"))
-            if start_idx >= len(bars):
-                start_idx = max(0, len(bars) - 1)
-        log().debug("sstrat.run.window", strat=self.kind, position_id=self.pos.id, start_idx=start_idx, last_ts=last_ts)
+        log().debug("sstrat.run.start", strat=self.kind, position_id=self.pos.id, bars=len(bars))
 
-        self.on_run(bars, start_idx=start_idx)
+        # pass 1: finalized bars (exclude last bar)
+        bars_final = bars.iloc[:-1]
+        if not bars_final.empty:
+            start_idx_final = self._calc_start_idx(bars_final, last_ts)
+            self._run_pass("final", bars_final, start_idx_final, persist_state=True, save_history=True)
 
-        self.ctx["states"] = {name: ind.state for name, ind in self.inds.items()}
-        if not bars.empty:
-            self.ctx[LAST_TS] = int(bars.index[-1].value // 1_000_000)
+        # pass 2: live view (tail, do not persist state)
 
-        # auto-record indicator outputs from start_idx onward
-        ts_slice = bars.index[start_idx:]
-        ts_ms = (ts_slice.astype("datetime64[ns]").astype("int64") // 1_000_000)
-        for ind_name, ind in self.inds.items():
-            if not ind.outputs: continue
-            for out_name, arr in ind.outputs.items():
-                vals = arr[start_idx:]
-                log().debug("sstrat.hist.write", strat=self.kind, ind=ind_name, out=out_name,
-                            position_id=self.pos.id, points=len(vals))
-                self.eng.ih.insert_history2(self.thinker._thinker_id, self.pos.id, f"{ind_name}-{out_name}",
-                                            ts_ms, vals,)
+        # Note: indicators shouldn't write into their states ever
+        # ctx_states = copy.deepcopy(self.ctx[IND_STATES])
+        # for name, ind in self.inds.items():
+        # if name in ctx_states:
+        #     ind.state = copy.deepcopy(ctx_states[name])
+
+        tail = bars.iloc[-lookback_bars:] if lookback_bars < len(bars) else bars
+        start_idx_live = self._calc_start_idx(tail, self.ctx.get(LAST_TS))
+        self._run_pass("live", tail, start_idx_live, persist_state=False, save_history=True)
+
+        # restore persisted states (no change)
+        ctx_states = self.ctx[IND_STATES]
+        for name, ind in self.inds.items():
+            if name in ctx_states:
+                ind.state = ctx_states[name]
         return None
+
+    def _calc_start_idx(self, bars: pd.DataFrame, last_ts: Optional[int]) -> int:
+        if last_ts is None:
+            return 0
+        dt = pd.to_datetime(int(last_ts), unit="ms")
+        start_idx = int(bars.index.searchsorted(dt, side="left"))
+        if start_idx >= len(bars):
+            start_idx = max(0, len(bars) - 1)
+        return start_idx
+
+    def _run_pass(self, label: str, bars: pd.DataFrame, start_idx: int, *, persist_state: bool, save_history: bool):
+        log().debug(f"sstrat.run.{label}", strat=self.kind, position_id=self.pos.id,
+                    start_idx=start_idx, last_ts=self.ctx.get(LAST_TS), rows=len(bars))
+        self.on_run(bars, start_idx=start_idx)
+        if persist_state:
+            self.ctx[IND_STATES] = {name: ind.state for name, ind in self.inds.items()}
+            self.ctx[LAST_TS] = int(bars.index[-1].value // 1_000_000)
+        if save_history:
+            ts_slice = bars.index[start_idx:]
+            ts_ms = (ts_slice.astype("datetime64[ns]").astype("int64") // 1_000_000)
+            for ind_name, ind in self.inds.items():
+                if not ind.outputs:
+                    continue
+                for out_name, arr in ind.outputs.items():
+                    vals = arr[start_idx:]
+                    log().debug(f"sstrat.hist.write.{label}", strat=self.kind, ind=ind_name, out=out_name,
+                                position_id=self.pos.id, points=len(vals))
+                    self.eng.ih.insert_history2(
+                        self.thinker._thinker_id,
+                        self.pos.id,
+                        f"{ind_name}-{out_name}",
+                        ts_ms,
+                        vals,
+                    )
 
     @classmethod
     def from_kind(cls, kind: str, eng, thinker, ctx: dict, pos, name, attached_at: int):

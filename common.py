@@ -30,6 +30,7 @@ __all__ = [
     "SSTRAT_KIND",
     "LAST_TS",
     "float2str",
+    "IND_STATES",
     "TooFewDataPoints"
 ]
 
@@ -48,6 +49,8 @@ ATTACHED_AT = "attached_at"
 SSTRAT_KIND = "sstrat_kind"
 # Last timestamp key
 LAST_TS = "last_ts"
+# Indicator states key
+IND_STATES = "ind_states"
 # Time of attachment of a position into a thinker
 ATTACHED_AT = "attached_at"
 # Number of bars needed for all indicators in a sstrat to work
