@@ -87,7 +87,6 @@ class PSARIndicator(BaseIndicator):
         state = self.get_my_state()
         stopped = False
         stop_val: Optional[float] = None
-        stopped_count = int(state.get("stopped_count", 0)) if state else 0
 
         if state is None:
             win_size = self.window_size(self.cfg)
@@ -98,6 +97,7 @@ class PSARIndicator(BaseIndicator):
             ep = h0 if up else l0
             af = af0
             psar = l0 if up else h0  # todo include stopped_count here
+            stopped_count = 0
         else:
             psar = state["psar"]
             ep = state["ep"]
@@ -167,7 +167,7 @@ class PSARIndicator(BaseIndicator):
                 break
 
         new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("STOPPED" if stopped else ("UP" if up else "DOWN")),
-                     "stopped": stopped, "stopped_count": stopped_count}
+                     "stopped": stopped, "stopped_count": int(stopped_count)}
         outputs = {"value": val_arr}
         return new_state, outputs
 
@@ -255,7 +255,7 @@ class StopperIndicator(BaseIndicator):
             -> Tuple[dict, Dict[str, np.ndarray]]:
         state = self.get_my_state()
         side = self.cfg["side"]
-        n_total = len(df)
+        n_total = self.n_total()
         val_arr = np.full(n_total, np.nan, dtype=float)
         flag_arr = np.full(n_total, np.nan, dtype=float)
         stop = None if state is None else state["stop"]
@@ -373,7 +373,7 @@ class StopStrategy:
         v_ts = bars.index.astype("int64") // 1_000_000  # for get_ind_state()
 
         # start_idx corresponds to a timestamp <= anchor_ts
-        start_idx = v_ts.searchsorted(anchor_ts, side="right")-1
+        start_idx = int(v_ts.searchsorted(anchor_ts, side="right")-1)
         if start_idx < window_size-1:
             # TODO: Consider recovering (put this in a loop to increase the start_ts lookback for a few tries)
             raise TooFewDataPoints(f"[trail] Not enough klines (window_size={window_size}, start_idx={start_idx}), can't run strategy!")
@@ -395,14 +395,13 @@ class StopStrategy:
         self._end_idx = len(bars)
         self._v_ts = bars.index.astype("int64") // 1_000_000  # for get_ind_state()
 
-
         # Runs the stop strategy
         self.on_run(bars)
 
         if save_state:
             # saves indictor states
-            ts_ms = int(self._v_ts[-1])
-            self.ind_states[ts_ms] = {name: ind._temp_state for name, ind in self.inds.items()}
+            ts_ms_str = str(self._v_ts[-1])
+            self.ind_states[ts_ms_str] = {name: ind._temp_state for name, ind in self.inds.items()}
 
         ts_ms = self._v_ts[start_idx:]
         for ind_name, ind in self.inds.items():
@@ -424,9 +423,10 @@ class StopStrategy:
 
     def get_ind_state(self, ind_name: str):
         idx = self._start_idx
-        ts_ms = int(self._v_ts[idx - 1]) if idx > 0 else "OUT_OF_BOUNDS"
+        ts_ms = self._v_ts[idx - 1]
+        ts_ms_key = str(ts_ms) if idx > 0 else "OUT_OF_BOUNDS"
 
-        states = self.ind_states.get(ts_ms)
+        states = self.ind_states.get(ts_ms_key)
         if states:
             return states[ind_name]
 

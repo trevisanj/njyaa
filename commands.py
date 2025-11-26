@@ -1378,13 +1378,13 @@ def build_registry() -> CommandRegistry:
         return _md(body)
 
     # ----------------------- THINKER NEW -----------------------
-    @R.bang("thinker-new", argspec=["kind"], options=["enabled"])
+    @R.bang("thinker-new", argspec=["kind"], options=["enabled"], freeform=True)
     def _bang_thinker_new(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Create a new thinker row.
 
         Usage:
-          !thinker-new <kind|index> [enabled:0|1]
+          !thinker-new <kind|index> [enabled:0|1] [cfg_key=val ...]
         """
         kind_arg = args["kind"].strip()
         factory = eng.tm.factory
@@ -1406,7 +1406,26 @@ def build_registry() -> CommandRegistry:
             enabled_val = 1 if enabled_opt.strip() not in ("0", "false", "False") else 0
 
         cls = factory.cls_for(kind)
+        cfg_cls = cls.Config
+        updates = args["__freeform__"]
+        if updates and not cfg_cls:
+            return _err("This thinker has no Config schema; no overrides allowed.")
+
         default_cfg = cls(eng.tm, eng)._build_cfg({})
+        if updates:
+            allowed_keys = {f.name for f in fields(cfg_cls)}
+            bad_keys = [k for k in updates if k not in allowed_keys]
+            if bad_keys:
+                allowed_list = ", ".join(sorted(allowed_keys))
+                return _err(f"Unknown config key(s): {', '.join(sorted(bad_keys))}. Allowed: {allowed_list}")
+            for k, v in updates.items():
+                default_cfg[k] = _coerce_cfg_val(v)
+
+        # validate proposed config
+        inst = cls(eng.tm, eng)
+        fake_row = {"id": -1, "config_json": json.dumps(default_cfg, ensure_ascii=False), "runtime_json": "{}"}
+        inst._init_from_row(fake_row)
+
         tid = eng.store.insert_thinker(kind, config=default_cfg)
         if not enabled_val:
             eng.store.update_thinker_enabled(tid, False)

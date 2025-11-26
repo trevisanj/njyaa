@@ -174,6 +174,11 @@ def render_indicator_chart_multi(eng: "BotEngine", thinker_id: int, position_id:
     if price_df.empty:
         raise ValueError(f"No klines for {symbol} {timeframe}")
 
+    N = 50
+    if len(price_df.index) > N:
+        price_df = price_df.iloc[-N:]
+        log().warn(f"render_indicator_chart_multi() trimming price df to {N} data points, FIX THISSSSSSSSSSSSSS")
+
     fig, axlist = mpf.plot(price_df, type="candle", returnfig=True,
                            title=f"{symbol} indicators ({', '.join(indicator_names)})", show_nontrading=True)
     ax = axlist[0] if isinstance(axlist, (list, tuple)) else axlist

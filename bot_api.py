@@ -770,6 +770,7 @@ class BotEngine:
         try:
             log().debug("Gonna think ...")
             self.refresh_klines_cache()
+            # TODO: check here if system is shutting down. Check inside refresh_klines_cache() loop as well. Check inside tm loop as well. throw ShuttingDown or whatever
             n_ok, n_fail = self.tm.run_once()
             log().debug("thinkers.cycle", n_ok=n_ok, n_fail=n_fail)
         except Exception as e:
