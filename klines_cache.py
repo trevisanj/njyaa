@@ -319,6 +319,8 @@ class KlinesCache:
 
         for col in ("Open", "High", "Low", "Close"):
             out_df[col] = out_df[col] / den_df[col]
+        out_df["Low"] = out_df[["Low", "Open", "Close"]].min(axis=1)
+        out_df["High"] = out_df[["High", "Open", "Close"]].max(axis=1)
         out_df["Volume"] = out_df["Volume"]
         return out_df
 
@@ -479,4 +481,3 @@ class KlinesCache:
 
         self.bulk_upsert(rows)
         return len(rows)
-

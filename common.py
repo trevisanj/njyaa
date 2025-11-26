@@ -55,7 +55,7 @@ IND_STATES = "ind_states"
 # *User* time of attachment of a position into a thinker
 ATTACHED_AT = "attached_at"
 # Number of bars needed for all indicators in a sstrat to work
-LOOKBACK_BARS = "lookback_bars"
+WINDOW_SIZE = "window_size"
 
 
 # =======================

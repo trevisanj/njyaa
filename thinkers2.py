@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CH
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
 from common import (log, Clock, AppConfig, leg_pnl, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, SSTRAT_KIND, ATTACHED_AT,
-                    LAST_TS, LOOKBACK_BARS, float2str, TooFewDataPoints)
+                    LAST_TS, WINDOW_SIZE, float2str, TooFewDataPoints)
 from thinkers1 import ThinkerBase
 import risk_report
 from indicator_engines import StopStrategy, SSPSAR
@@ -171,7 +171,7 @@ class TrailingStopThinker(ThinkerBase):
     {
       "123": {
         "attached_at_ms": 1732450000000,
-        "lookback_bars": 200,
+        "window_size": 200,
         "sstrat_kind": "SSPSAR",
         "sstrat": {
           "cfg": {...},
@@ -223,7 +223,7 @@ class TrailingStopThinker(ThinkerBase):
             self._reset(resets)
             self.save_runtime()
 
-        pp_ctx = self._runtime.get(PP_CTX) or {}
+        pp_ctx = self._runtime.setdefault(PP_CTX, {})
         if not pp_ctx:
             return 0
         log().debug("trail.tick.start", attachments=len(pp_ctx))
@@ -234,6 +234,7 @@ class TrailingStopThinker(ThinkerBase):
 
         processed = 0  # counter of processed attachments
         for pid_str, p_ctx in pp_ctx.items():
+            # TODO runtime is being saved only once for all positions, so if one fucks you, others lose new state
 
             # ---------- fetch position + validate attachment ----------
             if p_ctx.get("invalid"):
@@ -278,6 +279,7 @@ class TrailingStopThinker(ThinkerBase):
             log().debug("trail.tick.run_sstrat", stamp=stamp())
             try:
                 sstrat.run()
+                dirty = True
             except TooFewDataPoints as e:
                 log().exc(e, stamp=stamp())
                 continue
@@ -311,8 +313,9 @@ class TrailingStopThinker(ThinkerBase):
             dirty = True
 
         if dirty:
-            self._runtime[PP_CTX] = pp_ctx
+            # self._runtime[PP_CTX] = pp_ctx
             self.save_runtime()  # persist runtime if touched
+            log().info("trail.tick.saved_runtime")
         return
 
 
