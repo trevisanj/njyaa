@@ -30,23 +30,25 @@ class BaseIndicator:
         return 1
 
     @classmethod
-    def from_kind(cls, kind: str, cfg: dict):
+    def from_kind(cls, kind: str, cfg: dict, sstrat):
         if kind not in INDICATOR_CLASSES:
             raise ValueError(f"Unknown indicator kind: {kind}")
-        return INDICATOR_CLASSES[kind](cfg)
+        return INDICATOR_CLASSES[kind](cfg, sstrat)
 
     def on_init(self):
         """Inherit to create new instance variables etc."""
         pass
 
-    def run(self, *args, **kwargs) -> Dict[str, np.ndarray]:
+    def run(self, bars: pd.DataFrame, start_idx: int, end_idx: int, *args, **kwargs) -> Dict[str, np.ndarray]:
         """Execute indicator, storing outputs for later inspection; returns outputs only."""
-        new_state, outs = self.on_run(*args, **kwargs)
+        new_state, outs = self.on_run(bars, start_idx=start_idx, end_idx=end_idx, *args, **kwargs)
         self.outputs = outs
         self.state = new_state
+        if bars is not None and end_idx > 0:
+            self.state["state_ts"] = int(bars.index[end_idx - 1].value // 1_000_000)
         return outs
 
-    def on_run(self, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
+    def on_run(self, bars: pd.DataFrame, start_idx: int, end_idx: int, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
         raise NotImplementedError
 
 
@@ -63,16 +65,7 @@ class PSARIndicator(BaseIndicator):
         trend = "UP" if position.side > 1 else "DOWN"
         return {"af": 0.02, "max_af": 0.2, "initial_trend": trend}
 
-    def on_run(self, df: pd.DataFrame, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
-        """
-        Compute PSAR; returns (new_state, outputs).
-        outputs: {"value", "ep", "af", "trend"} aligned to df.index (NaNs where unchanged).
-        """
-        if df is None or df.empty:
-            raise ValueError("bars required")
-        if start_idx >= len(df):
-            return {"value": np.full(len(df), np.nan)}
-
+    def on_run(self, df: pd.DataFrame, start_idx: int, end_idx: int, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
         af0 = self.cfg["af"]
         afmax = self.cfg["max_af"]
         init_up = True if str(self.cfg["initial_trend"]).upper() == "UP" else False
@@ -91,15 +84,13 @@ class PSARIndicator(BaseIndicator):
 
         if self.state is None:
             need = self.lookback_bars(self.cfg)
-            if len(df) < need:
-                raise ValueError(f"Need at least {need} bars to bootstrap PSAR")
-            h0 = float(np.max(h_arr[:need]))
-            l0 = float(np.min(l_arr[:need]))
+            win_start = max(0, start_idx - need)
+            h0 = float(np.max(h_arr[win_start:start_idx]))
+            l0 = float(np.min(l_arr[win_start:start_idx]))
             up = init_up
             ep = h0 if up else l0
             af = af0
             psar = l0 if up else h0
-            idx = need
         else:
             psar = float(self.state["psar"])
             ep = float(self.state["ep"])
@@ -109,15 +100,17 @@ class PSARIndicator(BaseIndicator):
             up = True if trend == "UP" else False
             stop_val = psar if stopped else None
             stopped_count = int(self.state.get("stopped_count", 0))
-            idx = max(start_idx, 0)
 
         if stopped and stop_val is not None:
-            for i in range(idx, n_total):
+            for i in range(start_idx, end_idx):
                 val_arr[i] = stop_val
-            stopped_count += max(0, n_total - idx)
-            return {"value": val_arr}
+            stopped_count += max(0, end_idx - start_idx)
+            new_state = {"psar": psar, "ep": ep, "af": af, "trend": ("STOPPED" if stopped else ("UP" if up else "DOWN")),
+                         "stopped": stopped, "stopped_count": stopped_count}
+            outputs = {"value": val_arr}
+            return new_state, outputs
 
-        for i in range(idx, n_total):
+        for i in range(start_idx, end_idx):
             o, h, l, c = o_arr[i], h_arr[i], l_arr[i], c_arr[i]
             prev_psar = psar
             prev_ep = ep
@@ -159,8 +152,8 @@ class PSARIndicator(BaseIndicator):
             val_arr[i] = psar
 
             if stopped and stop_val is not None:
-                stopped_count += (n_total - i)
-                for j in range(i, n_total):
+                stopped_count += (end_idx - i)
+                for j in range(i, end_idx):
                     val_arr[j] = stop_val
                 psar = stop_val
                 up = prev_up
@@ -184,16 +177,11 @@ class ATRIndicator(BaseIndicator):
     def default_cfg(cls, *, position: ec.Position) -> dict:
         return {"period": 14}
 
-    def on_run(self, df: pd.DataFrame, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
+    def on_run(self, df: pd.DataFrame, start_idx: int, end_idx: int, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
         """
         Compute ATR; returns (new_state, outputs).
         outputs: {"value", "tr"} aligned to df.index (NaNs where unchanged).
         """
-        if df is None or df.empty:
-            raise ValueError("bars required")
-        if start_idx >= len(df):
-            return {"value": np.full(len(df), np.nan)}
-
         period = int(self.cfg["period"])
         need = self.lookback_bars(self.cfg)
 
@@ -204,11 +192,9 @@ class ATRIndicator(BaseIndicator):
 
         n_total = len(df)
         val_arr = np.full(n_total, np.nan, dtype=float)
-        idx = max(start_idx, 0)
+        idx = start_idx
 
         if self.state is None:
-            if len(df) < need:
-                raise ValueError(f"Need at least {need} bars to bootstrap ATR(p={period})")
             prev_close = c_arr[0]
             trs: list[float] = []
             for i in range(1, need):
@@ -217,12 +203,12 @@ class ATRIndicator(BaseIndicator):
                 trs.append(tr)
                 prev_close = c
             atr = sum(trs) / float(period)
-            idx = need
+            idx = max(idx, need)
         else:
             atr = float(self.state["atr"])
             prev_close = float(self.state["prev_close"])
 
-        for i in range(idx, n_total):
+        for i in range(idx, end_idx):
             h = h_arr[i]; l = l_arr[i]; c = c_arr[i]
             tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
             atr = ((atr * (period - 1)) + tr) / period
@@ -255,7 +241,7 @@ class StopperIndicator(BaseIndicator):
     def on_init(self):
         self._stop_info = None
 
-    def on_run(self, df: pd.DataFrame, values: np.ndarray, start_idx: int = 0) -> Tuple[dict, Dict[str, np.ndarray]]:
+    def on_run(self, df: pd.DataFrame, values: np.ndarray, start_idx: int, end_idx: int, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
         if df is None or df.empty:
             raise ValueError("bars required")
         side = int(self.cfg.get("side") or 0)
@@ -267,7 +253,7 @@ class StopperIndicator(BaseIndicator):
         stop = None if self.state is None else self.state.get("stop")
         closes = df["Close"].values
 
-        for i in range(start_idx, n_total):
+        for i in range(start_idx, end_idx):
             candidate = values[i] if values is not None and i < len(values) else np.nan
             if not np.isnan(candidate):
                 if stop is None:
@@ -334,7 +320,7 @@ class StopStrategy:
                 [(k, k) for k in self.ind_map]
         for kind, name in items:
             cfg = self.on_get_default_cfg(kind)
-            ind = self.inds[name] = BaseIndicator.from_kind(kind, cfg)
+            ind = self.inds[name] = BaseIndicator.from_kind(kind, cfg, self)
             if name in self.ind_states:
                 ind.state = self.ind_states[name]
 
@@ -413,7 +399,7 @@ class StopStrategy:
     def _run_pass(self, label: str, bars: pd.DataFrame, start_idx: int, *, persist_state: bool, save_history: bool):
         log().debug(f"sstrat.run.{label}", strat=self.kind, position_id=self.pos.id,
                     start_idx=start_idx, last_ts=self.ctx.get(LAST_TS), rows=len(bars))
-        self.on_run(bars, start_idx=start_idx)
+        self.on_run(bars, start_idx=start_idx, end_idx=len(bars))
         if persist_state:
             self.ctx[IND_STATES] = {name: ind.state for name, ind in self.inds.items()}
             self.ctx[LAST_TS] = int(bars.index[-1].value // 1_000_000)

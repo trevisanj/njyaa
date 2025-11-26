@@ -18,6 +18,7 @@ from rich.markdown import Markdown, Heading
 from rich.theme import Theme
 from rich.text import Text
 from rich.rule import Rule
+from telegram.constants import ParseMode
 from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when, tf_ms
 from risk_report import build_risk_report, RiskThresholds, RiskReport, format_risk_report
 
@@ -194,8 +195,9 @@ class OCMarkDown(OC):
         return rendered
 
     def render_telegram(self, eng: BotEngine) -> str:
-        eng._send_text_telegram(self.text, parse_mode="Markdown")
-        return self.text
+        md = self.text.replace("_", "\\_")
+        eng._send_text_telegram(md, parse_mode=ParseMode.MARKDOWN)
+        return md
 
 
 @dataclass

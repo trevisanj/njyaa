@@ -407,14 +407,12 @@ class BotEngine:
         if self._stopping: return
         self._console_ui.append_output(text)
 
-    def _send_text_telegram(self, text: str, parse_mode: Optional[str] = None) -> None:
+    def _send_text_telegram(self, text: str, parse_mode: Optional[object] = None) -> None:
         """Telegram sink for alerts/heartbeats."""
         if self._stopping: return
         loop = self._telegram_loop
         body = f"{self._host_name}\n{text}" if self._debug_log_mode else text
-        coro = self._app.bot.send_message(
-            chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body, parse_mode=parse_mode
-        )
+        coro = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body, parse_mode=parse_mode)
         asyncio.run_coroutine_threadsafe(coro, loop)
 
     # ---------- interface ----------
