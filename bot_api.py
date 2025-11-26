@@ -413,7 +413,18 @@ class BotEngine:
         loop = self._telegram_loop
         body = f"{self._host_name}\n{text}" if self._debug_log_mode else text
         coro = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body, parse_mode=parse_mode)
-        asyncio.run_coroutine_threadsafe(coro, loop)
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        def _on_done(f):
+            exc = f.exception()
+            if not exc:
+                return
+            log().error("telegram.send.failed", err=str(exc))
+            try:
+                coro_plain = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body, parse_mode=None)
+                asyncio.run_coroutine_threadsafe(coro_plain, loop)
+            except Exception as e:
+                log().exc(e, where="telegram.send.retry_plain")
+        fut.add_done_callback(_on_done)
 
     # ---------- interface ----------
     def send_text(self, text: str) -> None:

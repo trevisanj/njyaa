@@ -19,6 +19,7 @@ from rich.theme import Theme
 from rich.text import Text
 from rich.rule import Rule
 from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
 from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when, tf_ms
 from risk_report import build_risk_report, RiskThresholds, RiskReport, format_risk_report
 
@@ -93,7 +94,7 @@ def fmt_uline(title: str, level: int) -> tuple[str, str]:
     return " "*len(EGY_UPATS[level][0]) + title, uline
 
 # Toggle pure markdown (no rich rendering) for debugging.
-RENDER_MARKDOWN = True
+RENDER_MARKDOWN = False
 # Whether to render command details as code or blockquote
 BLOCKQUOTE = False
 
@@ -195,9 +196,29 @@ class OCMarkDown(OC):
         return rendered
 
     def render_telegram(self, eng: BotEngine) -> str:
-        md = self.text.replace("_", "\\_")
-        eng._send_text_telegram(md, parse_mode=ParseMode.MARKDOWN)
-        return md
+
+        text = _escape_in_word_underscores(self.text)
+
+        print("--- TELEGRAM TEXT BEGIN ---")
+        print(text)
+        print("--- TELEGRAM TEXT END ---")
+
+        eng._send_text_telegram(text, parse_mode=ParseMode.MARKDOWN)
+        return text
+
+
+def _escape_in_word_underscores(txt: str) -> str:
+    buf = []
+    n = len(txt)
+    for i, ch in enumerate(txt):
+        if ch == "_":
+            prev = txt[i - 1] if i > 0 else ""
+            nxt = txt[i + 1] if i + 1 < n else ""
+            if prev.isalnum() and nxt.isalnum():
+                buf.append("\\_")
+                continue
+        buf.append(ch)
+    return "".join(buf)
 
 
 @dataclass
@@ -432,7 +453,7 @@ class CommandRegistry:
     # ---- help/usage ----
     def _usage_line(self, meta: Dict[str, Any], reason: Optional[str] = None) -> str:
         pre = meta["prefix"]
-        nm = meta["name"]
+        name = meta["name"]
         argspec = list(meta["argspec"])
         nreq = meta.get("nreq", len(argspec))
         pos_parts: List[str] = []
@@ -444,11 +465,12 @@ class CommandRegistry:
         pos = " ".join(pos_parts)
         opt = ""
         if meta["options"]:
-            opt_items = " ".join(f"[{o}:…]" for o in sorted(meta["options"]))
+            DDD = "•" # indicator of option value
+            opt_items = " ".join(f"[{o}:{DDD}]" for o in meta["options"])
             opt = (" " + opt_items) if opt_items else ""
         if meta.get("freeform"):
             opt += " [key=val ...]"
-        line = f"**{pre}{nm}**" + (f" {pos}" if pos else "") + opt
+        line = f"`{pre}{name}`" + (f" {pos}" if pos else "") + opt
         line = re.sub(r"\s{2,}", " ", line).strip()
         if reason:
             return f"{reason}\n{line}"

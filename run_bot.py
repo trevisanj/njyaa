@@ -28,7 +28,7 @@ def main():
     acquire_singleton_lock()
     cfg = make_cfg()
     # inject_cmd = "?chart-ind 4 3" # os.getenv("NJYAA_INJECT_CMD")
-    inject_cmd = ""
+    inject_cmd = "?help detail:2"
 
     mode = 4
 
