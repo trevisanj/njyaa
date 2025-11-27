@@ -205,9 +205,9 @@ class OCMarkDown(OC):
         text = _escape_in_word_underscores(text)
         text = _escape_brackets(text)
 
-        print("--- TELEGRAM TEXT BEGIN ---")
-        print(text)
-        print("--- TELEGRAM TEXT END ---")
+        # print("--- TELEGRAM TEXT BEGIN ---")
+        # print(text)
+        # print("--- TELEGRAM TEXT END ---")
 
         eng._send_text_telegram(text, parse_mode=ParseMode.MARKDOWN)
         return text
@@ -249,18 +249,18 @@ def _escape_in_word_underscores(txt: str) -> str:
     return "".join(buf)
 
 def _escape_brackets(txt: str) -> str:
-    for ch in "[]":
+    for ch in "[":  # leave right bracket out, Telegram MARKDOWN_V1 wants only left brackets scaped
         txt = txt.replace(ch, f"\\{ch}")
     return txt
 
 
 _HEADING_REPLACEMENTS = {
-    1: "**🍌 {title} **",
-    2: "**🍏 {title}**",
-    3: "**### {title}**",
-    4: "**#### {title}**",
-    5: "**##### {title}**",
-    6: "**###### {title}**",
+    1: "**🥦 {title} **",
+    3: "**🍅 {title}**",
+    2: "**🥬 {title}**",
+    4: "**🥕 {title}**",
+    5: "**🫑 {title}**",
+    6: "**🧄 {title}**",
 }
 
 
@@ -532,7 +532,7 @@ class CommandRegistry:
         line = f"`{pre}{name}`" + (f" {pos}" if pos else "") + opt
         line = re.sub(r"\s{2,}", " ", line).strip()
         if reason:
-            return f"{reason}\n{line}"
+            return f"🧩 **{reason}** 🧩 {line}"
         return line
 
     def _help_text(self, detail: int = 1, command: Optional[str] = None) -> CO:
