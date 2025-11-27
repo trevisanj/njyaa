@@ -405,8 +405,9 @@ class StopStrategy:
             ts_ms_str = str(self._v_ts[-1])
             self.ind_states[ts_ms_str] = {name: ind._temp_state for name, ind in self.inds.items()}
             # Trims to maximum two states
-            while len(self.ind_states) > 2:
-                self.ind_states.popitem(last=False)
+            d = self.ind_states
+            while len(d) > 2:
+                d.pop(next(iter(d)))  # remove oldest
 
         ts_ms = self._v_ts[start_idx:]
         for ind_name, ind in self.inds.items():

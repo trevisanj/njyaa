@@ -14,7 +14,6 @@ from common import (log, Clock, AppConfig, leg_pnl, tf_ms, ts_human, PP_CTX, SST
 from thinkers1 import ThinkerBase
 import risk_report
 from indicator_engines import StopStrategy, SSPSAR
-from trailing_policies import evaluate_policy
 import pandas as pd
 import numpy as np
 import enghelpers as eh

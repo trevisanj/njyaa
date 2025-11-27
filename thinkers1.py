@@ -22,8 +22,6 @@ if TYPE_CHECKING:
 # Thinker Registry/Factory
 # -----------------------------
 
-import sys, inspect
-
 def _parse_json(blob: Optional[str]) -> Dict[str, Any]:
     try:
         return json.loads(blob or "{}")
@@ -163,14 +161,13 @@ class ThinkerFactory:
         self._kinds = []
         self.tm = tm
         self.eng = eng
-        import thinkers2
-        module = sys.modules["thinkers2"]  # self reference
-        # TODO:chatgpt use ThinkerBase.__subclasses__(), much more elegant
-        for _, cls in inspect.getmembers(module, inspect.isclass):
-            if issubclass(cls, ThinkerBase) and cls != ThinkerBase:
-                assert cls.kind, f"Please be kind enough to specify {cls.__name__}.kind"
-                self._map[cls.kind] = cls
-                self._kinds.append(cls.kind)
+        import thinkers2  # noqa: F401  ensure subclasses register
+        classes = sorted(ThinkerBase.__subclasses__(), key=lambda cls: cls.__name__)
+        for cls in classes:
+            assert cls.kind, f"Please be kind enough to specify {cls.__name__}.kind"
+            assert cls.kind not in self._map, f"Duplicate thinker kind: {cls.kind}"
+            self._map[cls.kind] = cls
+            self._kinds.append(cls.kind)
         assert self._map, "No thinkers found, this must be a bug"
 
     def create(self, kind: Union[str, int]) -> ThinkerBase:
