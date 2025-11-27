@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CH
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
 from common import (log, Clock, AppConfig, leg_pnl, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, SSTRAT_KIND, ATTACHED_AT,
-                    LAST_TS, WINDOW_SIZE, float2str, TooFewDataPoints, TRAILING_SNAPSHOT)
+                    LAST_TS, WINDOW_SIZE, float2str, TooFewDataPoints)
 from thinkers1 import ThinkerBase
 import risk_report
 from sstrats import StopStrategy, SSPSAR
@@ -251,7 +251,6 @@ class TrailingStopThinker(ThinkerBase):
             if p_ctx.get("invalid"):
                 # position does not exist or is closed (see below)
                 continue
-            p_ctx["timeframe"] = tf
 
             pos = self.eng.store.get_position(int(pid_str))  # Position object (or None)
             num_den = pos.get_pair()
@@ -321,18 +320,6 @@ class TrailingStopThinker(ThinkerBase):
             assert not math.isnan(price), "price is NaN"
             if latest_stop is None or (isinstance(latest_stop, float) and math.isnan(latest_stop)):
                 raise RuntimeError(f"stop missing for {stamp()}")
-            gap_pct = (price - latest_stop) * 100 / price
-            p_ctx[TRAILING_SNAPSHOT] = {
-                "stop": latest_stop,
-                "price": price,
-                "gap_pct": gap_pct,
-                "hit": hit,
-                "ts_ms": now,
-                "sstrat_kind": sstrat_kind,
-                "timeframe": tf,
-                "attached_at": p_ctx[ATTACHED_AT],
-                "last_alert_ts": last_alert,
-            }
             log().debug("trail.tick.done", pid=pid_str, stop=latest_stop, prev=prev_stop_val, hit=hit)
 
             pp_ctx[pid_str] = p_ctx

@@ -974,16 +974,9 @@ def build_registry() -> CommandRegistry:
             return _err_exc("exit_report.build", e)
 
         if fmt == "md":
-            rendered = stop_report.format_stop_report_md(report)
-            comps: List[OC] = [
-                OCMarkDown(rendered["markdown"]),
-                OCTable(headers=rendered["headers"], rows=rendered["rows"]),
-            ]
-            return CO(comps)
+            return stop_report.format_stop_report_md(report)
         if fmt == "html":
-            rendered = stop_report.format_stop_report_html(report)
-            caption = f"Stop report @ {ts_human(report.generated_ts)}"
-            return CO(OCHTML(rendered["path"], caption=caption, open_local=True))
+            return stop_report.format_stop_report_html(report)
         raise ValueError("format must be md or html")
 
     # TODO fix or get rid (chart-ind similar)
