@@ -226,6 +226,44 @@ class ATRIndicator(BaseIndicator):
         return new_state, outputs
 
 
+class TrailingPercentIndicator(BaseIndicator):
+    """
+    Percentage trail off recent extremes: long => below low, short => above high.
+    cfg:
+      fraction: decimal fraction (e.g. 0.01 for 1%)
+      side: +1 long / -1 short
+    """
+    kind = "trail_pct"
+
+    @classmethod
+    def default_cfg(cls, *, position: ec.Position) -> dict:
+        return {"fraction": 0.01, "side": position.side}
+
+    @classmethod
+    def window_size(cls, cfg: dict) -> int:
+        return 1
+
+    # noinspection PyMethodOverriding
+    def on_run(self, start_idx: int, end_idx: int, df: pd.DataFrame, *args, **kwargs) -> Tuple[dict, Dict[str, np.ndarray]]:
+        fraction = float(self.cfg["fraction"])
+        side = int(self.cfg["side"])
+        h_arr = df["High"].values
+        l_arr = df["Low"].values
+        n_total = self.n_total()
+        val_arr = np.full(n_total, np.nan, dtype=float)
+
+        for i in range(start_idx, end_idx):
+            if side > 0:
+                val_arr[i] = l_arr[i] * (1 - fraction)
+            else:
+                val_arr[i] = h_arr[i] * (1 + fraction)
+
+        last_val = val_arr[end_idx - 1] if end_idx > start_idx else np.nan
+        new_state = {"last_value": last_val}
+        outputs = {"value": val_arr}
+        return new_state, outputs
+
+
 class StopperIndicator(BaseIndicator):
     """
     Protective stop ratchet based on upstream proposed levels.
