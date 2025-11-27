@@ -75,8 +75,15 @@ def _history_stats(eng, thinker_id: int, position_id: int, window_n: int) -> dic
         if val >= 1.0:
             hits_last_n += 1
             last_hit_ts = ts
-    if clean_flags:
-        hit_now = clean_flags[-1][1] >= 1.0
+    if flags and flags.get("value"):
+        last_val = flags["value"][-1]
+        if last_val is not None:
+            try:
+                fval = float(last_val)
+                if not math.isnan(fval) and fval >= 1.0:
+                    hit_now = True
+            except Exception:
+                pass
 
     return {
         "delta_pct_last_n": delta_pct_last_n,
