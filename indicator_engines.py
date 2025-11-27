@@ -456,6 +456,39 @@ class SSPSAR(StopStrategy):
 
 
 
+class SSATR(StopStrategy):
+    """
+    ATR-based trail: stop = close - k*ATR (long) / close + k*ATR (short), then ratchet.
+    """
+    kind = "SSATR"
+    ind_map = ["atr", "stopper"]
+
+    def on_conf_ind(self):
+        if "atr_period" not in self.cfg:
+            self.cfg["atr_period"] = 14
+        if "atr_k" not in self.cfg:
+            self.cfg["atr_k"] = 2.0
+        atr = self.inds["atr"]
+        atr.cfg["period"] = int(self.cfg["atr_period"])
+        stopper = self.inds["stopper"]
+        stopper.cfg["side"] = self.pos.side
+
+    def on_run(self, bars: pd.DataFrame):
+        atr_out = self.inds["atr"].run(bars)
+        stopper = self.inds["stopper"]
+        closes = bars["Close"].values
+        atr_vals = atr_out["value"]
+        side = self.pos.side
+        k = float(self.cfg["atr_k"])
+        candidates = np.full(len(closes), np.nan, dtype=float)
+        mask = ~np.isnan(atr_vals)
+        if side > 0:
+            candidates[mask] = closes[mask] - k * atr_vals[mask]
+        else:
+            candidates[mask] = closes[mask] + k * atr_vals[mask]
+        stopper.run(bars, candidates)
+
+
 SSTRAT_CLASSES = {cls.kind: cls for cls in StopStrategy.__subclasses__()}
 
 
