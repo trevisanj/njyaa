@@ -22,12 +22,13 @@ from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
 from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when, tf_ms
 from risk_report import build_risk_report, RiskThresholds, RiskReport, format_risk_report
+import stop_report
 
 if TYPE_CHECKING:
     from bot_api import BotEngine
 
 
-__all__ = ["OC", "OCText", "OCMarkDown", "OCPhoto", "OCTable", "CO", "CommandRegistry", "build_registry",
+__all__ = ["OC", "OCText", "OCMarkDown", "OCPhoto", "OCTable", "OCHTML", "CO", "CommandRegistry", "build_registry",
            "RICH_MD_THEME", "RICH_MD_CONFIG", "RENDER_MARKDOWN"]
 
 AT_KEY = "?"
@@ -347,6 +348,38 @@ class OCTable(OC):
                 body = "\n".join(["```", tabulate.tabulate(self.rows, headers=self.headers, tablefmt="github"), "```"])
             eng._send_text_telegram(body, parse_mode=ParseMode.MARKDOWN)
         return body
+
+
+@dataclass
+class OCHTML(OC):
+    path: str
+    caption: Optional[str] = None
+    open_local: bool = True
+
+    def __post_init__(self):
+        if not self.path:
+            raise ValueError("HTMLComponent requires 'path'")
+
+    def render_console(self, eng: BotEngine) -> str:
+        eng._send_text_console(f"[html] {self.path}")
+        try:
+            if self.open_local:
+                eng._send_file_console(self.path, caption=self.caption)
+        except Exception as e:
+            log().exc(e, where="OCHTML.render_console", path=self.path)
+        return self.path
+
+    def render_telegram(self, eng: BotEngine) -> str:
+        try:
+            eng._send_file_telegram(self.path, caption=self.caption)
+        except Exception as e:
+            log().exc(e, where="OCHTML.render_telegram", path=self.path)
+            msg = f"[html error: {e}]"
+            eng._send_text_telegram(msg)
+            return msg
+        if self.caption:
+            eng._send_text_telegram(self.caption)
+        return self.caption or self.path
 
 
 class CO:
@@ -921,6 +954,37 @@ def build_registry() -> CommandRegistry:
                 meta.get("meta") if isinstance(meta, dict) else {},
             ])
         return _tbl(["policy", "stop", "ts", "meta"], table_rows, intro=f"Trailing state for {pid}")
+
+    @R.at("exit-report", argspec=["thinker_id"], options=["format", "n", "freshness_k"], nreq=0)
+    def _at_exit_report(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Stop/trailing report (runtime snapshot + history stats).
+
+        Usage:
+          @exit-report [thinker_id] [format:md|html] [n:50] [freshness_k:2]
+        """
+        tid_raw = args.get("thinker_id")
+        tid = int(tid_raw) if tid_raw is not None else None
+        fmt = (args.get("format") or "md").lower()
+        window_n = int(args.get("n", 50))
+        freshness_k = float(args.get("freshness_k", 2.0))
+        try:
+            report = stop_report.build_stop_report(eng, window_n=window_n, freshness_k=freshness_k, thinker_id=tid)
+        except Exception as e:
+            return _err_exc("exit_report.build", e)
+
+        if fmt == "md":
+            rendered = stop_report.format_stop_report_md(report)
+            comps: List[OC] = [
+                OCMarkDown(rendered["markdown"]),
+                OCTable(headers=rendered["headers"], rows=rendered["rows"]),
+            ]
+            return CO(comps)
+        if fmt == "html":
+            rendered = stop_report.format_stop_report_html(report)
+            caption = f"Stop report @ {ts_human(report.generated_ts)}"
+            return CO(OCHTML(rendered["path"], caption=caption, open_local=True))
+        raise ValueError("format must be md or html")
 
     # TODO fix or get rid (chart-ind similar)
     @R.at("chart-exit", argspec=["thinker_id", "position_id"], options=["n"], nreq=2)

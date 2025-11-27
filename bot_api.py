@@ -487,6 +487,25 @@ class BotEngine:
         )
         asyncio.run_coroutine_threadsafe(coro, loop)
 
+    def _send_file_console(self, path: str, caption: str | None = None) -> None:
+        """Open generic file with local handler (console path)."""
+        if self._stopping: return
+        log().info("file.local", path=path, caption=caption)
+        os.system(f"xdg-open '{path}' >/dev/null 2>&1 &")
+
+    def _send_file_telegram(self, path: str, caption: str | None = None) -> None:
+        """Telegram sink for generic files."""
+        if self._stopping: return
+        loop = self._telegram_loop
+        with open(path, "rb") as f:
+            data = f.read()
+        coro = self._app.bot.send_document(
+            chat_id=int(self.cfg.TELEGRAM_CHAT_ID),
+            document=data,
+            caption=caption or "",
+        )
+        asyncio.run_coroutine_threadsafe(coro, loop)
+
     def refresh_klines_cache(self):
         """Pull recent klines for all relevant symbols."""
         open_positions = self.store.list_open_positions()

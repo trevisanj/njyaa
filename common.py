@@ -33,6 +33,7 @@ __all__ = [
     "IND_STATES",
     "TooFewDataPoints",
     "STATE_TS",
+    "TRAILING_SNAPSHOT",
 ]
 
 class TooFewDataPoints(Exception):
@@ -57,6 +58,8 @@ IND_STATES = "ind_states"
 ATTACHED_AT = "attached_at"
 # Number of bars needed for all indicators in a sstrat to work
 WINDOW_SIZE = "window_size"
+# Last snapshot of trailing stop computation per position/thinker
+TRAILING_SNAPSHOT = "trailing_snapshot"
 
 
 # =======================
