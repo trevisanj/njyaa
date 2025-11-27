@@ -69,7 +69,6 @@ class ThinkerManager:
         return inst
 
     # --- load/instantiate
-    # TODO what when thinkers are activated/deactivated/deleted when the system is running?
     def _load(self) -> List[sqlite3.Row]:
         return self.store.con.execute("SELECT * FROM thinkers WHERE enabled=1 ORDER BY id").fetchall()
 

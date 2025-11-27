@@ -98,7 +98,7 @@ class PSARIndicator(BaseIndicator):
             up = init_up
             ep = h0 if up else l0
             af = af0
-            psar = l0 if up else h0  # todo include stopped_count here
+            psar = l0 if up else h0
             stopped_count = 0
         else:
             psar = state["psar"]

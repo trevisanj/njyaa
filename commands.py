@@ -623,7 +623,7 @@ def build_registry() -> CommandRegistry:
         return CO(OCText(text))
 
     def _err(text: str) -> CO:
-        body = "\n".join(["👾 **{text.strip()}**"])
+        body = f"👾 **{text.strip()}**"
         return CO(OCMarkDown(body))
 
     def _require_thinker_offline(eng: BotEngine, tid: int) -> Optional[CO]:
@@ -702,13 +702,12 @@ def build_registry() -> CommandRegistry:
         return "\n\n".join(blocks)
 
     # ----------------------- HELP -----------------------
-    # TODO improve help formatting
     @R.at("help", argspec=["command"], options=["detail"], nreq=0)
     def at_help(eng: BotEngine, args: Dict[str, str]) -> CO:
         f"""Show this help.
 
         Usage:
-          {AT_KEY}help [command] [detail:1]
+          ?help [command] [detail:1-4]
         """
         cmd = args.get("command")
         # default detail: 4 if a specific command was passed; otherwise 1
@@ -1374,8 +1373,12 @@ def build_registry() -> CommandRegistry:
         tid = args["id"].strip()
         if not tid.isdigit():
             return _txt("Usage: !thinker-enable <id>")
-        eng.store.update_thinker_enabled(int(tid), True)
-        eng.tm.reload(int(tid))
+        tid_i = int(tid)
+        row = eng.store.get_thinker(tid_i)
+        if row is None:
+            return _err(f"Thinker #{tid_i} not found.")
+        eng.store.update_thinker_enabled(tid_i, True)
+        eng.tm.reload(tid_i)
         return _txt(f"Thinker #{tid} enabled.")
 
     # ----------------------- THINKER DISABLE -----------------------
@@ -1827,9 +1830,14 @@ def build_registry() -> CommandRegistry:
 
     @R.bang("position-rm", argspec=["position_id"])
     def _bang_position_rm(eng: BotEngine, args: Dict[str, str]) -> CO:
-        pid = int(args["position_id"])
+        pid_s = args["position_id"].strip()
+        if not pid_s.isdigit():
+            return _txt("Usage: !position-rm <position_id>")
+        pid = int(pid_s)
+        row = eng.store.get_position(pid, fmt="row")
+        if row is None:
+            return _err(f"Position {pid} not found.")
         deleted = eng.store.delete_position_completely(pid)
-        # TODO improve reporting (still shows this message even if the position id does not exist)
         return _txt(f"Deleted position {pid} ({deleted} row(s)).")
 
     # ======================= POSITION EDIT =======================
