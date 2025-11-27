@@ -69,7 +69,9 @@ class StopStrategy:
 
     def get_window_size(self) -> int:
         if not WINDOW_SIZE in self.ctx:
-            self.ctx[WINDOW_SIZE] = max(ind.__class__.window_size(ind.cfg) for ind in self.inds.values())
+            # minimum window size of 2
+            self.ctx[WINDOW_SIZE] = max(2, max(ind.__class__.window_size(ind.cfg) for ind in self.inds.values()))
+
         return self.ctx[WINDOW_SIZE]
 
     def run(self):

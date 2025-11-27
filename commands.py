@@ -1392,13 +1392,25 @@ def build_registry() -> CommandRegistry:
         """Disable a thinker by ID
 
         Usage: !thinker-disable <id>"""
-        tid = args["id"].strip()
-        if not tid.isdigit():
-            return _txt("Usage: !thinker-disable <id>")
-        tid_i = int(tid)
+        tid_raw = args["id"].strip()
+        if tid_raw.lower() == "all":
+            rows = eng.store.list_thinkers()
+            if not rows:
+                return _txt("No thinkers.")
+            for row in rows:
+                tid = int(row["id"])
+                eng.store.update_thinker_enabled(tid, False)
+                eng.tm.disable(tid)
+            return _txt(f"Disabled all thinkers ({len(rows)}).")
+        if not tid_raw.isdigit():
+            return _txt("Usage: !thinker-disable <id|all>")
+        tid_i = int(tid_raw)
+        row = eng.store.get_thinker(tid_i)
+        if row is None:
+            return _err(f"Thinker #{tid_i} not found.")
         eng.store.update_thinker_enabled(tid_i, False)
         eng.tm.disable(tid_i)
-        return _txt(f"Thinker #{tid} disabled.")
+        return _txt(f"Thinker #{tid_raw} disabled.")
 
     # ----------------------- THINKER REMOVE -----------------------
     @R.bang("thinker-rm", argspec=["id"])

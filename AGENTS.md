@@ -19,7 +19,7 @@
 - `python -m compileall .` — quick syntax/import sanity check without hitting external APIs.
 
 ## Coding Style & Naming Conventions
-- Don't remove comments when rewriting code
+- Don't delete comments when rewriting code, specially the human-made ones  
 - Don't precipitate: ask questions if you feel that there might be something missing in my request
 - No fallbacks or silent defaults. Assume required keys/classes exist; use direct indexing (e.g., INDICATOR_CLASSES[kind]) and let it fail fast if missing. Initialize upfront so later code can trust values. Avoid .get()/.getattr(..., None) unless explicitly handling a missing case.
 - PEP 8, 4-space indents, snake_case for functions/vars, PascalCase for classes; keep type hints consistent.
