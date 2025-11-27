@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 
-from common import Clock, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, IND_STATES, float2str
+from common import Clock, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, IND_STATES, float2str, log
 from risk_report import _fmt_num, _fmt_pct
 
 
@@ -122,6 +122,8 @@ def _latest_stop_from_ctx(ctx: dict) -> tuple[float, int]:
     ind_states = sctx[IND_STATES]
     # keys are timestamps as strings; grab the latest
     ts_keys = sorted(ind_states.keys(), key=int)
+    if not ts_keys:
+        raise RuntimeError("no stopper state in context")
     last_ts_key = ts_keys[-1]
     stopper_state = ind_states[last_ts_key]["stopper"]
     stop_val = stopper_state["stop"]
@@ -167,7 +169,11 @@ def build_stop_report(eng, window_n: int = 50, freshness_k: float = 2.0, thinker
                 raise ValueError(f"Position {pid} not found for thinker {tid}")
 
             timeframe = ctx.get("timeframe") or inst._cfg["timeframe"]
-            stop, last_stop_ts = _latest_stop_from_ctx(ctx)
+            try:
+                stop, last_stop_ts = _latest_stop_from_ctx(ctx)
+            except Exception as e:
+                log().warn("stop_report.skip", thinker_id=tid, position_id=pid, err=str(e))
+                continue
             price = _latest_price_for_position(eng, pos, timeframe)
             gap_pct = (price - stop) * 100 / price
             sstrat_kind = ctx["sstrat_kind"]

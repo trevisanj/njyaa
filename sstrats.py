@@ -205,9 +205,10 @@ class SSTrailingFraction(StopStrategy):
     kind = "SSFRACTION"
     ind_map = ["price_fraction", "stopper"]
 
+    # TODO stop strategy needs a config specs much like thinker
     def on_conf_ind(self):
         if "fraction" not in self.cfg:
-            self.cfg["fraction"] = 0.01
+            self.cfg["fraction"] = 0.1
         pfi = self.inds["price_fraction"]
         pfi.cfg["fraction"] = float(self.cfg["fraction"])
         pfi.cfg["side"] = self.pos.side

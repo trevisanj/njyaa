@@ -329,7 +329,7 @@ class TrailingStopThinker(ThinkerBase):
         if dirty:
             # self._runtime[PP_CTX] = pp_ctx
             self.save_runtime()  # persist runtime if touched
-            log().info("trail.tick.saved_runtime")
+            log().info("trail.tick.saved_runtime", thinker_id=self._thinker_id)
         return
 
 
