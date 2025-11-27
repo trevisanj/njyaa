@@ -978,7 +978,7 @@ def build_registry() -> CommandRegistry:
         tbl_rows = list(zip(rows["thinker_id"], rows["position_id"], rows["name"]))
         return _tbl(["thinker_id", "position_id", "name"], tbl_rows, intro="Indicator history keys")
 
-    # TODO wild time periods, review time periods
+    # TODO +++++++wild time periods, review time periods
     @R.at("chart-ind", argspec=["thinker_id", "position_id", "names"], options=["start_ts", "end_ts"], nreq=2)
     def _at_chart_ind(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Plot indicator history with candles for a position (all or filtered by name). start_ts/end_ts accept ISO or epoch."""
