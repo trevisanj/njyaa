@@ -425,18 +425,21 @@ class CommandRegistry:
         self._meta: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     # ---- decorators ----
-    def at(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None, freeform: bool = False):
-        return self._reg((AT_KEY, name.lower()), argspec, options, nreq, freeform)
+    def at(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None, freeform: bool = False, doc_tail: Optional[str] = None):
+        return self._reg((AT_KEY, name.lower()), argspec, options, nreq, freeform, doc_tail=doc_tail)
 
-    def bang(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None, freeform: bool = False):
-        return self._reg((BANG_KEY, name.lower()), argspec, options, nreq, freeform)
+    def bang(self, name: str, argspec: List[str] = None, options: List[str] = None, nreq: Optional[int] = None, freeform: bool = False, doc_tail: Optional[str] = None):
+        return self._reg((BANG_KEY, name.lower()), argspec, options, nreq, freeform, doc_tail=doc_tail)
 
-    def _reg(self, key: Tuple[str, str], argspec: Optional[List[str]], options: Optional[List[str]], nreq: Optional[int], freeform: bool):
+    def _reg(self, key: Tuple[str, str], argspec: Optional[List[str]], options: Optional[List[str]], nreq: Optional[int], freeform: bool, doc_tail: Optional[str] = None):
         def deco(fn):
             self._handlers[key] = fn
             # Extract first docstring line as summary (if present)
 
-            l_doc = _remove_indent(fn.__doc__ or "")
+            raw_doc = fn.__doc__ or ""
+            if doc_tail:
+                raw_doc = (raw_doc + "\n\n" + _indent_doc_tail(doc_tail)).strip()
+            l_doc = _remove_indent(raw_doc)
             summary = "" if not l_doc else l_doc[0]
             self._meta[key] = {
                 "argspec": list(argspec or []),
@@ -955,7 +958,7 @@ def build_registry() -> CommandRegistry:
             ])
         return _tbl(["policy", "stop", "ts", "meta"], table_rows, intro=f"Trailing state for {pid}")
 
-    @R.at("exit-report", argspec=["thinker_id"], options=["format", "n", "freshness_k"], nreq=0)
+    @R.at("exit-report", argspec=["thinker_id"], options=["format", "n", "freshness_k"], nreq=0, doc_tail=stop_report.STOP_REPORT_GUIDE)
     def _at_exit_report(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Stop/trailing report (runtime snapshot + history stats).
@@ -978,6 +981,7 @@ def build_registry() -> CommandRegistry:
         if fmt == "html":
             return stop_report.format_stop_report_html(report)
         raise ValueError("format must be md or html")
+
 
     # TODO fix or get rid (chart-ind similar)
     @R.at("chart-exit", argspec=["thinker_id", "position_id"], options=["n"], nreq=2)
@@ -2429,3 +2433,11 @@ def _remove_indent(docstring: str) -> List:
 
     stripped = [strip_prefix(ln) for ln in lines]
     return stripped
+
+
+def _indent_doc_tail(doc_tail: str, pad: str = "        ") -> str:
+    """Indent each line of doc_tail with pad (default 8 spaces)."""
+    lines = (doc_tail or "").splitlines()
+    if not lines:
+        return ""
+    return "\n".join(pad + l if l else pad for l in lines)

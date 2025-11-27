@@ -40,6 +40,29 @@ class StopReport:
     freshness_k: float
 
 
+STOP_REPORT_GUIDE = """
+**Parameters**
+- `window_n`: how many recent indicator-history rows to summarize (hit counts, Δstop%). Bigger = longer lookback. Default 50.
+- `freshness_k`: multiple of timeframe used to mark `stale` (last stop older than `freshness_k * tf_ms`). Raise to be more tolerant, lower to be stricter. Default 2.
+
+**Summary fields**
+- `rows`: trailing attachments included.
+- `stale`: count of rows whose last stop is older than `freshness_k * timeframe`.
+- `hit_now`: how many rows have the latest stopper flag = 1.
+- `hits_lastN`: total hit flags within the last `window_n` records.
+
+**Position columns**
+- `gap%`: `(price - stop) / price`; positive = price above stop (long headroom), negative = stop above price (shorts).
+- `hit`: latest stopper flag only; past hits clear if the most recent flag is 0.
+- `stale`: last stop older than `freshness_k * timeframe`.
+- `Δstop%`: stop drift from oldest to newest in the last `window_n` records (ratcheting vs flat).
+- `hits`: number of hit flags in the last `window_n`; `last_hit`: most recent hit ts; `last_alert`: when an alert was emitted (blank if none/cooldown/offline).
+
+**Thinker table**
+- Shows per-thinker `sstrat`, `tf`, and counts of rows that are `hit`/`stale`.
+""".strip()
+
+
 def _clean_series(ts_seq: List[int], val_seq: List[Any]) -> List[tuple[int, float]]:
     items: List[tuple[int, float]] = []
     for ts, val in zip(ts_seq, val_seq):
@@ -264,6 +287,8 @@ def format_stop_report_md(report: StopReport):
         elements.append(_md(["## Thinkers"]))
         elements.append(OCTable(headers=headers_thinkers, rows=thinker_tbl))
 
+    elements.append(_md(["## Guide", STOP_REPORT_GUIDE]))
+
     return CO(elements)
 
 
@@ -374,6 +399,7 @@ def format_stop_report_html(report: StopReport):
             f"max={_fmt_pct(max(deltas)/100, nd=3, show_sign=True)}"
         )
     summary_html = "".join(f"<li>{s}</li>" for s in summary_items)
+    guide_html = "<br>".join(STOP_REPORT_GUIDE.splitlines())
     html = "".join([
         "<html><head><meta charset='utf-8'>",
         style,
@@ -385,6 +411,8 @@ def format_stop_report_html(report: StopReport):
         table_html,
         "<h2>Thinkers</h2>",
         thinker_html,
+        "<h2>Guide</h2>",
+        f"<div class='meta' style='white-space:pre-wrap'>{guide_html}</div>",
         "</body></html>",
     ])
     fd, path = tempfile.mkstemp(prefix="stop_report_", suffix=".html")
