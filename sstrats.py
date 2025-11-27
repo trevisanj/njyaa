@@ -90,9 +90,12 @@ class StopStrategy:
         if start_idx < window_size-1:
             raise TooFewDataPoints(f"[trail] Not enough klines (window_size={window_size}, start_idx={start_idx}), can't run strategy!")
 
+        # TODO pull comments from previous commit, chatgpt removed all
+
         if start_idx < n_bars-1:
             self._run_pass(bars[:-1], start_idx, True)
 
+        # TODO There is still a bug with states, i guess, because i see a stop "going back" (see chart_ind_12_4_SEIUSDT-BTCUSDT_1h.png)
         self._run_pass(bars[-window_size:], window_size-1, False)
 
         ts_ms = int(v_ts[-1])
@@ -193,26 +196,26 @@ class SSATR(StopStrategy):
         stopper.run(bars, candidates)
 
 
-class SSTrailingPercent(StopStrategy):
+class SSTrailingFraction(StopStrategy):
     """
     Percent trail off each bar's extreme: long = low*(1-fraction), short = high*(1+fraction), then ratchet.
     """
-    kind = "SSTrailingPercent"
-    ind_map = ["trail_pct", "stopper"]
+    kind = "SSFRACTION"
+    ind_map = ["price_fraction", "stopper"]
 
     def on_conf_ind(self):
-        if "trail_fraction" not in self.cfg:
-            self.cfg["trail_fraction"] = 0.01
-        tpi = self.inds["trail_pct"]
-        tpi.cfg["fraction"] = float(self.cfg["trail_fraction"])
-        tpi.cfg["side"] = self.pos.side
+        if "fraction" not in self.cfg:
+            self.cfg["fraction"] = 0.01
+        pfi = self.inds["price_fraction"]
+        pfi.cfg["fraction"] = float(self.cfg["fraction"])
+        pfi.cfg["side"] = self.pos.side
         stopper = self.inds["stopper"]
         stopper.cfg["side"] = self.pos.side
 
     def on_run(self, bars: pd.DataFrame):
-        tpi_out = self.inds["trail_pct"].run(bars)
+        pfi_out = self.inds["price_fraction"].run(bars)
         stopper = self.inds["stopper"]
-        stopper.run(bars, tpi_out["value"])
+        stopper.run(bars, pfi_out["value"])
 
 
 SSTRAT_CLASSES = {cls.kind: cls for cls in StopStrategy.__subclasses__()}

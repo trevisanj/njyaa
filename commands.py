@@ -759,7 +759,8 @@ def build_registry() -> CommandRegistry:
         pid_raw = args["position_id"]
         attach_all = str(pid_raw).lower() == "all"
         pid = int(pid_raw) if not attach_all else None
-        sstrat_kind = args.get("sstrat_kind", "SSPSAR").upper()
+        if pid is not None and eng.store.get_position(pid, fmt="row") is None:
+            return _err(f"Position {pid} not found.")
         at_opt = args.get("at")
         cfg_freeform = args["__freeform__"]
         at_ms = Clock.now_utc_ms()
@@ -775,6 +776,8 @@ def build_registry() -> CommandRegistry:
             inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
         except Exception as e:
             return _err_exc("exit_attach.get_thinker", e)
+        sstrat_kind_arg = args.get("sstrat_kind")
+        sstrat_kind = sstrat_kind_arg.upper() if sstrat_kind_arg else inst._cfg["sstrat_kind"]
         rt = inst.runtime()
         pp_ctx = rt.setdefault(PP_CTX, {})
 
@@ -803,6 +806,7 @@ def build_registry() -> CommandRegistry:
         else:
             pid_key = str(pid)
             if pid_key in pp_ctx:
+                # TODO: got this weird message "Attached exit watcher to position 4 (already attached) via thinker 10 (SSFRACTION) at 20251124🇧🇷08:58:34"
                 msg_target = f"position {pid} (already attached)"
             else:
                 _attach_one(pid)
@@ -863,6 +867,7 @@ def build_registry() -> CommandRegistry:
             return _txt(f"Detached exit policies from all positions for thinker {tid}" + ("" if removed else " (none existed)"))
         return _txt(f"Detached exit policies from position {pid}" + ("" if removed else " (none existed)"))
 
+    # TODO gotta think carefully about detaching vs resetting: attaching must delete indicator history as well, i guess etc.
     @R.bang("exit-reset", argspec=["thinker_id", "position_id"], nreq=2)
     def _bang_exit_reset(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
@@ -1402,11 +1407,18 @@ def build_registry() -> CommandRegistry:
         Delete a thinker by ID.
 
         Usage: !thinker-rm <id>"""
-        tid = args["id"].strip()
-        if not tid.isdigit():
+        tid_raw = args["id"].strip()
+        if not tid_raw.isdigit():
             return _txt("Usage: !thinker-rm <id>")
-        eng.store.delete_thinker(int(tid))
-        return _txt(f"Thinker #{tid} deleted.")
+        tid = int(tid_raw)
+        row = eng.store.get_thinker(tid)
+        if row is None:
+            return _err(f"Thinker #{tid} not found.")
+        if row["enabled"]:
+            return _err(f"Thinker #{tid} must be disabled before deletion.")
+        deleted_ih = eng.ih.delete_by_thinker(tid)
+        eng.store.delete_thinker(tid)
+        return _txt(f"Thinker #{tid} deleted (indicator_history rows removed: {deleted_ih}).")
 
     # ----------------------- THINKER SET -----------------------
     @R.bang("thinker-set", argspec=["id"], freeform=True)
@@ -1489,7 +1501,7 @@ def build_registry() -> CommandRegistry:
                 return _txt(f"Unknown thinker kind '{kind}'. Use ?thinker-kinds for a list.")
 
         enabled_opt = args.get("enabled")
-        enabled_val = 1
+        enabled_val = 0
         if enabled_opt is not None:
             enabled_val = 1 if enabled_opt.strip() not in ("0", "false", "False") else 0
 

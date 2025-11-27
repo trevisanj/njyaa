@@ -226,14 +226,14 @@ class ATRIndicator(BaseIndicator):
         return new_state, outputs
 
 
-class TrailingPercentIndicator(BaseIndicator):
+class PriceFractionIndicator(BaseIndicator):
     """
-    Percentage trail off recent extremes: long => below low, short => above high.
+    Per-bar fractional offset off extremes: long => below low, short => above high.
     cfg:
       fraction: decimal fraction (e.g. 0.01 for 1%)
       side: +1 long / -1 short
     """
-    kind = "trail_pct"
+    kind = "price_fraction"
 
     @classmethod
     def default_cfg(cls, *, position: ec.Position) -> dict:
@@ -297,7 +297,7 @@ class StopperIndicator(BaseIndicator):
         closes = df["Close"].values
 
         for i in range(start_idx, end_idx):
-            candidate = values[i] if values is not None and i < len(values) else np.nan
+            candidate = values[i]
             if not np.isnan(candidate):
                 if stop is None:
                     stop = candidate

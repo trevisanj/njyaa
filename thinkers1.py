@@ -226,7 +226,7 @@ class ThinkerBase(ABC):
         config = _parse_json(tr["config_json"])
         runtime = _parse_json(tr["runtime_json"])
         self._thinker_id = int(tid)
-        self._cfg = self._build_cfg(config or {})
+        self._cfg = self._build_cfg(config)
         self._runtime = dict(runtime or {})
         self._on_init()
 
@@ -250,8 +250,9 @@ class ThinkerBase(ABC):
         """Hook for subclasses after config validation."""
         return
 
+    # TODO deleting thinker: must review all tables that have thinker_id
     def _build_cfg(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
-        ConfigCls = getattr(self, "Config", None)
+        ConfigCls = self.Config
         if ConfigCls:
             assert is_dataclass(ConfigCls), "Config must be a dataclass"
             hints = get_type_hints(ConfigCls)
@@ -261,6 +262,7 @@ class ThinkerBase(ABC):
                 if name in cfg:
                     kwargs[name] = coerce_to_type(cfg[name], hints.get(name, Any))
                 else:
+                    # TODO: missing cfg option after config already exists should to sth like mark the thinker as "obsolete" or "for deletion" (because it means that the code has changed)
                     kwargs[name] = getattr(ConfigCls, name, f.default)
             obj = ConfigCls(**kwargs)
             cfg_dict: Dict[str, Any] = {f.name: getattr(obj, f.name) for f in fields(ConfigCls)}

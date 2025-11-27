@@ -130,20 +130,6 @@ class Storage:
           FOREIGN KEY(thinker_id) REFERENCES thinkers(id) ON DELETE CASCADE
         );
 
-        -- ============= indicator history ==========
-        CREATE TABLE IF NOT EXISTS indicator_history (
-          thinker_id  INTEGER NOT NULL,
-          position_id INTEGER NOT NULL,
-          name        TEXT    NOT NULL,
-          ts_ms       INTEGER NOT NULL,
-          value       REAL,
-          price       REAL,
-          aux_json    TEXT,
-          PRIMARY KEY(thinker_id, position_id, name, ts_ms),
-          FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE,
-          FOREIGN KEY(thinker_id) REFERENCES thinkers(id) ON DELETE CASCADE
-        );
-
         -- ============= config (singleton) ==========
         CREATE TABLE IF NOT EXISTS config (
           id INTEGER PRIMARY KEY CHECK (id = 1),

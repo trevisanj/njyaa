@@ -160,28 +160,40 @@ def _stop_improved(side: int, prev: Optional[float], new: Optional[float], min_m
     return (prev - new) * 10_000 / prev >= min_move_bp
 
 
+
+# TODO garbage in runtime, see below:
+#  {
+#    "pp_ctx": {
+#      "4": {
+#        "attached_at": 1764159582999,
+#        "cfg": {},                     <------------------------- GARBAGE
+#        "last_alert_ts": 1764246160301,
+#        "sstrat_ctx": {
+#          "cfg": {
+#            "fraction": 0.01
+#          },
+#          "ind_states": {
+#            "1764241200000": {
+#              "price_fraction": {
+#                "last_value": 1.5440524497363975e-06
+#              },
+#              "stopper": {
+#                "stop": 1.5440524497363975e-06
+#              }
+#            }
+#          },
+#          "last_ts": 1764244800000,
+#          "state_ts": -1,            <---------------------------- GARBAGE
+#          "window_size": 1
+#        },
+#        "sstrat_kind": "SSFRACTION"
+#      }
+#    }
+#  }
 class TrailingStopThinker(ThinkerBase):
     """
     Orchestrates per-position trailing policies fed by indicator steppers.
     Attachments + state live in this thinker's runtime, keyed by position id.
-
-    position context example schematic: TODO update this
-    ```
-    {
-      "123": {
-        "attached_at_ms": 1732450000000,
-        "window_size": 200,
-        "sstrat_kind": "SSPSAR",
-        "sstrat": {
-          "cfg": {...},
-          "states": {
-            "psar": {...},
-            "stopper": {...}
-          },
-          "last_ts": 1732450600000,
-        }
-      }
-    }
     ```
     """
     kind = "TRAILING_STOP"
@@ -191,7 +203,7 @@ class TrailingStopThinker(ThinkerBase):
         timeframe: str = field(default="1d", metadata={"help": "Timeframe for indicator klines"})
         min_move_bp: float = field(default=1.0, metadata={"help": "Minimum bps improvement to log stop moves"})
         alert_cooldown_ms: int = field(default=60_000, metadata={"help": "Cooldown between repeated hit alerts"})
-        sstrat: str = field(default="SSPSAR", metadata={"help": "Stop strategy kind"})
+        sstrat_kind: str = field(default="SSPSAR", metadata={"help": "Stop strategy kind"})
 
     def get_timeframe(self):
         # won't make this a property so that it doesn't suppress errors
@@ -260,7 +272,7 @@ class TrailingStopThinker(ThinkerBase):
 
             # ------------ retrieve/initialize strategy -------------
             sstrat_ctx = p_ctx.setdefault(SSTRAT_CTX, {})
-            sstrat_kind = p_ctx.get(SSTRAT_KIND, self._cfg.get("sstrat", "SSPSAR"))
+            sstrat_kind = p_ctx.get(SSTRAT_KIND, self._cfg["sstrat_kind"])
             sstrat = self._strats.get(pid_str)
             if sstrat is None:
                 # TODO: sstrat needs a unique name, i guess
