@@ -1,3 +1,5 @@
+*.lock
+
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

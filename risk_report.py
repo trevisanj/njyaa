@@ -54,6 +54,30 @@ class RiskReport:
     ts_ms: int
 
 
+RISK_REPORT_GUIDE = """
+**Parameters**
+- `warn_exposure_ratio`: trigger when `total_exposure` exceeds this multiple of `max_exposure` (defaults to 1.0 in RiskThinker).
+- `warn_loss_mult`: trigger when position `pnl` <= `-warn_loss_mult * risk_budget` (defaults to 1.0 in RiskThinker).
+
+**Summary fields**
+- `Exposure`: `total_exposure` vs `max_exposure` (`ref_balance * leverage`); `used%` = `total_exposure / max_exposure`.
+- `PnL`: sum of position PnL; `pnl%` = `total_pnl / ref_balance`.
+- `Alerts`: warnings when exposure or loss thresholds are breached; may note `(incomplete)` if marks are missing.
+
+**Position columns**
+- `pair`: `num/den` (den `-` for single-leg).
+- `risk%`: per-position risk fraction; `risk_budget`: `ref_balance * risk`.
+- `notional$`: abs(qty*mark) summed across legs; `(incomplete)` when marks/qty missing.
+- `pnl$` / `pnl%`: mark-to-market PnL and fraction of `ref_balance`; `(incomplete)` when marks missing.
+- `R`: `pnl / risk_budget`; `2R/3R`: profit targets at 2×/3× risk budget.
+- `alerts`: per-position tags (e.g., `⚠️ LOSS` when crossing `warn_loss_mult` × risk budget).
+
+**Tuning & gaps**
+- Marks drive exposure/PnL; missing marks or qty show `(incomplete)` and weaken exposure alerts.
+- Adjust `warn_exposure_ratio`/`warn_loss_mult` (via RiskThinker config) to change alert sensitivity.
+""".strip()
+
+
 # ---------- formatting helpers (isolated to avoid deps) ----------
 
 def _fmt_num(x: Any, nd=2) -> str:
@@ -192,20 +216,30 @@ def build_risk_report(eng, thresholds: RiskThresholds = default_thresholds) -> R
     )
 
 
-def format_risk_report(report: RiskReport) -> Dict[str, Any]:
-    """Render RiskReport into markdown text and table data."""
-    md_lines = [
-        "# Risk",
-        f"- Balance=${_fmt_num(report.ref_balance,2)} leverage={_fmt_num(report.leverage,2)}",
+def format_risk_report(report: RiskReport):
+    """Render RiskReport into a CO with markdown + table."""
+    from commands import OCMarkDown, OCTable, CO  # lazy import to avoid circular
+
+    def _md(lines: List[str]):
+        return OCMarkDown("\n".join(lines))
+
+    elements: List[Any] = []
+
+    elements.append(_md([
+        "# Risk Report",
+        "## Config",
+        f"- reference_balance=${_fmt_num(report.ref_balance,2)}",
+        f"- leverage={_fmt_num(report.leverage,2)}  max_exposure=${_fmt_num(report.max_exposure,2)}",
+        "",
+        "## Summary",
         f"- Exposure: ${_fmt_num(report.total_exposure,2)} / ${_fmt_num(report.max_exposure,2)} "
         f"(used {_fmt_pct(report.exposure_used_pct)}; available=${_fmt_num(report.available_exposure,2)})"
         + (" (incomplete)" if report.exposure_missing else ""),
         f"- PnL: ${_fmt_num(report.total_pnl,2)} ({_fmt_pct(report.total_pnl_pct, show_sign=True)})",
-    ]
+    ]))
+
     if report.alerts:
-        md_lines.append("- Alerts:")
-        for a in report.alerts:
-            md_lines.append(f"  - {a.message}")
+        elements.append(_md(["- Alerts:"] + [f"  - {a.message}" for a in report.alerts]))
 
     headers = ["id", "pair", "risk%", "budget$", "notional$", "pnl$", "pnl%", "R", "2R/3R$", "alerts"]
     rows: List[List[Any]] = []
@@ -230,7 +264,12 @@ def format_risk_report(report: RiskReport) -> Dict[str, Any]:
             alerts_tag,
         ])
 
-    if not rows:
-        md_lines.append("- No open positions.")
+    if rows:
+        elements.append(_md(["## Positions"]))
+        elements.append(OCTable(headers=headers, rows=rows))
+    else:
+        elements.append(_md(["## Positions", "- No open positions."]))
 
-    return {"markdown": "\n".join(md_lines), "headers": headers, "rows": rows}
+    elements.append(_md(["", "## Guide", RISK_REPORT_GUIDE]))
+
+    return CO(elements)

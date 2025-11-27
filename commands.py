@@ -23,6 +23,8 @@ from telegram.helpers import escape_markdown
 from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when, tf_ms
 from risk_report import build_risk_report, RiskThresholds, RiskReport, format_risk_report
 import stop_report
+import risk_report
+
 
 if TYPE_CHECKING:
     from bot_api import BotEngine
@@ -1292,16 +1294,11 @@ def build_registry() -> CommandRegistry:
         return _md(body)
 
     # ----------------------- RISK SNAPSHOT -----------------------
-    @R.at("risk")
-    # ----------------------- RISK SNAPSHOT -----------------------
-    @R.at("risk")
+    @R.at("risk", doc_tail=risk_report.RISK_REPORT_GUIDE)
     def _at_risk(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Show risk/exposure snapshot."""
         report = build_risk_report(eng)
-        rendered = format_risk_report(report)
-        comps: List[OC] = [OCMarkDown(rendered["markdown"]),
-                          OCTable(headers=rendered["headers"], rows=rendered["rows"])]
-        return CO(comps)
+        return format_risk_report(report)
     # ----------------------- !OPEN POSITION -----------------------
     @R.bang("open", argspec=["pair", "ts", "usd"], options=["note", "risk"])
     def _bang_open(eng: BotEngine, args: Dict[str, str]) -> CO:
