@@ -193,4 +193,26 @@ class SSATR(StopStrategy):
         stopper.run(bars, candidates)
 
 
+class SSTrailingPercent(StopStrategy):
+    """
+    Percent trail off each bar's extreme: long = low*(1-fraction), short = high*(1+fraction), then ratchet.
+    """
+    kind = "SSTrailingPercent"
+    ind_map = ["trail_pct", "stopper"]
+
+    def on_conf_ind(self):
+        if "trail_fraction" not in self.cfg:
+            self.cfg["trail_fraction"] = 0.01
+        tpi = self.inds["trail_pct"]
+        tpi.cfg["fraction"] = float(self.cfg["trail_fraction"])
+        tpi.cfg["side"] = self.pos.side
+        stopper = self.inds["stopper"]
+        stopper.cfg["side"] = self.pos.side
+
+    def on_run(self, bars: pd.DataFrame):
+        tpi_out = self.inds["trail_pct"].run(bars)
+        stopper = self.inds["stopper"]
+        stopper.run(bars, tpi_out["value"])
+
+
 SSTRAT_CLASSES = {cls.kind: cls for cls in StopStrategy.__subclasses__()}
