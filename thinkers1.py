@@ -116,6 +116,11 @@ class ThinkerManager:
                 if tid in self._disable_pending:
                     self._drop(tid, tr)
                     continue
+
+            if self.eng.stopping():
+                log().info("tm.run_once.cancelled", reason="Engine stopping")
+                break
+
             self._ensure_instantiated(tr)
             inst = self._instances[tid]
             try:

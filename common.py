@@ -38,6 +38,7 @@ __all__ = [
 class TooFewDataPoints(Exception):
     pass
 
+
 LV = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 
 # Runtime key for per-position context in trailing thinkers

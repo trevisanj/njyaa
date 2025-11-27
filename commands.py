@@ -623,7 +623,7 @@ def build_registry() -> CommandRegistry:
         return CO(OCText(text))
 
     def _err(text: str) -> CO:
-        body = "\n".join(["**Error**", "", f"- {text.strip()}"])
+        body = "\n".join(["👾 **{text.strip()}**"])
         return CO(OCMarkDown(body))
 
     def _require_thinker_offline(eng: BotEngine, tid: int) -> Optional[CO]:

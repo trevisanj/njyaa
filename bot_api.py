@@ -499,7 +499,10 @@ class BotEngine:
         syms.update(self.cfg.AUX_SYMBOLS)
         log().debug(f"refresh_klines_cache(): symbols: {syms}")
 
-        for s in syms:
+        for i, s in enumerate(syms):
+            if self._stopping:
+                log().info("engine.klines.cancelled", reason="Engine stopping", i_plus_one=i+1, n=len(syms))
+                break
             try:
                 self._refresh_symbol(s)
                 log().debug("engine.klines.refreshed", symbol=s)
@@ -635,10 +638,14 @@ class BotEngine:
         else:
             log().info("Engine running without Telegram")
 
+    def stopping(self):
+        return self._stopping
+
     def stop(self):
+        """Shutdown sequence"""
+
         log().info("Engine stopping …")
-        # self._stopping = True
-        self.request_stop()
+        self._stopping = True
         try:
             if self._console_ui and self._console_thread:
                 ui = self._console_ui
@@ -781,7 +788,6 @@ class BotEngine:
         try:
             log().debug("Gonna think ...")
             self.refresh_klines_cache()
-            # TODO: check here if system is shutting down. Check inside refresh_klines_cache() loop as well. Check inside tm loop as well. throw ShuttingDown or whatever
             n_ok, n_fail = self.tm.run_once()
             log().debug("thinkers.cycle", n_ok=n_ok, n_fail=n_fail)
         except Exception as e:
