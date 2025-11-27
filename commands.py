@@ -922,6 +922,7 @@ def build_registry() -> CommandRegistry:
             ])
         return _tbl(["policy", "stop", "ts", "meta"], table_rows, intro=f"Trailing state for {pid}")
 
+    # TODO fix or get rid (chart-ind similar)
     @R.at("chart-exit", argspec=["thinker_id", "position_id"], options=["n"], nreq=2)
     def _at_chart_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Plot recorded exit/indicator history against price for a position."""
@@ -977,6 +978,7 @@ def build_registry() -> CommandRegistry:
         tbl_rows = list(zip(rows["thinker_id"], rows["position_id"], rows["name"]))
         return _tbl(["thinker_id", "position_id", "name"], tbl_rows, intro="Indicator history keys")
 
+    # TODO wild time periods, review time periods
     @R.at("chart-ind", argspec=["thinker_id", "position_id", "names"], options=["start_ts", "end_ts"], nreq=2)
     def _at_chart_ind(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Plot indicator history with candles for a position (all or filtered by name). start_ts/end_ts accept ISO or epoch."""
