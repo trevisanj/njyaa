@@ -9,6 +9,8 @@ from common import LAST_TS, log, WINDOW_SIZE, tf_ms, TooFewDataPoints, ts_human,
 import engclasses as ec
 from collections import OrderedDict
 
+# TODO trailing % stop loss
+
 
 class BaseIndicator:
     """Minimal base for indicator steppers."""
@@ -402,6 +404,9 @@ class StopStrategy:
             # saves indictor states
             ts_ms_str = str(self._v_ts[-1])
             self.ind_states[ts_ms_str] = {name: ind._temp_state for name, ind in self.inds.items()}
+            # Trims to maximum two states
+            while len(self.ind_states) > 2:
+                self.ind_states.popitem(last=False)
 
         ts_ms = self._v_ts[start_idx:]
         for ind_name, ind in self.inds.items():

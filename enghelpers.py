@@ -148,18 +148,21 @@ def render_indicator_history_chart(eng: "BotEngine", thinker_id: int, position_i
 
 def render_indicator_chart_multi(eng: "BotEngine", thinker_id: int, position_id: int, indicator_names: list[str],
                                  symbol: str, timeframe: str, pos_start_ms: int, pos_end_ms: int,
-                                 outdir: str = "/tmp") -> str:
+                                 start_ms: int | None = None, end_ms: int | None = None, outdir: str = "/tmp") -> str:
     """
     Plot price candles and multiple indicator histories for a position.
     """
+    start_bound = start_ms if start_ms is not None else pos_start_ms
+    end_bound = end_ms if end_ms is not None else pos_end_ms
+    assert end_bound is None or start_bound <= end_bound, "start_ts must be before end_ts"
     num, den = parse_pair_or_single(eng, symbol)
     # fetch all indicator dfs and collect bounds
     dfs = []
-    min_ts = pos_start_ms
-    max_ts = pos_end_ms
+    min_ts = start_bound
+    max_ts = end_bound
     for name in indicator_names:
-        df = eng.ih.range_by_ts(thinker_id, position_id, name, start_open_ts=None,
-                                end_open_ts=None, fmt="dataframe")
+        df = eng.ih.range_by_ts(thinker_id, position_id, name, start_open_ts=start_bound,
+                                end_open_ts=end_bound, fmt="dataframe")
         if df is None or df.empty:
             continue
         dfs.append((name, df))

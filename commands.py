@@ -33,6 +33,14 @@ __all__ = ["OC", "OCText", "OCMarkDown", "OCPhoto", "OCTable", "CO", "CommandReg
 AT_KEY = "?"
 BANG_KEY = "!"
 
+# Toggle pure markdown (no rich rendering) for debugging.
+RENDER_MARKDOWN = True
+# Replacement brackets for Telegram-safe output (can be customized)
+BRACKETS = "［］"
+# Whether to render command details as code or blockquote
+BLOCKQUOTE = False
+
+
 # Rich Markdown theme/styles (tweak as needed)
 T_NORMAL = "grey66"
 RICH_MD_THEME = Theme({
@@ -93,10 +101,6 @@ def fmt_uline(title: str, level: int) -> tuple[str, str]:
     uline = gen_uline_for(title, level)
     return " "*len(EGY_UPATS[level][0]) + title, uline
 
-# Toggle pure markdown (no rich rendering) for debugging.
-RENDER_MARKDOWN = False
-# Whether to render command details as code or blockquote
-BLOCKQUOTE = False
 
 # Custom heading renderer to avoid boxed/centered titles.
 class FlatHeading(Heading):
@@ -196,8 +200,10 @@ class OCMarkDown(OC):
         return rendered
 
     def render_telegram(self, eng: BotEngine) -> str:
-
-        text = _escape_in_word_underscores(self.text)
+        # can you create helper to do this replacement please, commands.py around line 200. create global BRACKETS ="［］" so i can replace them later if i wish
+        text = _rewrite_headings(self.text)
+        text = _escape_in_word_underscores(text)
+        text = _escape_brackets(text)
 
         print("--- TELEGRAM TEXT BEGIN ---")
         print(text)
@@ -208,17 +214,64 @@ class OCMarkDown(OC):
 
 
 def _escape_in_word_underscores(txt: str) -> str:
+    """Escapes underscores that are in the middle of words, but not inside code blocks."""
     buf = []
     n = len(txt)
-    for i, ch in enumerate(txt):
-        if ch == "_":
+    i = 0
+    in_inline = False
+    in_block = False
+    while i < n:
+        if not in_block and txt.startswith("```", i):
+            in_block = True
+            buf.append("```")
+            i += 3
+            continue
+        if in_block and txt.startswith("```", i):
+            in_block = False
+            buf.append("```")
+            i += 3
+            continue
+        ch = txt[i]
+        if not in_block and ch == "`":
+            in_inline = not in_inline
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_inline and not in_block and ch == "_":
             prev = txt[i - 1] if i > 0 else ""
             nxt = txt[i + 1] if i + 1 < n else ""
             if prev.isalnum() and nxt.isalnum():
                 buf.append("\\_")
+                i += 1
                 continue
         buf.append(ch)
+        i += 1
     return "".join(buf)
+
+def _escape_brackets(txt: str) -> str:
+    for ch in "[]":
+        txt = txt.replace(ch, f"\\{ch}")
+    return txt
+
+
+_HEADING_REPLACEMENTS = {
+    1: "**🍌 {title} **",
+    2: "**🍏 {title}**",
+    3: "**### {title}**",
+    4: "**#### {title}**",
+    5: "**##### {title}**",
+    6: "**###### {title}**",
+}
+
+
+def _rewrite_headings(txt: str) -> str:
+    """Rewrite markdown headings (# ...) into configurable replacements."""
+    def repl(match):
+        level = len(match.group(1))
+        title = match.group(2).strip()
+        fmt = _HEADING_REPLACEMENTS.get(level, "{title}")
+        return fmt.format(title=title)
+    return re.sub(r"^(#{1,6})\s+(.+)$", repl, txt, flags=re.MULTILINE)
 
 
 @dataclass
@@ -275,18 +328,24 @@ class OCTable(OC):
         return text
 
     def render_telegram(self, eng: BotEngine) -> str:
-        if not self.rows:
-            msg = "(empty)"
-            eng._send_text_telegram(msg)
-            return msg
-
-        lines = []
-        for row in self.rows:
-            parts = [f"{h}: {v}" for h, v in zip(self.headers, row)]
-            line = "; ".join(parts) if parts else "(empty row)"
-            lines.append(line)
-        body = "\n".join(lines)
-        eng._send_text_telegram(body)
+        RENDER_AS_MD = True
+        if not RENDER_AS_MD:
+            if not self.rows:
+                body = "(empty table)"
+            else:
+                lines = []
+                for row in self.rows:
+                    parts = [f"{h}: {v}" for h, v in zip(self.headers, row)]
+                    line = "; ".join(parts) if parts else "(empty row)"
+                    lines.append(line)
+                body = "\n".join(lines)
+                eng._send_text_telegram(body)
+        else:
+            if not self.rows:
+                body = "(empty table)"
+            else:
+                body = "\n".join(["```", tabulate.tabulate(self.rows, headers=self.headers, tablefmt="github"), "```"])
+            eng._send_text_telegram(body, parse_mode=ParseMode.MARKDOWN)
         return body
 
 
@@ -495,12 +554,10 @@ class CommandRegistry:
         if detail == 1:
             parts = [f"`{m['prefix']}{m['name']}`" for m in metas]
             body = "  ".join(parts) if parts else "(none)"
-            header = "Commands"
-            return CO(OCMarkDown(f"{header}\n{'-' * len(header)}\n{body}"))
+            return CO(OCMarkDown(f"**Commands**: {body}"))
 
         if detail in (2, 3):
-            header = "Commands"
-            lines: List[str] = [header, "-" * len(header)]
+            lines: List[str] = ["# Commands", ""]
             for m in metas:
                 usage = self._usage_line(m)
                 bullet = f"- {usage}"
@@ -511,13 +568,13 @@ class CommandRegistry:
 
         # detail 4: full docs for all matched commands
         if not metas:
-            return CO(OCMarkDown("# Commands\n(no match)"))
+            return CO(OCMarkDown("(no match)"))
 
         blocks: List[str] = []
         multi = len(metas) > 1
         if multi:
-            header = "Commands"
-            blocks.append(f"{header}\n{'-' * len(header)}")
+            blocks.append("# Commands")
+            blocks.append("")
         for m in metas:
             usage = self._usage_line(m)
             doc_raw = m["doc"].strip("\n")
@@ -916,12 +973,14 @@ def build_registry() -> CommandRegistry:
         tbl_rows = list(zip(rows["thinker_id"], rows["position_id"], rows["name"]))
         return _tbl(["thinker_id", "position_id", "name"], tbl_rows, intro="Indicator history keys")
 
-    @R.at("chart-ind", argspec=["thinker_id", "position_id", "names"], nreq=2)
+    @R.at("chart-ind", argspec=["thinker_id", "position_id", "names"], options=["start_ts", "end_ts"], nreq=2)
     def _at_chart_ind(eng: BotEngine, args: Dict[str, str]) -> CO:
-        """Plot indicator history with candles for a position (all or filtered by name)."""
+        """Plot indicator history with candles for a position (all or filtered by name). start_ts/end_ts accept ISO or epoch."""
         tid = int(args["thinker_id"])
         pid = int(args["position_id"])
         names_raw = args.get("names")
+        start_raw = args.get("start_ts")
+        end_raw = args.get("end_ts")
 
         pos = eng.store.get_position(pid)
         if not pos:
@@ -931,6 +990,10 @@ def build_registry() -> CommandRegistry:
         sym = f"{num}/{den}" if den else num
 
         try:
+            start_ms = parse_when(start_raw) if start_raw else None
+            end_ms = parse_when(end_raw) if end_raw else None
+            if start_ms is not None and end_ms is not None:
+                assert start_ms <= end_ms, "start_ts must be before end_ts"
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
             rt = inst.runtime()
             cfg = inst._cfg
@@ -951,8 +1014,8 @@ def build_registry() -> CommandRegistry:
                 return _txt("No indicators recorded.")
 
             open_ms = int(pos["user_ts"] or pos["created_ts"])
-            end_ms = int(pos["closed_ts"] or Clock.now_utc_ms())
-            path = eh.render_indicator_chart_multi(eng, tid, pid, names, sym, tf, open_ms, end_ms)
+            close_ms = int(pos["closed_ts"] or Clock.now_utc_ms())
+            path = eh.render_indicator_chart_multi(eng, tid, pid, names, sym, tf, open_ms, close_ms, start_ms, end_ms)
         except Exception as e:
             return _err_exc("chart_ind", e)
         return CO(OCPhoto(path, caption=f"indicators for pos {pid}"))
