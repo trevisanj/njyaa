@@ -13,7 +13,7 @@ from common import (log, Clock, AppConfig, leg_pnl, tf_ms, ts_human, PP_CTX, SST
                     LAST_TS, WINDOW_SIZE, float2str, TooFewDataPoints)
 from thinkers1 import ThinkerBase
 import risk_report
-from indicator_engines import StopStrategy, SSPSAR
+from sstrats import StopStrategy, SSPSAR
 import pandas as pd
 import numpy as np
 import enghelpers as eh
