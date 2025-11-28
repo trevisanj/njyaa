@@ -10,7 +10,8 @@ from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, TYPE_CH
 from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from commands import OCMarkDown
 from common import (log, Clock, AppConfig, leg_pnl, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, SSTRAT_KIND, ATTACHED_AT,
-                    LAST_TS, WINDOW_SIZE, float2str, TooFewDataPoints)
+                    LAST_TS, WINDOW_SIZE, float2str, TooFewDataPoints, THOUGHT, NOW_MS, LAST_MOVE_ALERT_TS,
+                    LAST_HIT_ALERT_TS)
 from thinkers1 import ThinkerBase
 import risk_report
 from sstrats import StopStrategy, SSPSAR
@@ -215,6 +216,7 @@ class TrailingStopThinker(ThinkerBase):
 
     def _reset(self, targets):
         """Reset strategy/runtime for selected positions or all."""
+
         pp_ctx = self._runtime.setdefault(PP_CTX, {})
         if targets == "all" or "all" in targets:
             target_keys = list(pp_ctx.keys())
@@ -224,6 +226,7 @@ class TrailingStopThinker(ThinkerBase):
             p_ctx = pp_ctx.get(pid_str) or {}
             p_ctx.pop(SSTRAT_CTX, None)
             log().debug("trail.reset", pid=pid_str)
+            # TODO maybe this reset is not deleting the indicator history as it should, i am seeing ghosts, eventually
             self.eng.ih.delete_by_thinker_position(self._thinker_id, int(pid_str))
 
     def on_tick(self, now_ms: int):
@@ -295,31 +298,38 @@ class TrailingStopThinker(ThinkerBase):
                 log().exc(e, stamp=stamp())
                 continue
 
-            # ----------- interpret stops -----------
+            # ----------- stop interpretation section -----------
+            thought = p_ctx.setdefault(THOUGHT, {})
+            last_move_alert_ts = thought.get(LAST_MOVE_ALERT_TS, 0)
+            last_hit_alert_ts = thought.get(LAST_HIT_ALERT_TS, 0)
+
             stop_info = sstrat.get_stop_info()
             stop_series = stop_info["value"]
-            price = sstrat.last_bars["Close"].iloc[-1]
             flag_series = stop_info["flag"]
-            hit = bool(flag_series[-1] == 1)
 
+            price = sstrat.last_bars["Close"].iloc[-1]
+            hit = bool(flag_series[-1] == 1)
             latest_stop = stop_series[-1]
             prev_stop_val = stop_series[-2] if len(stop_series) >= 2 else None
+
             now = now_ms
             cooldown_ms = int(self._cfg["alert_cooldown_ms"])
-            last_alert = p_ctx.get("last_alert_ts", 0)
+
             if _stop_improved(pos.dir_sign, prev_stop_val, latest_stop, min_move_bp):
                 msg = f"🟢 [trail] {stamp()} stop -> {float2str(latest_stop)} ({'LONG' if pos.dir_sign>0 else 'SHORT'})"
                 self.notify("INFO", msg, send=True,
                             num_den=num_den, stop=latest_stop, prev=prev_stop_val, price=price)
-                last_alert = now
-            if hit and (now - last_alert) >= cooldown_ms:
+                last_move_alert_ts = now
+            if hit and (now - last_hit_alert_ts) >= cooldown_ms:
                 self.notify("WARN", f"🛑 [trail] {stamp()} stop hit @ {float2str(price)} vs {float2str(latest_stop)}",
                             send=True, num_den=num_den, stop=latest_stop, price=price)
-                last_alert = now
-            p_ctx["last_alert_ts"] = last_alert
-            assert not math.isnan(price), "price is NaN"
-            if latest_stop is None or (isinstance(latest_stop, float) and math.isnan(latest_stop)):
-                raise RuntimeError(f"stop missing for {stamp()}")
+                last_hit_alert_ts = now
+            p_ctx["last_alert_ts"] = max(last_move_alert_ts, last_hit_alert_ts)
+            thought.update({
+                NOW_MS: now,
+                LAST_MOVE_ALERT_TS: last_move_alert_ts,
+                LAST_HIT_ALERT_TS: last_hit_alert_ts,
+            })
             log().debug("trail.tick.done", pid=pid_str, stop=latest_stop, prev=prev_stop_val, hit=hit)
 
             pp_ctx[pid_str] = p_ctx

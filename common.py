@@ -29,6 +29,10 @@ __all__ = [
     "ATTACHED_AT",
     "SSTRAT_KIND",
     "LAST_TS",
+    "THOUGHT",
+    "NOW_MS",
+    "LAST_MOVE_ALERT_TS",
+    "LAST_HIT_ALERT_TS",
     "float2str",
     "IND_STATES",
     "TooFewDataPoints",
@@ -57,6 +61,11 @@ IND_STATES = "ind_states"
 ATTACHED_AT = "attached_at"
 # Number of bars needed for all indicators in a sstrat to work
 WINDOW_SIZE = "window_size"
+# Current computed snapshot/thought key
+THOUGHT = "thought"
+NOW_MS = "now_ms"
+LAST_MOVE_ALERT_TS = "last_move_alert_ts"
+LAST_HIT_ALERT_TS = "last_hit_alert_ts"
 
 
 # =======================

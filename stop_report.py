@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Any
 from common import Clock, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, IND_STATES, float2str, log
 from risk_report import _fmt_num, _fmt_pct
 
+# TODO test this report with freshly attached disabled thinker
 
 @dataclass
 class StopRow:
@@ -123,12 +124,12 @@ def _latest_stop_from_ctx(ctx: dict) -> tuple[float, int]:
     # keys are timestamps as strings; grab the latest
     ts_keys = sorted(ind_states.keys(), key=int)
     if not ts_keys:
-        raise RuntimeError("no stopper state in context")
+        raise RuntimeError("no stopper state")
     last_ts_key = ts_keys[-1]
     stopper_state = ind_states[last_ts_key]["stopper"]
     stop_val = stopper_state["stop"]
     if stop_val is None or (isinstance(stop_val, float) and math.isnan(stop_val)):
-        raise RuntimeError("stop missing in context")
+        raise RuntimeError("stop is NaN")
     return float(stop_val), int(last_ts_key)
 
 
