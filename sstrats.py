@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # FILE: sstrats.py
 from __future__ import annotations
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence, TYPE_CHECKING
 from collections import OrderedDict
 import numpy as np
 import pandas as pd
 from common import LAST_TS, log, WINDOW_SIZE, tf_ms, TooFewDataPoints, ts_human, IND_STATES, STATE_TS
 from indicators import BaseIndicator, INDICATOR_CLASSES
 
+if TYPE_CHECKING:
+    from indicators import StopperIndicator
 
 class StopStrategy:
     """
@@ -69,7 +71,7 @@ class StopStrategy:
 
     def get_window_size(self) -> int:
         if not WINDOW_SIZE in self.ctx:
-            # minimum window size of 2
+            # minimum window size of 2: the sstrat itself requires a lookback of 1 to retrieve indicators' states
             self.ctx[WINDOW_SIZE] = max(2, max(ind.__class__.window_size(ind.cfg) for ind in self.inds.values()))
 
         return self.ctx[WINDOW_SIZE]
@@ -92,11 +94,15 @@ class StopStrategy:
         if start_idx < window_size-1:
             raise TooFewDataPoints(f"[trail] Not enough klines (window_size={window_size}, start_idx={start_idx}), can't run strategy!")
 
-        # TODO pull comments from previous commit, chatgpt removed all
-
+        # First pass: only happens if there is more than 1 point to calculate.
+        # - runs up to penultimate data point
+        # - indicators' state is saved here
         if start_idx < n_bars-1:
             self._run_pass(bars[:-1], start_idx, True)
 
+        # Second pass: last data point only
+        # - last data point is considered "live"
+        # - indicators' state **not saved**
         self._run_pass(bars[-window_size:], window_size-1, False)
 
         ts_ms = int(v_ts[-1])
@@ -137,7 +143,9 @@ class StopStrategy:
         return strat_cls(eng, thinker, ctx, pos, name, attached_at)
 
     def get_ind_state(self, ind_name: str):
+        """Retries state payload for indicator identified by ind_name, or None"""
         idx = self._start_idx
+        # key timestamp is always that of start_idx-1
         ts_ms = self._v_ts[idx - 1]
         ts_ms_key = str(ts_ms) if idx > 0 else "OUT_OF_BOUNDS"
 

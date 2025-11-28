@@ -25,6 +25,9 @@ from risk_report import build_risk_report, RiskThresholds, RiskReport, format_ri
 import stop_report
 import risk_report
 
+# TODO _fmt_rocket(<oneliner command result>)
+
+# TODO improve commands specification with "enum" values, allow_all, defaults, automatic coercion etc.
 
 if TYPE_CHECKING:
     from bot_api import BotEngine
