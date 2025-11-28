@@ -51,21 +51,22 @@ STOP_REPORT_GUIDE = """
 - `freshness_k`: multiple of timeframe used to mark `stale` (last stop older than `freshness_k * tf_ms`). Raise to be more tolerant, lower to be stricter. Default 2.
 
 **Summary fields**
-- `rows`: trailing attachments included.
-- `stale`: count of rows whose last stop is older than `freshness_k * timeframe`.
-- `hit_now`: how many rows have the latest stopper flag = 1.
-- `hits_lastN`: total hit flags within the last `window_n` records.
-- `history_count`: total stopper-value records pulled (all rows combined).
+- `n_rows`: trailing attachments included.
+- `n_stale`: rows whose last stop is older than `freshness_k * timeframe`.
+- `n_hits_now`: rows whose latest stopper flag is 1.
+- `pending`: rows with no stopper history yet.
+- `gap%` / `Δstop%`: min/avg/max across rows with finite values.
 
 **Position columns**
-- `gap%`: `(price - stop) / price`; positive = price above stop (long headroom), negative = stop above price (shorts).
+- `gap%`: `(price - stop) / price`; positive = price above stop (long headroom), negative = stop above price (shorts); `?` if undefined.
 - `hit`: latest stopper flag only; past hits clear if the most recent flag is 0.
 - `stale`: last stop older than `freshness_k * timeframe`.
-- `Δstop%`: stop drift from oldest to newest in the last `window_n` records (ratcheting vs flat).
-- `hits`: number of hit flags in the last `window_n`; `last_hit`: most recent hit ts; `last_alert`: when an alert was emitted (blank if none/cooldown/offline).
+- `Δstop%`: stop drift from oldest to newest in the last `window_n` records; `?` if missing.
+- `hits`: number of hit flags in the last `window_n`; `last_hit`: most recent hit ts or `PENDING` if no history; `last_alert`: when a hit alert was emitted (blank if none).
+- `hist_n`: stopper-value records pulled for that position.
 
 **Thinker table**
-- Shows per-thinker `sstrat`, `tf`, and counts of rows that are `hit`/`stale`.
+- Per thinker: `Status`, `sstrat`, `tf`, `n_rows`, `n_hits_now`, `n_stale`, `pending`, `gap% avg/min/max`, `Δstop% avg/min/max`, `Last_tick`.
 """.strip()
 
 
