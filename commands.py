@@ -758,6 +758,7 @@ def build_registry() -> CommandRegistry:
         return R._help_text(detail=detail, command=cmd)
 
     # ----------------------- CONFIG SET -----------------------
+    # TODO !config-set leverage:5  -->  Error: cannot access local variable 'rb' where it is not associated with a value
     @R.bang("config-set", options=["reference_balance", "leverage", "default_risk", "updated_by"])
     def _bang_config_set(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
