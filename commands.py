@@ -69,21 +69,21 @@ RICH_MD_CONFIG = {
     "color_system": "truecolor",  # None|standard|256|truecolor
 }
 
-EGY_UPATS = [
-    ("██▓▒░", "◢◣", "░▒▓██"),   # h1
-    ("▓░", "▲", "░▓"),         # h2
-    ("▄▄", "◤◢", "▄▄"),        # h3
-    ("═", "✦", "═"),           # h4
-    ("·", "𓈖", "·"),           # h5
-]
-
 # EGY_UPATS = [
-#     ("◢", "■", "◣"),      # h1 solid pyramid cap
-#     ("◤", "▹", "◥"),      # h2 airy directional geometry
-#     ("◧", "●", "◨"),      # h3 circle-in-square aesthetic
-#     ("⌜", "∙", "⌝"),      # h4 minimalist sand glyphs
-#     ("˹", "·", "˺"),       # h5 soft dust brackets
+#     ("██▓▒░", "◢◣", "░▒▓██"),   # h1
+#     ("▓░", "▲", "░▓"),         # h2
+#     ("▄▄", "◤◢", "▄▄"),        # h3
+#     ("═", "✦", "═"),           # h4
+#     ("·", "𓈖", "·"),           # h5
 # ]
+
+EGY_UPATS = [
+    ("◢", "■", "◣"),      # h1 solid pyramid cap
+    ("◤", "▹", "◥"),      # h2 airy directional geometry
+    ("◧", "●", "◨"),      # h3 circle-in-square aesthetic
+    ("⌜", "∙", "⌝"),      # h4 minimalist sand glyphs
+    ("˹", "·", "˺"),       # h5 soft dust brackets
+]
 
 
 def gen_uline_for(title: str, level: int) -> str:

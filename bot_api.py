@@ -11,6 +11,8 @@ import os
 import socket
 import signal
 import logging
+import subprocess
+from pathlib import Path
 from queue import Queue, Empty
 from typing import Callable, List, Optional, Dict, TYPE_CHECKING
 
@@ -233,8 +235,10 @@ class BotEngine:
         self._console_thread: Optional[threading.Thread] = None
         self._console_ui: Optional[object] = None
         self._telegram_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._telegram_ready = threading.Event()
         self._rich_console = Console(force_terminal=True, color_system="truecolor", soft_wrap=True)
         self._host_name = socket.gethostname()
+        self._repo_root = Path(__file__).resolve().parent
         self._debug_log_mode = str(cfg.LOG_LEVEL or "").upper() == "DEBUG"
 
         # rendering sinks
@@ -268,6 +272,31 @@ class BotEngine:
         self._excepthook_installed = False
 
         self._stopping = False
+
+    def _git_version(self) -> str:
+        out = subprocess.check_output(
+            ["git", "describe", "--always", "--dirty", "--long"],
+            cwd=self._repo_root,
+        )
+        return out.decode().strip()
+
+    def _build_start_banner(self, started_ms: int) -> str:
+        version = self._git_version()
+        ts = ts_human(started_ms)
+        return f"🚀 njyaa@{self._host_name} git:{version} started at {ts} ✨"
+
+    def _wait_for_telegram_ready(self):
+        if self._app is None:
+            return
+        ready = self._telegram_ready.wait(timeout=5)
+        assert ready
+        assert self._telegram_loop is not None
+
+    def _announce_started(self):
+        self._wait_for_telegram_ready()
+        started_ms = Clock.now_utc_ms()
+        banner = self._build_start_banner(started_ms)
+        self.send_text(banner)
 
     # --------------------------------
     # Building + wiring (single place)
@@ -615,6 +644,7 @@ class BotEngine:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             self._telegram_loop = loop
+            self._telegram_ready.set()
             self._app.run_polling(stop_signals=None, close_loop=True)
             log().info("Telegram polling stopped cleanly")
         except Exception as e:
@@ -647,6 +677,7 @@ class BotEngine:
         # Telegram polling (in its own thread) if prepared
         if self._app is not None:
             log().info("Telegram polling…")
+            self._telegram_ready.clear()
             self._tg_thread = threading.Thread(
                 target=self._telegram_thread_main,
                 name="njyaa-telegram",
@@ -757,6 +788,7 @@ class BotEngine:
                 log().info(
                     "BotEngine.run: no console; idle loop. Press Ctrl+C to exit."
                 )
+            self._announce_started()
             if inject_command:
                 try:
                     self.dispatch_command(inject_command, origin="console")
