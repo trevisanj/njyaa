@@ -651,6 +651,11 @@ class CommandRegistry:
         return CO(OCMarkDown("\n\n".join(blocks)))
 
 
+def _report_guide(guide):
+    """Adds heading for docstring"""
+    return f"Report Guide:\n\n{guide}"
+
+
 def build_registry() -> CommandRegistry:
     R = CommandRegistry()
     # Local helpers to keep handlers concise
@@ -781,15 +786,15 @@ def build_registry() -> CommandRegistry:
                    f"default_risk={_fmt_pct(cfg['default_risk'])}")
         return _txt(f"{summary} ({changed})")
 
-    # ----------------------- TRAILING / EXIT ATTACHMENTS -----------------------
-    @R.bang("exit-attach", argspec=["thinker_id", "position_id", "sstrat_kind"],
+    # ----------------------- TRAILING / STOP ATTACHMENTS -----------------------
+    @R.bang("stop-attach", argspec=["thinker_id", "position_id", "sstrat_kind"],
             options=["at"], nreq=2, freeform=True)
-    def _bang_attach_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
+    def _bang_stop_attach(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
-        Attach trailing/exit watcher to a position or all positions for a thinker.
+        Attach trailing/stop watcher to a position or all positions for a thinker.
 
         Usage:
-          !exit-attach <thinker_id> <position_id|all> [sstrat_kind] [at:<iso|rel>]
+          !stop-attach <thinker_id> <position_id|all> [sstrat_kind] [at:<iso|rel>]
 
         at: iso (local) like 2024-08-20T15:30 or relative like -5m/+2h; defaults to now.
         """
@@ -813,7 +818,7 @@ def build_registry() -> CommandRegistry:
         try:
             inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
         except Exception as e:
-            return _err_exc("exit_attach.get_thinker", e)
+            return _err_exc("stop_attach.get_thinker", e)
         sstrat_kind_arg = args.get("sstrat_kind")
         sstrat_kind = sstrat_kind_arg.upper() if sstrat_kind_arg else inst._cfg["sstrat_kind"]
         rt = inst.runtime()
@@ -844,23 +849,23 @@ def build_registry() -> CommandRegistry:
         else:
             pid_key = str(pid)
             if pid_key in pp_ctx:
-                # TODO: got this weird message "Attached exit watcher to position 4 (already attached) via thinker 10 (SSFRACTION) at 20251124🇧🇷08:58:34"
+                # TODO: got this weird message "Attached stop watcher to position 4 (already attached) via thinker 10 (SSFRACTION) at 20251124🇧🇷08:58:34"
                 msg_target = f"position {pid} (already attached)"
             else:
                 _attach_one(pid)
                 msg_target = f"position {pid}"
         inst.save_runtime()
         eng.tm.reload(thinker_id)
-        return _txt(f"Attached exit watcher to {msg_target} via thinker {thinker_id} ({sstrat_kind}) at {ts_human(at_ms)}")
+        return _txt(f"Attached stop watcher to {msg_target} via thinker {thinker_id} ({sstrat_kind}) at {ts_human(at_ms)}")
 
-    @R.at("exit-list", argspec=["thinker_id"], nreq=1)
-    def _at_exit_list(eng: BotEngine, args: Dict[str, str]) -> CO:
-        """List exit/trailing attachments."""
+    @R.at("stop-list", argspec=["thinker_id"], nreq=1)
+    def _at_stop_list(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """List stop/trailing attachments."""
         thinker_id = int(args["thinker_id"])
         try:
             inst = eng.tm.get_in_carbonite(thinker_id, expected_kind="TRAILING_STOP")
         except Exception as e:
-            return _err_exc("exit_list.get_thinker", e)
+            return _err_exc("stop_list.get_thinker", e)
         rt = inst.runtime()
         pp_ctx = rt.get(PP_CTX) or {}
         if not pp_ctx:
@@ -872,11 +877,11 @@ def build_registry() -> CommandRegistry:
                 ctx.get("sstrat_kind") or "-",
                 ts_human(ctx.get(ATTACHED_AT)),
             ])
-        return _tbl(["position_id", "sstrat", "attached_at"], tbl_rows, intro=f"Exit attachments (thinker {thinker_id})")
+        return _tbl(["position_id", "sstrat", "attached_at"], tbl_rows, intro=f"Stop attachments (thinker {thinker_id})")
 
-    @R.bang("exit-detach", argspec=["thinker_id", "position_id"], nreq=2)
-    def _bang_exit_detach(eng: BotEngine, args: Dict[str, str]) -> CO:
-        """Remove trailing/exit attachment for a position or all."""
+    @R.bang("stop-detach", argspec=["thinker_id", "position_id"], nreq=2)
+    def _bang_stop_detach(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Remove trailing/stop attachment for a position or all."""
         tid = int(args["thinker_id"])
         pid_raw = args["position_id"]
         all_positions = str(pid_raw).lower() == "all"
@@ -887,7 +892,7 @@ def build_registry() -> CommandRegistry:
         try:
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         except Exception as e:
-            return _err_exc("exit_detach.get_thinker", e)
+            return _err_exc("stop_detach.get_thinker", e)
         rt = inst.runtime()
         pp_ctx = rt.setdefault(PP_CTX, {})
         if all_positions:
@@ -902,12 +907,12 @@ def build_registry() -> CommandRegistry:
         inst.save_runtime()
         eng.tm.reload(tid)
         if all_positions:
-            return _txt(f"Detached exit policies from all positions for thinker {tid}" + ("" if removed else " (none existed)"))
-        return _txt(f"Detached exit policies from position {pid}" + ("" if removed else " (none existed)"))
+            return _txt(f"Detached stop policies from all positions for thinker {tid}" + ("" if removed else " (none existed)"))
+        return _txt(f"Detached stop policies from position {pid}" + ("" if removed else " (none existed)"))
 
     # TODO gotta think carefully about detaching vs resetting: attaching must delete indicator history as well, i guess etc.
-    @R.bang("exit-reset", argspec=["thinker_id", "position_id"], nreq=2)
-    def _bang_exit_reset(eng: BotEngine, args: Dict[str, str]) -> CO:
+    @R.bang("stop-reset", argspec=["thinker_id", "position_id"], nreq=2)
+    def _bang_stop_reset(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Reset trailing context so it reboots on next tick: clears strategy state and indicator history for one position or all.
         """
@@ -921,7 +926,7 @@ def build_registry() -> CommandRegistry:
         try:
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         except Exception as e:
-            return _err_exc("exit_reset.get_thinker", e)
+            return _err_exc("stop_reset.get_thinker", e)
         rt = inst.runtime()
         resets = rt.setdefault("reset", [])
         if all_positions:
@@ -936,15 +941,15 @@ def build_registry() -> CommandRegistry:
             return _txt(f"Requested reset of trailing context for ALL positions on thinker {tid}; will rebuild on next tick")
         return _txt(f"Requested reset of trailing context for position {pid}; will rebuild on next tick")
 
-    @R.at("exit-state", argspec=["thinker_id", "position_id"], nreq=2)
-    def _at_exit_state(eng: BotEngine, args: Dict[str, str]) -> CO:
+    @R.at("stop-state", argspec=["thinker_id", "position_id"], nreq=2)
+    def _at_stop_state(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Show trailing stop state for a position."""
         tid = int(args["thinker_id"])
         pid = int(args["position_id"])
         try:
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         except Exception as e:
-            return _err_exc("exit_state.get_thinker", e)
+            return _err_exc("stop_state.get_thinker", e)
         rt = inst.runtime()
         ctx = (rt.get(PP_CTX) or {}).get(str(pid))
         if not ctx:
@@ -960,23 +965,27 @@ def build_registry() -> CommandRegistry:
             ])
         return _tbl(["policy", "stop", "ts", "meta"], table_rows, intro=f"Trailing state for {pid}")
 
-    @R.at("exit-report", argspec=["thinker_id"], options=["format", "n", "freshness_k"], nreq=0, doc_tail=stop_report.STOP_REPORT_GUIDE)
-    def _at_exit_report(eng: BotEngine, args: Dict[str, str]) -> CO:
+    @R.at("stop-report", argspec=["thinker_id"], options=["format", "n", "freshness_k"], nreq=0,
+          doc_tail=_report_guide(stop_report.STOP_REPORT_GUIDE))
+    def _at_stop_report(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Stop/trailing report (runtime snapshot + history stats).
 
         Usage:
-          @exit-report [thinker_id] [format:md|html] [n:50] [freshness_k:2]
+          ?stop-report [thinker_id] [format:md|html] [n:50] [freshness_k:2]
+
+        If thinker_id is omitted, the first enabled TRAILING_STOP thinker is used.
         """
         tid_raw = args.get("thinker_id")
-        tid = int(tid_raw) if tid_raw is not None else None
+        tid = None if tid_raw is None or str(tid_raw).lower() == "all" else int(tid_raw)
         fmt = (args.get("format") or "md").lower()
-        window_n = int(args.get("n", 50))
+        n_raw = args.get("n")
+        window_n = None if (n_raw is None or str(n_raw).lower() == "full") else int(n_raw)
         freshness_k = float(args.get("freshness_k", 2.0))
         try:
             report = stop_report.build_stop_report(eng, window_n=window_n, freshness_k=freshness_k, thinker_id=tid)
         except Exception as e:
-            return _err_exc("exit_report.build", e)
+            return _err_exc("stop_report.build", e)
 
         if fmt == "md":
             return stop_report.format_stop_report_md(report)
@@ -986,9 +995,9 @@ def build_registry() -> CommandRegistry:
 
 
     # TODO fix or get rid (chart-ind similar)
-    @R.at("chart-exit", argspec=["thinker_id", "position_id"], options=["n"], nreq=2)
-    def _at_chart_exit(eng: BotEngine, args: Dict[str, str]) -> CO:
-        """Plot recorded exit/indicator history against price for a position."""
+    @R.at("chart-stop", argspec=["thinker_id", "position_id"], options=["n"], nreq=2)
+    def _at_chart_stop(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Plot recorded stop/indicator history against price for a position."""
         thinker_id = int(args["thinker_id"])
         pid = int(args["position_id"])
         n = int(args.get("n", 300))
@@ -1008,8 +1017,8 @@ def build_registry() -> CommandRegistry:
             tf = ctx.get("timeframe") or cfg.get("timeframe") or "1d"
             path = eh.render_indicator_history_chart(eng, thinker_id, pid, "psar", sym, timeframe=tf, n=n)
         except Exception as e:
-            return _err_exc("chart_exit", e)
-        return CO(OCPhoto(path, caption=f"exit history for pos {pid}"))
+            return _err_exc("chart_stop", e)
+        return CO(OCPhoto(path, caption=f"stop history for pos {pid}"))
 
     @R.at("ih-stats")
     def _at_ih_stats(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -1294,7 +1303,7 @@ def build_registry() -> CommandRegistry:
         return _md(body)
 
     # ----------------------- RISK SNAPSHOT -----------------------
-    @R.at("risk", doc_tail=risk_report.RISK_REPORT_GUIDE)
+    @R.at("risk", doc_tail=_report_guide(risk_report.RISK_REPORT_GUIDE))
     def _at_risk(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Show risk/exposure snapshot."""
         report = build_risk_report(eng)

@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 
-from common import Clock, tf_ms, ts_human, PP_CTX, SSTRAT_CTX, IND_STATES, float2str, log
+from common import Clock, tf_ms, ts_human, PP_CTX, THOUGHT, NOW_MS, LAST_MOVE_ALERT_TS, LAST_HIT_ALERT_TS, float2str, log, is_sane
 from risk_report import _fmt_num, _fmt_pct
 
 # TODO test this report with freshly attached disabled thinker
@@ -31,6 +31,7 @@ class StopRow:
     last_hit_ts: Optional[int]
     attached_at: int
     last_alert_ts: Optional[int]
+    has_stop: bool
 
 
 @dataclass
@@ -39,11 +40,14 @@ class StopReport:
     generated_ts: int
     window_n: int
     freshness_k: float
+    thinker_ticks: Dict[int, Optional[int]]
+    history_counts: Dict[tuple[int, int], int]
+    thinker_status: Dict[int, str]
 
 
 STOP_REPORT_GUIDE = """
 **Parameters**
-- `window_n`: how many recent indicator-history rows to summarize (hit counts, Δstop%). Bigger = longer lookback. Default 50.
+- `window_n`: how many recent indicator-history rows to summarize (hit counts, Δstop%). Bigger = longer lookback. Default `full` (all).
 - `freshness_k`: multiple of timeframe used to mark `stale` (last stop older than `freshness_k * tf_ms`). Raise to be more tolerant, lower to be stricter. Default 2.
 
 **Summary fields**
@@ -51,6 +55,7 @@ STOP_REPORT_GUIDE = """
 - `stale`: count of rows whose last stop is older than `freshness_k * timeframe`.
 - `hit_now`: how many rows have the latest stopper flag = 1.
 - `hits_lastN`: total hit flags within the last `window_n` records.
+- `history_count`: total stopper-value records pulled (all rows combined).
 
 **Position columns**
 - `gap%`: `(price - stop) / price`; positive = price above stop (long headroom), negative = stop above price (shorts).
@@ -76,21 +81,25 @@ def _clean_series(ts_seq: List[int], val_seq: List[Any]) -> List[tuple[int, floa
     return items
 
 
-def _history_stats(eng, thinker_id: int, position_id: int, window_n: int) -> dict:
-    vals = eng.ih.last_n(thinker_id, position_id, "stopper-value", n=window_n, asc=True)
-    flags = eng.ih.last_n(thinker_id, position_id, "stopper-flag", n=window_n, asc=True)
+def _history_stats(eng, thinker_id: int, position_id: int, window_n: Optional[int]) -> dict:
+    vals = eng.ih.last_n(thinker_id, position_id, "stopper-value", n=window_n, asc=True) if window_n \
+        else eng.ih.range_by_ts(thinker_id, position_id, "stopper-value", fmt="columnar")
+    flags = eng.ih.last_n(thinker_id, position_id, "stopper-flag", n=window_n, asc=True) if window_n \
+        else eng.ih.range_by_ts(thinker_id, position_id, "stopper-flag", fmt="columnar")
 
     clean_vals = _clean_series(vals["open_ts"], vals["value"]) if vals else []
     clean_flags = _clean_series(flags["open_ts"], flags["value"]) if flags else []
 
     delta_pct_last_n: Optional[float] = None
     last_stop_ts: Optional[int] = None
+    last_stop_val: Optional[float] = None
     if clean_vals:
         first_ts, first_stop = clean_vals[0]
         last_ts, last_stop = clean_vals[-1]
         assert first_stop != 0.0, "first stop is zero"
         delta_pct_last_n = (last_stop - first_stop) * 100 / first_stop
         last_stop_ts = last_ts
+        last_stop_val = last_stop
 
     hits_last_n = 0
     last_hit_ts: Optional[int] = None
@@ -115,22 +124,9 @@ def _history_stats(eng, thinker_id: int, position_id: int, window_n: int) -> dic
         "last_hit_ts": last_hit_ts,
         "last_stop_ts": last_stop_ts,
         "hit_now": hit_now,
+        "last_stop_val": last_stop_val,
+        "count_vals": len(clean_vals),
     }
-
-
-def _latest_stop_from_ctx(ctx: dict) -> tuple[float, int]:
-    sctx = ctx[SSTRAT_CTX]
-    ind_states = sctx[IND_STATES]
-    # keys are timestamps as strings; grab the latest
-    ts_keys = sorted(ind_states.keys(), key=int)
-    if not ts_keys:
-        raise RuntimeError("no stopper state")
-    last_ts_key = ts_keys[-1]
-    stopper_state = ind_states[last_ts_key]["stopper"]
-    stop_val = stopper_state["stop"]
-    if stop_val is None or (isinstance(stop_val, float) and math.isnan(stop_val)):
-        raise RuntimeError("stop is NaN")
-    return float(stop_val), int(last_ts_key)
 
 
 def _latest_price_for_position(eng, pos, timeframe: str) -> float:
@@ -143,13 +139,16 @@ def _latest_price_for_position(eng, pos, timeframe: str) -> float:
     return float(df["Close"].iloc[-1])
 
 
-def build_stop_report(eng, window_n: int = 50, freshness_k: float = 2.0, thinker_id: Optional[int] = None) -> StopReport:
+def build_stop_report(eng, window_n: Optional[int] = None, freshness_k: float = 2.0, thinker_id: Optional[int] = None) -> StopReport:
     now_ms = Clock.now_utc_ms()
     rows: List[StopRow] = []
+    thinker_ticks: Dict[int, Optional[int]] = {}
+    hist_counts: Dict[tuple[int, int], int] = {}
+    thinker_status: Dict[int, str] = {}
 
     thinkers = eng.store.list_thinkers()
     tid_list = [int(thinker_id)] if thinker_id is not None else [
-        int(r["id"]) for r in thinkers if r["kind"] == "TRAILING_STOP" and int(r["enabled"]) == 1
+        int(r["id"]) for r in thinkers if r["kind"] == "TRAILING_STOP"
     ]
     if not tid_list:
         raise ValueError("No TRAILING_STOP thinkers found")
@@ -158,6 +157,10 @@ def build_stop_report(eng, window_n: int = 50, freshness_k: float = 2.0, thinker
         inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
         rt = inst.runtime()
         pp_ctx = rt[PP_CTX]
+        t_thought = rt.get("THOUGHT") or rt.get(THOUGHT) or {}
+        thinker_ticks[tid] = t_thought.get(NOW_MS) or t_thought.get("now_ms")
+        tr = next((r for r in thinkers if int(r["id"]) == tid), None)
+        thinker_status[tid] = "ENABLED" if tr and int(tr["enabled"]) == 1 else "disabled"
         tf_cfg = inst._cfg["timeframe"]
         tf_ms_val = tf_ms(tf_cfg)
         freshness_ms = int(freshness_k * tf_ms_val)
@@ -169,22 +172,29 @@ def build_stop_report(eng, window_n: int = 50, freshness_k: float = 2.0, thinker
             if not pos:
                 raise ValueError(f"Position {pid} not found for thinker {tid}")
 
-            timeframe = ctx.get("timeframe") or inst._cfg["timeframe"]
-            try:
-                stop, last_stop_ts = _latest_stop_from_ctx(ctx)
-            except Exception as e:
-                log().warn("stop_report.skip", thinker_id=tid, position_id=pid, err=str(e))
-                continue
+            timeframe = inst._cfg["timeframe"]
             price = _latest_price_for_position(eng, pos, timeframe)
-            gap_pct = (price - stop) * 100 / price
             sstrat_kind = ctx["sstrat_kind"]
-            last_alert_ts = ctx.get("last_alert_ts")
             attached_at = int(ctx["attached_at"])
 
             stats = _history_stats(eng, tid, pid, window_n)
-            last_stop_ts = stats["last_stop_ts"] or last_stop_ts
-            stale = (now_ms - last_stop_ts) > freshness_ms
-            hit = bool(stats["hit_now"])
+            hist_counts[(tid, pid)] = stats.get("count_vals") or 0
+            if is_sane(stats["last_stop_val"]) and stats["last_stop_ts"] is not None:
+                stop = stats["last_stop_val"]
+                last_stop_ts = stats["last_stop_ts"]
+                gap_pct = (price - stop) * 100 / price
+                stale = (now_ms - last_stop_ts) > freshness_ms
+                hit = bool(stats["hit_now"])
+                has_stop = True
+            else:
+                stop = math.nan
+                last_stop_ts = None
+                gap_pct = math.nan
+                stale = False
+                hit = False
+                has_stop = False
+            thought = ctx.get(THOUGHT) or {}
+            last_alert_ts = thought.get(LAST_HIT_ALERT_TS)
 
             row = StopRow(
                 thinker_id=tid,
@@ -204,14 +214,16 @@ def build_stop_report(eng, window_n: int = 50, freshness_k: float = 2.0, thinker
                 last_hit_ts=stats["last_hit_ts"],
                 attached_at=attached_at,
                 last_alert_ts=last_alert_ts,
+                has_stop=has_stop,
             )
             rows.append(row)
 
-    return StopReport(rows=rows, generated_ts=now_ms, window_n=window_n, freshness_k=freshness_k)
+    return StopReport(rows=rows, generated_ts=now_ms, window_n=window_n or 0, freshness_k=freshness_k, thinker_ticks=thinker_ticks, history_counts=hist_counts, thinker_status=thinker_status)
 
 
 def format_stop_report_md(report: StopReport):
     from commands import OCMarkDown, OCTable, CO  # lazy import to avoid circular
+    from common import NOW_MS
 
     def _md(lines):
         return OCMarkDown("\n".join(lines))
@@ -220,53 +232,55 @@ def format_stop_report_md(report: StopReport):
         _md([
             "# Stop Report",
             f"- generated: {ts_human(report.generated_ts)}",
-            f"- window_n={report.window_n} freshness_k={_fmt_num(report.freshness_k, 2)}",
+            f"- `window_n`={'full' if report.window_n == 0 else f'{report.window_n}'} `freshness_k`={_fmt_num(report.freshness_k, 2)}",
         ]),
     ]
 
     rows_tbl: List[List[Any]] = []
     thinker_tbl: List[List[Any]] = []
     if not report.rows:
-        elements.append(_md(["## Summary", "- No trailing attachments."]))
+        elements.append(_md(["## Summary", "- Nothing to summarize"]))
     else:
         n = len(report.rows)
         stale_n = sum(1 for r in report.rows if r.stale)
         hit_n = sum(1 for r in report.rows if r.hit)
-        gaps = [r.gap_pct for r in report.rows]
-        deltas = [r.delta_pct_last_n for r in report.rows if r.delta_pct_last_n is not None]
-        hits_total = sum(r.hits_last_n for r in report.rows)
+        pending_n = sum(1 for r in report.rows if not r.has_stop)
+        gaps = [r.gap_pct for r in report.rows if is_sane(r.gap_pct)]
+        deltas = [r.delta_pct_last_n for r in report.rows if is_sane(r.delta_pct_last_n)]
         summary_lines = ["## Summary",
-                         f"- rows={n} stale={stale_n} hit_now={hit_n} hits_lastN={hits_total}"]
+                         f"- `n_rows`={n} `n_stale`={stale_n} `n_hits_now`={hit_n} `pending`={pending_n}"]
         if gaps:
             summary_lines.append(
-                f"- gap% avg={_fmt_pct(sum(gaps)/len(gaps)/100, nd=3, show_sign=True)} "
+                f"- `gap%` avg={_fmt_pct(sum(gaps)/len(gaps)/100, nd=3, show_sign=True)} "
                 f"min={_fmt_pct(min(gaps)/100, nd=3, show_sign=True)} "
                 f"max={_fmt_pct(max(gaps)/100, nd=3, show_sign=True)}"
             )
         if deltas:
             summary_lines.append(
-                f"- Δstop% avg={_fmt_pct(sum(deltas)/len(deltas)/100, nd=3, show_sign=True)} "
+                f"- `Δstop%` avg={_fmt_pct(sum(deltas)/len(deltas)/100, nd=3, show_sign=True)} "
                 f"min={_fmt_pct(min(deltas)/100, nd=3, show_sign=True)} "
                 f"max={_fmt_pct(max(deltas)/100, nd=3, show_sign=True)}"
             )
         elements.append(_md(summary_lines))
 
         for r in report.rows:
+            gap_disp = "?" if not is_sane(r.gap_pct) else _fmt_pct(r.gap_pct / 100, nd=3, show_sign=True)
+            hist_n = report.history_counts.get((r.thinker_id, r.position_id), 0)
             rows_tbl.append([
                 r.thinker_id,
                 r.position_id,
                 r.pair,
                 "LONG" if r.side > 0 else "SHORT",
-                float2str(r.price),
-                float2str(r.stop),
-                _fmt_pct(r.gap_pct / 100, nd=3, show_sign=True),
+                "?" if not is_sane(r.price) else float2str(r.price),
+                "?" if not is_sane(r.stop) else float2str(r.stop),
+                gap_disp,
                 "hit" if r.hit else "",
                 "STALE" if r.stale else "",
-                _fmt_pct(r.delta_pct_last_n / 100, nd=3, show_sign=True) if r.delta_pct_last_n is not None else "?",
+                _fmt_pct(r.delta_pct_last_n / 100, nd=3, show_sign=True) if is_sane(r.delta_pct_last_n) else "?",
                 r.hits_last_n,
-                ts_human(r.last_hit_ts) if r.last_hit_ts else "-",
-                ts_human(r.last_stop_ts),
+                "PENDING" if not r.has_stop else (ts_human(r.last_hit_ts) if r.last_hit_ts else "-"),
                 ts_human(r.last_alert_ts) if r.last_alert_ts else "-",
+                hist_n,
             ])
 
         thinker_meta: Dict[int, dict] = {}
@@ -277,15 +291,33 @@ def format_stop_report_md(report: StopReport):
                 "rows": 0,
                 "stale": 0,
                 "hit": 0,
+                "pending": 0,
+                "gaps": [],
+                "deltas": [],
             })
             meta["rows"] += 1
             meta["stale"] += 1 if r.stale else 0
             meta["hit"] += 1 if r.hit else 0
+            meta["pending"] += 1 if not r.has_stop else 0
+            if is_sane(r.gap_pct):
+                meta["gaps"].append(r.gap_pct)
+            if is_sane(r.delta_pct_last_n):
+                meta["deltas"].append(r.delta_pct_last_n)
+        ticks = report.thinker_ticks or {}
+        status_map = report.thinker_status or {}
         for tid, meta in sorted(thinker_meta.items()):
-            thinker_tbl.append([tid, meta["sstrat"], meta["tf"], meta["rows"], meta["hit"], meta["stale"]])
+            tick_val = ticks.get(tid)
+            status = status_map.get(tid, "?")
+            gap_str = "n/a"
+            delta_str = "n/a"
+            if meta["gaps"]:
+                gap_str = f"{_fmt_pct(sum(meta['gaps'])/len(meta['gaps'])/100, nd=3, show_sign=True)} / {_fmt_pct(min(meta['gaps'])/100, nd=3, show_sign=True)} / {_fmt_pct(max(meta['gaps'])/100, nd=3, show_sign=True)}"
+            if meta["deltas"]:
+                delta_str = f"{_fmt_pct(sum(meta['deltas'])/len(meta['deltas'])/100, nd=3, show_sign=True)} / {_fmt_pct(min(meta['deltas'])/100, nd=3, show_sign=True)} / {_fmt_pct(max(meta['deltas'])/100, nd=3, show_sign=True)}"
+            thinker_tbl.append([tid, status, meta["sstrat"], meta["tf"], meta["rows"], meta["hit"], meta["stale"], meta["pending"], gap_str, delta_str, ts_human(tick_val) if tick_val else "-"])
 
-        headers_positions = ["thinker", "pos", "pair", "side", "price", "stop", "gap%", "hit", "stale", "Δstop%", "hits", "last_hit", "last_stop", "last_alert"]
-        headers_thinkers = ["thinker", "sstrat", "tf", "rows", "hit_now", "stale"]
+    headers_positions = ["Thinker", "Pos", "Pair", "Side", "Price", "Stop", "Gap %", "Hit", "Stale", "Δstop %", "Hits", "Last hit", "Last alert", "Hist_n"]
+    headers_thinkers = ["Thinker", "Status", "Sstrat", "TF", "n_rows", "n_hits_now", "n_stale", "pending", "gap% avg/min/max", "Δstop% avg/min/max", "Last_tick"]
 
     if rows_tbl:
         elements.append(_md(["## Positions"]))
@@ -302,16 +334,18 @@ def format_stop_report_md(report: StopReport):
 def format_stop_report_html(report: StopReport):
     from commands import OCHTML, CO  # lazy import to avoid circular
     rows_html = []
-    headers = ["Thinker", "Pos", "Pair", "Side", "Price", "Stop", "Gap %", "Hit", "Stale", "Δstop %", "Hits", "Last hit", "Last stop", "Last alert"]
+    headers = ["Thinker", "Pos", "Pair", "Side", "Price", "Stop", "Gap %", "Hit", "Stale", "Δstop %", "Hits", "Last hit", "Last alert", "Hist_n"]
     n = len(report.rows)
     stale_n = sum(1 for r in report.rows if r.stale)
     hit_n = sum(1 for r in report.rows if r.hit)
-    gaps = [r.gap_pct for r in report.rows]
-    deltas = [r.delta_pct_last_n for r in report.rows if r.delta_pct_last_n is not None]
-    hits_total = sum(r.hits_last_n for r in report.rows)
+    pending_n = sum(1 for r in report.rows if not r.has_stop)
+    gaps = [r.gap_pct for r in report.rows if is_sane(r.gap_pct)]
+    deltas = [r.delta_pct_last_n for r in report.rows if is_sane(r.delta_pct_last_n)]
 
     thinker_tbl: List[List[Any]] = []
     thinker_meta: Dict[int, dict] = {}
+    ticks = report.thinker_ticks or {}
+    status_map = report.thinker_status or {}
 
     for r in report.rows:
         rows_html.append(
@@ -323,14 +357,14 @@ def format_stop_report_html(report: StopReport):
                 f"<td>{'LONG' if r.side > 0 else 'SHORT'}</td>",
                 f"<td>{float2str(r.price)}</td>",
                 f"<td>{float2str(r.stop)}</td>",
-                f"<td>{_fmt_pct(r.gap_pct/100, nd=3, show_sign=True)}</td>",
+                f"<td>{_fmt_pct(r.gap_pct/100, nd=3, show_sign=True) if is_sane(r.gap_pct) else '?'}</td>",
                 f"<td>{'hit' if r.hit else ''}</td>",
                 f"<td>{'STALE' if r.stale else ''}</td>",
-                f"<td>{_fmt_pct(r.delta_pct_last_n/100, nd=3, show_sign=True) if r.delta_pct_last_n is not None else '?'}</td>",
+                f"<td>{_fmt_pct(r.delta_pct_last_n/100, nd=3, show_sign=True) if is_sane(r.delta_pct_last_n) else '?'}</td>",
                 f"<td>{r.hits_last_n}</td>",
-                f"<td>{ts_human(r.last_hit_ts) if r.last_hit_ts else '-'}</td>",
-                f"<td>{ts_human(r.last_stop_ts)}</td>",
+                f"<td>{'PENDING' if not r.has_stop else (ts_human(r.last_hit_ts) if r.last_hit_ts else '-')}</td>",
                 f"<td>{ts_human(r.last_alert_ts) if r.last_alert_ts else '-'}</td>",
+                f"<td>{report.history_counts.get((r.thinker_id, r.position_id), 0)}</td>",
             ]) +
             "</tr>"
         )
@@ -340,12 +374,28 @@ def format_stop_report_html(report: StopReport):
             "rows": 0,
             "stale": 0,
             "hit": 0,
+            "pending": 0,
+            "gaps": [],
+            "deltas": [],
         })
         meta["rows"] += 1
         meta["stale"] += 1 if r.stale else 0
         meta["hit"] += 1 if r.hit else 0
+        meta["pending"] += 1 if not r.has_stop else 0
+        if is_sane(r.gap_pct):
+            meta["gaps"].append(r.gap_pct)
+        if is_sane(r.delta_pct_last_n):
+            meta["deltas"].append(r.delta_pct_last_n)
     for tid, meta in sorted(thinker_meta.items()):
-        thinker_tbl.append([tid, meta["sstrat"], meta["tf"], meta["rows"], meta["hit"], meta["stale"]])
+        tick_val = ticks.get(tid)
+        status = status_map.get(tid, "?")
+        gap_str = "n/a"
+        delta_str = "n/a"
+        if meta["gaps"]:
+            gap_str = f"{_fmt_pct(sum(meta['gaps'])/len(meta['gaps'])/100, nd=3, show_sign=True)} / {_fmt_pct(min(meta['gaps'])/100, nd=3, show_sign=True)} / {_fmt_pct(max(meta['gaps'])/100, nd=3, show_sign=True)}"
+        if meta["deltas"]:
+            delta_str = f"{_fmt_pct(sum(meta['deltas'])/len(meta['deltas'])/100, nd=3, show_sign=True)} / {_fmt_pct(min(meta['deltas'])/100, nd=3, show_sign=True)} / {_fmt_pct(max(meta['deltas'])/100, nd=3, show_sign=True)}"
+        thinker_tbl.append([tid, status, meta["sstrat"], meta["tf"], meta["rows"], meta["hit"], meta["stale"], meta["pending"], gap_str, delta_str, ts_human(tick_val) if tick_val else "-"])
 
     table_html = "".join([
         "<table>",
@@ -353,17 +403,18 @@ def format_stop_report_html(report: StopReport):
         "".join(f"<th>{h}</th>" for h in headers),
         "</tr></thead>",
         "<tbody>",
-        "".join(rows_html) if rows_html else "<tr><td colspan='14'>No trailing attachments.</td></tr>",
+        "".join(rows_html) if rows_html else "<tr><td colspan='14'>Empty positions table.</td></tr>",
         "</tbody>",
         "</table>",
     ])
+    thinker_headers_html = ["Thinker", "Status", "Sstrat", "TF", "n_rows", "n_hits_now", "n_stale", "pending", "gap% avg/min/max", "Δstop% avg/min/max", "Last_tick"]
     thinker_html = "".join([
         "<table>",
         "<thead><tr>",
-        "".join(f"<th>{h}</th>" for h in ["Thinker", "Sstrat", "TF", "Rows", "Hit_now", "Stale"]),
+        "".join(f"<th>{h}</th>" for h in thinker_headers_html),
         "</tr></thead>",
         "<tbody>",
-        "".join("<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>" for row in thinker_tbl) if thinker_tbl else "<tr><td colspan='6'>No trailing attachments.</td></tr>",
+        "".join("<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>" for row in thinker_tbl) if thinker_tbl else f"<tr><td colspan='{len(thinker_headers_html)}'>Empty thinkers table.</td></tr>",
         "</tbody>",
         "</table>",
     ])
@@ -391,7 +442,7 @@ def format_stop_report_html(report: StopReport):
     </style>
     """
     summary_items = [
-        f"rows={n} stale={stale_n} hit_now={hit_n} hits_lastN={hits_total}",
+        f"n_rows={n} n_stale={stale_n} n_hits_now={hit_n} pending={pending_n}",
     ]
     if gaps:
         summary_items.append(

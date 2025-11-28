@@ -10,7 +10,7 @@ from klines_cache import KlinesCache
 from common import log, Clock, AppConfig, coerce_to_type
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
-from common import Log, sublog
+from common import Log, sublog, THOUGHT
 import common
 from dataclasses import dataclass, fields, is_dataclass
 
@@ -277,6 +277,10 @@ class ThinkerBase(ABC):
             raise RuntimeError(f"This {self.__class__.__name__} is frozen in carbonite")
         ret = self.on_tick(now_ms)
         self._tick_count += 1
+        thought = self._runtime.setdefault("THOUGHT", {})
+        thought.update({common.NOW_MS: now_ms,
+                        common.TICK_COUNT: self._tick_count})
+        self.save_runtime()
         return ret
 
 

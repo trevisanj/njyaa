@@ -243,7 +243,6 @@ class TrailingStopThinker(ThinkerBase):
         log().debug("trail.tick.start", attachments=len(pp_ctx))
 
         min_move_bp = float(self._cfg["min_move_bp"])  # min bps improvement to log
-        tf = self._cfg["timeframe"]  # timeframe string
         dirty = False  # whether we must save runtime at end
 
         processed = 0  # counter of processed attachments
@@ -326,7 +325,6 @@ class TrailingStopThinker(ThinkerBase):
                 last_hit_alert_ts = now
             p_ctx["last_alert_ts"] = max(last_move_alert_ts, last_hit_alert_ts)
             thought.update({
-                NOW_MS: now,
                 LAST_MOVE_ALERT_TS: last_move_alert_ts,
                 LAST_HIT_ALERT_TS: last_hit_alert_ts,
             })

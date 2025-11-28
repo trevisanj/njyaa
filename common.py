@@ -33,10 +33,12 @@ __all__ = [
     "NOW_MS",
     "LAST_MOVE_ALERT_TS",
     "LAST_HIT_ALERT_TS",
+    "is_sane",
     "float2str",
     "IND_STATES",
     "TooFewDataPoints",
     "STATE_TS",
+    "TICK_COUNT",
 ]
 
 class TooFewDataPoints(Exception):
@@ -66,7 +68,7 @@ THOUGHT = "thought"
 NOW_MS = "now_ms"
 LAST_MOVE_ALERT_TS = "last_move_alert_ts"
 LAST_HIT_ALERT_TS = "last_hit_alert_ts"
-
+TICK_COUNT = "tick_count"
 
 # =======================
 # ====== CONFIG =========
@@ -424,6 +426,20 @@ def float2str(
     leading_zeros = int(math.floor(-math.log10(ax))) if ax > 0 else 0
     frac_digits = max(0, leading_zeros + sig_small)
     return sign + f"{ax:.{frac_digits}f}".rstrip("0").rstrip(".")
+
+
+def is_sane(value) -> bool:
+    """
+    Return True if value is not None/NaN/inf.
+    Accepts numeric types; non-numeric raises.
+    """
+    if value is None:
+        return False
+    try:
+        f = float(value)
+    except Exception:
+        raise
+    return math.isfinite(f)
 
 
 def parse_when(s: str) -> int:

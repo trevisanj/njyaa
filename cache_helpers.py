@@ -45,7 +45,8 @@ def rows_to_columnar(rows: Sequence[Sequence[Any]], columns: Sequence[str]) -> D
     if not rows:
         cols = list(columns) if columns is not None else []
         return {k: [] for k in cols}
-    cols = list(columns) if columns is not None else list(rows[0].keys())
+    # cols = list(columns) if columns is not None else list(rows[0].keys())
+    cols = columns if columns is not None else rows[0].keys()
     data = zip(*rows)
     return {k: list(col) for k, col in zip(cols, data)}
 
