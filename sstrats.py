@@ -97,7 +97,6 @@ class StopStrategy:
         if start_idx < n_bars-1:
             self._run_pass(bars[:-1], start_idx, True)
 
-        # TODO There is still a bug with states, i guess, because i see a stop "going back" (see chart_ind_12_4_SEIUSDT-BTCUSDT_1h.png)
         self._run_pass(bars[-window_size:], window_size-1, False)
 
         ts_ms = int(v_ts[-1])

@@ -10,8 +10,6 @@ from typing import List, Optional, Dict, Any
 from common import Clock, tf_ms, ts_human, PP_CTX, THOUGHT, NOW_MS, LAST_MOVE_ALERT_TS, LAST_HIT_ALERT_TS, float2str, log, is_sane
 from risk_report import _fmt_num, _fmt_pct
 
-# TODO test this report with freshly attached disabled thinker
-
 @dataclass
 class StopRow:
     thinker_id: int
