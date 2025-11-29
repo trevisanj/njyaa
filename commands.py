@@ -770,6 +770,13 @@ def build_registry() -> CommandRegistry:
         detail = int(args.get("detail", "4" if cmd else "1"))
         return R._help_text(detail=detail, command=cmd)
 
+    # ----------------------- BANNER -----------------------
+    @R.at("banner")
+    def _at_banner(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Show engine start banner (host/git/start time)."""
+        banner = eng.start_banner()
+        return _txt(banner)
+
     # ----------------------- CONFIG SET -----------------------
     # TODO !config-set leverage:5  -->  Error: cannot access local variable 'rb' where it is not associated with a value
     @R.bang("config-set", options=["reference_balance", "leverage", "default_risk", "updated_by"])

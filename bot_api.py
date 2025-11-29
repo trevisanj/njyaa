@@ -273,6 +273,8 @@ class BotEngine:
 
         self._stopping = False
 
+        self._started_ms = None
+
     def _git_version(self) -> str:
         out = subprocess.check_output(
             ["git", "describe", "--always", "--dirty", "--long"],
@@ -280,9 +282,9 @@ class BotEngine:
         )
         return out.decode().strip()
 
-    def _build_start_banner(self, started_ms: int) -> str:
+    def start_banner(self) -> str:
         version = self._git_version()
-        ts = ts_human(started_ms)
+        ts = ts_human(self._started_ms)
         return f"🚀 njyaa@{self._host_name} git:{version} started at {ts} ✨"
 
     def _wait_for_telegram_ready(self):
@@ -294,8 +296,7 @@ class BotEngine:
 
     def _announce_started(self):
         self._wait_for_telegram_ready()
-        started_ms = Clock.now_utc_ms()
-        banner = self._build_start_banner(started_ms)
+        banner = self.start_banner()
         self.send_text(banner)
 
     # --------------------------------
@@ -466,34 +467,6 @@ class BotEngine:
         if self._stopping: return
         self._render_co(text)
 
-    # def send_photo(self, path: str, caption: str | None = None):
-    #     """
-    #     Send a photo through Telegram if enabled, else open locally.
-    #     If both console and Telegram are enabled, Telegram is preferred for images.
-    #     """
-    #     if not os.path.exists(path):
-    #         log().warn("engine.send_photo.missing", path=path)
-    #         return
-    #
-    #     if self.cfg.TELEGRAM_ENABLED and self._app is not None:
-    #         try:
-    #             with open(path, "rb") as f:
-    #                 self._app.create_task(
-    #                     self._app.bot.send_photo(
-    #                         chat_id=int(self.cfg.TELEGRAM_CHAT_ID),
-    #                         photo=f,
-    #                         caption=caption or "",
-    #                     )
-    #                 )
-    #             log().info("photo.sent", path=path, caption=caption)
-    #             return
-    #         except Exception as e:
-    #             log().exc(e, where="engine.send_photo", path=path)
-    #
-    #     # Fallback: local viewer
-    #     log().info("photo.local", path=path)
-    #     os.system(f"xdg-open '{path}' >/dev/null 2>&1 &")
-
     # ---------- photo sinks ----------
 
     def _send_photo_console(self, path: str, caption: str | None = None) -> None:
@@ -659,6 +632,7 @@ class BotEngine:
     # Lifecycle
     # --------------------------------
     def start(self):
+        self._started_ms = Clock.now_utc_ms()
         # Build everything lazily
         if self.api is None:
             self._build_parts()
