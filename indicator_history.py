@@ -178,6 +178,17 @@ class IndicatorHistory:
             rows = self.con.execute(query, params).fetchall()
         return self._format_rows(rows, cols, fmt)
 
+    def window(self, thinker_id: int, position_id: int, name: str, start_ts: Optional[int] = None,
+               end_ts: Optional[int] = None, columns: Optional[List[str]] = None, asc: bool = True,
+               limit: int = 5000, fmt: str = "columnar", n: Optional[int] = None):
+        """
+        Return indicator history either bounded by timestamps or, when n is provided, the latest n rows.
+        """
+        if n is None:
+            return self.range_by_ts(thinker_id, position_id, name, start_open_ts=start_ts,
+                                    end_open_ts=end_ts, columns=columns, asc=asc, limit=limit, fmt=fmt)
+        return self.last_n(thinker_id, position_id, name, n=n, columns=columns, asc=asc, fmt=fmt)
+
     def list_indicators(self, thinker_id: Optional[int] = None, position_id: Optional[int] = None, fmt: str = "columnar"):
         """Distinct indicator names grouped by thinker/position."""
         where = []

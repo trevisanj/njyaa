@@ -146,41 +146,41 @@ def render_indicator_history_chart(eng: "BotEngine", thinker_id: int, position_i
     return out_path
 
 
-def render_indicator_chart_multi(eng: "BotEngine", thinker_id: int, position_id: int, indicator_names: list[str],
-                                 symbol: str, timeframe: str, pos_start_ms: int, pos_end_ms: int,
-                                 start_ms: int | None = None, end_ms: int | None = None, outdir: str = "/tmp") -> str:
+def render_chart_ind(eng: "BotEngine", thinker_id: int, position_id: int, indicator_names: list[str],
+                     symbol: str, timeframe: str, pos_start_ms: int, pos_end_ms: int,
+                     start_ms: int | None = None, end_ms: int | None = None, n: Optional[int] = None,
+                     outdir: str = "/tmp") -> str:
     """
     Plot price candles and multiple indicator histories for a position.
     """
-    start_bound = start_ms if start_ms is not None else pos_start_ms
-    end_bound = end_ms if end_ms is not None else pos_end_ms
-    assert end_bound is None or start_bound <= end_bound, "start_ts must be before end_ts"
+    start_bound = None
+    end_bound = None
+    if n is not None:
+        start_bound = start_ms if start_ms is not None else pos_start_ms
+        end_bound = end_ms if end_ms is not None else pos_end_ms
+    assert end_bound is None or start_bound is None or start_bound <= end_bound, "start_ts must be before end_ts"
+
     num, den = parse_pair_or_single(eng, symbol)
     # fetch all indicator dfs and collect bounds
     dfs = []
     min_ts = start_bound
     max_ts = end_bound
     for name in indicator_names:
-        df = eng.ih.range_by_ts(thinker_id, position_id, name, start_open_ts=start_bound,
-                                end_open_ts=end_bound, fmt="dataframe")
+        df = eng.ih.window(thinker_id, position_id, name, start_ts=start_bound, end_ts=end_bound,
+                           fmt="dataframe", n=n)
         if df is None or df.empty:
             continue
         dfs.append((name, df))
         ts_min = int(df.index[0].value // 1_000_000)
         ts_max = int(df.index[-1].value // 1_000_000)
-        min_ts = min(min_ts, ts_min)
-        max_ts = max(max_ts, ts_max)
+        min_ts = ts_min if min_ts is None else min(min_ts, ts_min)
+        max_ts = ts_max if max_ts is None else max(max_ts, ts_max)
     if not dfs:
         raise ValueError("No indicator history rows")
 
     price_df = eng.kc.pair_bars(num, den, timeframe, min_ts, max_ts or None)
     if price_df.empty:
         raise ValueError(f"No klines for {symbol} {timeframe}")
-
-    # N = 50
-    # if len(price_df.index) > N:
-    #     price_df = price_df.iloc[-N:]
-    #     log().warn(f"render_indicator_chart_multi() trimming price df to {N} data points, FIX THISSSSSSSSSSSSSS")
 
     fig, axlist = mpf.plot(price_df, type="candle", returnfig=True,
                            title=f"{symbol} indicators ({', '.join(indicator_names)})", show_nontrading=True)
@@ -192,7 +192,7 @@ def render_indicator_chart_multi(eng: "BotEngine", thinker_id: int, position_id:
     out_path = os.path.join(outdir, f"chart_ind_{thinker_id}_{position_id}_{symbol}_{timeframe}.png".replace("/", "-"))
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
-    log().info("render_indicator_chart_multi", path=out_path, position_id=position_id, indicators=indicator_names)
+    log().info("render_chart_ind", path=out_path, position_id=position_id, indicators=indicator_names)
     return out_path
 
 

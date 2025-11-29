@@ -1018,7 +1018,7 @@ def build_registry() -> CommandRegistry:
 
         pos = eng.store.get_position(pid)
         if not pos:
-            return _err("position not found")
+            return _err(f"position #{pid} not found")
         num = pos["num"]
         den = pos["den"]
         sym = f"{num}/{den}" if den else num
@@ -1065,18 +1065,20 @@ def build_registry() -> CommandRegistry:
         return _tbl(["thinker_id", "position_id", "name"], tbl_rows, intro="Indicator history keys")
 
     # TODO +++++++wild time periods, review time periods
-    @R.at("chart-ind", argspec=["thinker_id", "position_id", "names"], options=["start_ts", "end_ts"], nreq=2)
+    @R.at("chart-ind", argspec=["thinker_id", "position_id", "names"], options=["start_ts", "end_ts", "n"], nreq=2)
     def _at_chart_ind(eng: BotEngine, args: Dict[str, str]) -> CO:
-        """Plot indicator history with candles for a position (all or filtered by name). start_ts/end_ts accept ISO or epoch."""
+        """Plot indicator history with candles for a position (all or filtered by name). start_ts/end_ts accept ISO or epoch; n shows the latest rows."""
         tid = int(args["thinker_id"])
         pid = int(args["position_id"])
         names_raw = args.get("names")
         start_raw = args.get("start_ts")
         end_raw = args.get("end_ts")
+        n_raw = args.get("n")
+        n = int(n_raw) if n_raw is not None else None
 
         pos = eng.store.get_position(pid)
         if not pos:
-            return _err("position not found")
+            return _err(f"position #{pid} not found")
         num = pos["num"]
         den = pos["den"]
         sym = f"{num}/{den}" if den else num
@@ -1084,6 +1086,9 @@ def build_registry() -> CommandRegistry:
         try:
             start_ms = parse_when(start_raw) if start_raw else None
             end_ms = parse_when(end_raw) if end_raw else None
+            if n is not None:
+                start_ms = None
+                end_ms = None
             if start_ms is not None and end_ms is not None:
                 assert start_ms <= end_ms, "start_ts must be before end_ts"
             inst = eng.tm.get_in_carbonite(tid, expected_kind="TRAILING_STOP")
@@ -1107,7 +1112,7 @@ def build_registry() -> CommandRegistry:
 
             open_ms = int(pos["user_ts"] or pos["created_ts"])
             close_ms = int(pos["closed_ts"] or Clock.now_utc_ms())
-            path = eh.render_indicator_chart_multi(eng, tid, pid, names, sym, tf, open_ms, close_ms, start_ms, end_ms)
+            path = eh.render_chart_ind(eng, tid, pid, names, sym, tf, open_ms, close_ms, start_ms, end_ms, n)
         except Exception as e:
             return _err_exc("chart_ind", e)
         return CO(OCPhoto(path, caption=f"indicators for pos {pid}"))

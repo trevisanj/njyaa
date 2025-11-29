@@ -423,7 +423,7 @@ class Worker:
         user_ts = int(payload["user_ts"])
         position = self.store.get_position(pid)
         if not position:
-            raise ValueError("position not found")
+            raise ValueError(f"position #{pid} not found")
 
         intended_usd = float(position["target_usd"])
         num_sym = position["num"]

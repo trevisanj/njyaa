@@ -194,28 +194,18 @@ class Clock:
         return int(dt.astimezone(timezone.utc).timestamp() * 1000)
 
 
-_FLAG = "🇧🇷"
-
-def set_flag(x):
-    global _FLAG
-    _FLAG = x
-
-def get_flag():
-    return _FLAG
+HOUR_SEP = "-"
 
 def ts_human(ms: int | datetime | None) -> str:
     """Human timestamp from ms (or datetime) in local tz."""
     if ms is None:
         return "?"
-    try:
-        tz = Clock.get_tz()
-        if isinstance(ms, datetime):
-            dt = ms.astimezone(tz)
-        else:
-            dt = datetime.fromtimestamp(int(ms)/1000, tz=tz)
-        return dt.strftime("%Y%m%d{}%H:%M:%S").format(get_flag())
-    except Exception:
-        return "?"
+    tz = Clock.get_tz()
+    if isinstance(ms, datetime):
+        dt = ms.astimezone(tz)
+    else:
+        dt = datetime.fromtimestamp(int(ms)/1000, tz=tz)
+    return dt.strftime("%Y%m%d{}%H:%M:%S").format(HOUR_SEP)
 
 
 # =======================

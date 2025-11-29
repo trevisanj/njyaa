@@ -373,9 +373,11 @@ class BotEngine:
         self.scheduler.schedule_every(
             "thinkers.tick", tick_sec, self._job_thinkers, run_immediately=True
         )
-        self.scheduler.schedule_every(
-            "heartbeat", 3600, self._job_heartbeat, run_immediately=False
-        )
+
+        # Disabled heartbeat to keep Telegram messages serious, otherwise I might lose interest fast
+        # self.scheduler.schedule_every(
+        #     "heartbeat", 3600, self._job_heartbeat, run_immediately=False
+        # )
 
     def set_registry(self, registry: "CommandRegistry"):
         self._registry = registry

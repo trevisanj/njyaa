@@ -247,14 +247,28 @@ class KlinesCache:
             return rows_to_ohlcv(rows, columns=cols)
         return rows_to_columnar(rows, cols)
 
-    def range_by_open(self, symbol: str, timeframe: str, start_open_ts: int, end_open_ts: Optional[int] = None,
-                      columns: Optional[List[str]] = None, include_live: bool = True, asc: bool = True,
-                      fmt: str = "columnar"):
+    def window(self, symbol: str, timeframe: str, start_open_ts: Optional[int] = None,
+               end_open_ts: Optional[int] = None, columns: Optional[List[str]] = None,
+               include_live: bool = True, asc: bool = True, fmt: str = "columnar", n: Optional[int] = None):
+        """
+        Return klines either bounded by timestamps (open) or, when n is provided, the latest n rows.
+        """
+        if n is None:
+            return self.range_by_open(symbol, timeframe, start_open_ts, end_open_ts, columns=columns,
+                                      include_live=include_live, asc=asc, fmt=fmt)
+        return self.last_n(symbol, timeframe, n, columns=columns, include_live=include_live, asc=asc, fmt=fmt)
+
+    def range_by_open(self, symbol: str, timeframe: str, start_open_ts: Optional[int] = None,
+                      end_open_ts: Optional[int] = None, columns: Optional[List[str]] = None,
+                      include_live: bool = True, asc: bool = True, fmt: str = "columnar"):
         """Get klines in [start_open_ts, end_open_ts) by open timestamp."""
         cols = columns or KLINE_COLS
         select_cols = ",".join(cols)
-        where = ["symbol=?", "timeframe=?", "open_ts>=?"]
-        args: list[Any] = [symbol, timeframe, start_open_ts]
+        where = ["symbol=?", "timeframe=?"]
+        args: list[Any] = [symbol, timeframe]
+        if start_open_ts is not None:
+            where.append("open_ts>=?")
+            args.append(start_open_ts)
         if end_open_ts is not None:
             where.append("open_ts<?")
             args.append(end_open_ts)
@@ -296,18 +310,18 @@ class KlinesCache:
         return rows_to_columnar(rows, cols)
 
     def pair_bars(self, num: str, den: Optional[str], timeframe: str, start_open_ts: Optional[int] = None,
-                  end_open_ts: Optional[int] = None, include_live: bool = True):
+                  end_open_ts: Optional[int] = None, include_live: bool = True, n: Optional[int] = None):
         """
-        Return OHLC for num[/den], aligned by open_ts.
+        Return OHLC for num[/den], aligned by open_ts. If n is provided, fetch the latest n bars ignoring timestamp
+        bounds.
         """
-        start_ts = 0 if start_open_ts is None else start_open_ts
-        f = lambda sym: self.range_by_open(sym, timeframe, start_ts, end_open_ts, include_live=include_live,
-                                           fmt="ohlcv")
+        getter = lambda sym: self.window(sym, timeframe, start_open_ts, end_open_ts, include_live=include_live,
+                                         fmt="ohlcv", n=n)
         if not den:
-            return f(num)
+            return getter(num)
 
-        out_df = f(num)
-        den_df = f(den)
+        out_df = getter(num)
+        den_df = getter(den)
 
         if out_df.empty or den_df.empty:
             return out_df
