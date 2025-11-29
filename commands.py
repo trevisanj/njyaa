@@ -39,6 +39,12 @@ __all__ = ["OC", "OCText", "OCMarkDown", "OCPhoto", "OCTable", "OCHTML", "CO", "
 AT_KEY = "?"
 BANG_KEY = "!"
 
+EMOJI_WEIRD = "🌀"
+EMOJI_TABLE_ROW = "🪱"
+
+def _weird(s):
+    return f"{EMOJI_WEIRD} {s}"
+
 # Toggle pure markdown (no rich rendering) for debugging.
 RENDER_MARKDOWN = True
 # Replacement brackets for Telegram-safe output (can be customized)
@@ -269,7 +275,6 @@ _HEADING_REPLACEMENTS = {
     6: "**🧄 {title}**",
 }
 
-
 def _rewrite_headings(txt: str) -> str:
     """Rewrite markdown headings (# ...) into configurable replacements."""
     def repl(match):
@@ -327,28 +332,33 @@ class OCTable(OC):
 
     def render_console(self, eng: BotEngine) -> str:
         if not self.rows:
-            eng._send_text_console("(empty)")
-            return "(empty)"
+            text = _weird("(empty table)")
+            eng._send_text_console(text)
+            return text
         text = tabulate.tabulate(self.rows, headers=self.headers, tablefmt="github")
         eng._send_text_console(text)
         return text
 
     def render_telegram(self, eng: BotEngine) -> str:
-        RENDER_AS_MD = True
-        if not RENDER_AS_MD:
+        RENDER_TABULATE = False
+        if not RENDER_TABULATE:
             if not self.rows:
-                body = "(empty table)"
+                body = _weird("(empty table)")
             else:
                 lines = []
                 for row in self.rows:
-                    parts = [f"{h}: {v}" for h, v in zip(self.headers, row)]
-                    line = "; ".join(parts) if parts else "(empty row)"
+                    parts = [f"`{h}`: **{v}**" for h, v in zip(self.headers, row)]
+                    line = (EMOJI_TABLE_ROW + " | ".join(parts)) if parts else "(empty row)"
                     lines.append(line)
                 body = "\n".join(lines)
-                eng._send_text_telegram(body)
+
+                print("--------------------------------")
+                print(body)
+                print("--------------------------------")
+                eng._send_text_telegram(body, parse_mode=ParseMode.MARKDOWN)
         else:
             if not self.rows:
-                body = "(empty table)"
+                body = _weird("(empty table)")
             else:
                 body = "\n".join(["```", tabulate.tabulate(self.rows, headers=self.headers, tablefmt="github"), "```"])
             eng._send_text_telegram(body, parse_mode=ParseMode.MARKDOWN)
