@@ -386,7 +386,7 @@ class OCHTML(OC):
 
     def render_telegram(self, eng: BotEngine) -> str:
         try:
-            eng._send_file_telegram(self.path, caption=self.caption)
+            eng._send_file_telegram(self.path, caption=self.caption, file_name=os.path.basename(self.path))
         except Exception as e:
             log().exc(e, where="OCHTML.render_telegram", path=self.path)
             msg = f"[html error: {e}]"
@@ -513,7 +513,7 @@ class CommandRegistry:
             return out
         except Exception as e:
             log().exc(e, where="dispatch.handler", cmd=head)
-            return f"Error: {e}"
+            return _err(f"Command dispatcher caught {e.__class__.__name__}: {e}")
 
     # ---- parsing helpers ----
     def _parse_args(self, tail: str, meta: Dict[str, Any]) -> Tuple[Dict[str, str], List[str]]:
@@ -669,18 +669,31 @@ def _report_guide(guide):
     return f"Report Guide:\n\n{guide}"
 
 
+# Local helpers to keep handlers concise
+def _md(text: str) -> CO:
+    return CO(OCMarkDown(text))
+
+def _txt(text: str) -> CO:
+    return CO(OCText(text))
+
+def _err(text: str) -> CO:
+    body = f"👾 **{text.strip()}**"
+    return CO(OCMarkDown(body))
+
+def _tbl(headers: List[str], rows: List[Sequence[Any]], intro: str | None = None) -> CO:
+    comps: List[OC] = []
+    if intro:
+        comps.append(OCMarkDown(intro))
+    comps.append(OCTable(headers=headers, rows=rows))
+    return CO(comps)
+
+def _err_exc(where: str, e: Exception) -> CO:
+    log().exc(e, where=where)
+    return _err(f"{e.__class__.__name__}: {str(e)}")
+
+
 def build_registry() -> CommandRegistry:
     R = CommandRegistry()
-    # Local helpers to keep handlers concise
-    def _md(text: str) -> CO:
-        return CO(OCMarkDown(text))
-
-    def _txt(text: str) -> CO:
-        return CO(OCText(text))
-
-    def _err(text: str) -> CO:
-        body = f"👾 **{text.strip()}**"
-        return CO(OCMarkDown(body))
 
     def _require_thinker_offline(eng: BotEngine, tid: int) -> Optional[CO]:
         row = eng.store.get_thinker(tid)
@@ -690,18 +703,6 @@ def build_registry() -> CommandRegistry:
             if tid in eng.tm._instances:
                 return _err(f"Thinker {tid} is live; disable it before proceeding.")
         return None
-
-    def _tbl(headers: List[str], rows: List[Sequence[Any]], intro: str | None = None) -> CO:
-        comps: List[OC] = []
-        if intro:
-            comps.append(OCMarkDown(intro))
-        comps.append(OCTable(headers=headers, rows=rows))
-        return CO(comps)
-
-    def _err_exc(where: str, e: Exception) -> CO:
-        log().exc(e, where=where)
-        return _err(str(e))
-
 
     def _thinker_kind_info(eng: BotEngine) -> List[Dict[str, Any]]:
         infos: List[Dict[str, Any]] = []

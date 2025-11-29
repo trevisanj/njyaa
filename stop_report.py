@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 
-from common import Clock, tf_ms, ts_human, PP_CTX, THOUGHT, NOW_MS, LAST_MOVE_ALERT_TS, LAST_HIT_ALERT_TS, float2str, log, is_sane
+from common import Clock, tf_ms, ts_human, PP_CTX, THOUGHT, NOW_MS, LAST_MOVE_ALERT_TS, LAST_HIT_ALERT_TS, float2str, log, is_sane, LatestPriceFail
 from risk_report import _fmt_num, _fmt_pct
 
 @dataclass
@@ -129,12 +129,11 @@ def _history_stats(eng, thinker_id: int, position_id: int, window_n: Optional[in
 
 
 def _latest_price_for_position(eng, pos, timeframe: str) -> float:
-    now_ms = Clock.now_utc_ms()
-    tfms = tf_ms(timeframe)
-    start_ts = max(0, now_ms - 3 * tfms)
-    df = eng.kc.pair_bars(pos.num, pos.den, timeframe, start_ts, None)
+    N = 70  # we hope to find at least 1 aligned bar within this window
+    df = eng.kc.pair_bars(pos.num, pos.den, timeframe, n=N)
     if df.empty:
-        raise RuntimeError(f"No klines for {pos.get_pair()} {timeframe}")
+        raise LatestPriceFail(f"Failed reading last price for {pos.get_pair()} {timeframe} (N={N}). "
+                              f"This may be temporary due to cache update, please try again")
     return float(df["Close"].iloc[-1])
 
 
@@ -166,19 +165,27 @@ def build_stop_report(eng, window_n: Optional[int] = None, freshness_k: float = 
         for pid_str, ctx in pp_ctx.items():
             if "invalid" in ctx and ctx["invalid"]:
                 continue
+
             pid = int(pid_str)
             pos = eng.store.get_position(pid)
             if not pos:
                 raise ValueError(f"Position {pid} not found for thinker {tid}")
 
             timeframe = inst._cfg["timeframe"]
-            price = _latest_price_for_position(eng, pos, timeframe)
+            price = math.nan
+            try:
+                price = _latest_price_for_position(eng, pos, timeframe)
+            except LatestPriceFail as e:
+                log().warn(str(e))
+
             sstrat_kind = ctx["sstrat_kind"]
             attached_at = int(ctx["attached_at"])
 
             stats = _history_stats(eng, tid, pid, window_n)
             hist_counts[(tid, pid)] = stats.get("count_vals") or 0
-            if is_sane(stats["last_stop_val"]) and stats["last_stop_ts"] is not None:
+
+            sane = is_sane(stats["last_stop_val"]) and stats["last_stop_ts"] is not None
+            if sane:
                 stop = stats["last_stop_val"]
                 last_stop_ts = stats["last_stop_ts"]
                 gap_pct = (price - stop) * 100 / price
@@ -192,6 +199,7 @@ def build_stop_report(eng, window_n: Optional[int] = None, freshness_k: float = 
                 stale = False
                 hit = False
                 has_stop = False
+
             thought = ctx.get(THOUGHT) or {}
             last_alert_ts = thought.get(LAST_HIT_ALERT_TS)
 

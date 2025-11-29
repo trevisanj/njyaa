@@ -497,15 +497,17 @@ class BotEngine:
         log().info("file.local", path=path, caption=caption)
         os.system(f"xdg-open '{path}' >/dev/null 2>&1 &")
 
-    def _send_file_telegram(self, path: str, caption: str | None = None) -> None:
+    def _send_file_telegram(self, path: str, caption: str | None = None, file_name: str | None = None) -> None:
         """Telegram sink for generic files."""
         if self._stopping: return
         loop = self._telegram_loop
+        from telegram import InputFile
         with open(path, "rb") as f:
             data = f.read()
+        document = InputFile(data, filename=file_name or os.path.basename(path))
         coro = self._app.bot.send_document(
             chat_id=int(self.cfg.TELEGRAM_CHAT_ID),
-            document=data,
+            document=document,
             caption=caption or "",
         )
         asyncio.run_coroutine_threadsafe(coro, loop)

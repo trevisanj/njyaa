@@ -10,6 +10,7 @@ from bot_api import BotEngine
 
 _LOCK_FD = None
 
+# TODO surface a way for ChatGPT to test things and tell it
 
 def acquire_singleton_lock():
     global _LOCK_FD
@@ -28,7 +29,7 @@ def main():
     acquire_singleton_lock()
     cfg = make_cfg()
     inject_cmd = ""
-    # inject_cmd = "?stop-report"
+    inject_cmd = "?stop-report"
     # inject_cmd = "?chart-ind 4 3" # os.getenv("NJYAA_INJECT_CMD")
     # inject_cmd = "!exit-attach 8 4"
     # inject_cmd = "!thinker-enable 12"

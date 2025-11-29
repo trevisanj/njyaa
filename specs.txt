@@ -1,0 +1,118 @@
+=== CPU ===
+Architecture:                       x86_64
+CPU op-mode(s):                     32-bit, 64-bit
+Address sizes:                      39 bits physical, 48 bits virtual
+Byte Order:                         Little Endian
+CPU(s):                             20
+On-line CPU(s) list:                0-19
+Vendor ID:                          GenuineIntel
+Model name:                         13th Gen Intel(R) Core(TM) i7-13650HX
+CPU family:                         6
+Model:                              183
+Thread(s) per core:                 2
+Core(s) per socket:                 14
+Socket(s):                          1
+Stepping:                           1
+CPU(s) scaling MHz:                 52%
+CPU max MHz:                        4900.0000
+CPU min MHz:                        800.0000
+BogoMIPS:                           5606.40
+Flags:                              fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq dtes64 monitor ds_cpl vmx est tm2 ssse3 sdbg fma cx16 xtpr pdcm sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb intel_pt sha_ni xsaveopt xsavec xgetbv1 xsaves split_lock_detect avx_vnni dtherm ida arat pln pts hwp hwp_notify hwp_act_window hwp_epp hwp_pkg_req hfi vnmi umip pku ospke waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize arch_lbr ibt flush_l1d arch_capabilities
+Virtualization:                     VT-x
+L1d cache:                          544 KiB (14 instances)
+L1i cache:                          704 KiB (14 instances)
+L2 cache:                           11.5 MiB (8 instances)
+L3 cache:                           24 MiB (1 instance)
+NUMA node(s):                       1
+NUMA node0 CPU(s):                  0-19
+Vulnerability Gather data sampling: Not affected
+Vulnerability Itlb multihit:        Not affected
+Vulnerability L1tf:                 Not affected
+Vulnerability Mds:                  Not affected
+Vulnerability Meltdown:             Not affected
+Vulnerability Mmio stale data:      Not affected
+Vulnerability Retbleed:             Not affected
+Vulnerability Spec rstack overflow: Not affected
+Vulnerability Spec store bypass:    Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:           Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:           Mitigation; Enhanced / Automatic IBRS; IBPB conditional; RSB filling; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S
+Vulnerability Srbds:                Not affected
+Vulnerability Tsx async abort:      Not affected
+
+=== RAM ===
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi        13Gi       416Mi       779Mi       2.3Gi       2.2Gi
+Swap:           14Gi        10Gi       3.9Gi
+
+=== GPU ===
+0000:00:02.0 VGA compatible controller: Intel Corporation Raptor Lake-S UHD Graphics (rev 04)
+0000:01:00.0 VGA compatible controller: NVIDIA Corporation GN20-P0-R-K2 [GeForce RTX 3050 6GB Laptop GPU] (rev a1)
+
+=== Detailed GPU (nvidia only) ===
+Sat Nov 29 09:17:59 2025       
++---------------------------------------------------------------------------------------+
+| NVIDIA-SMI 535.171.04             Driver Version: 535.171.04   CUDA Version: 12.2     |
+|-----------------------------------------+----------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
+|                                         |                      |               MIG M. |
+|=========================================+======================+======================|
+|   0  NVIDIA GeForce RTX 3050 ...    Off | 00000000:01:00.0 Off |                  N/A |
+| N/A   55C    P8               3W /  80W |      8MiB /  6144MiB |      0%      Default |
+|                                         |                      |                  N/A |
++-----------------------------------------+----------------------+----------------------+
+                                                                                         
++---------------------------------------------------------------------------------------+
+| Processes:                                                                            |
+|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
+|        ID   ID                                                             Usage      |
+|=======================================================================================|
+|    0   N/A  N/A      1885      G   /usr/lib/xorg/Xorg                            4MiB |
++---------------------------------------------------------------------------------------+
+
+=== Disks ===
+NAME          SIZE TYPE  MOUNTPOINT
+loop0           4K loop  /snap/bare/5
+loop1        55.5M loop  /snap/core18/2952
+loop2        55.5M loop  /snap/core18/2959
+loop3        63.8M loop  /snap/core20/2599
+loop4        63.8M loop  /snap/core20/2669
+loop5        73.9M loop  /snap/core22/2133
+loop6        73.9M loop  /snap/core22/2139
+loop7       249.2M loop  /snap/firefox/7084
+loop8       249.1M loop  /snap/firefox/7177
+loop9        11.1M loop  /snap/firmware-updater/167
+loop10       18.5M loop  /snap/firmware-updater/210
+loop11        516M loop  /snap/gnome-42-2204/202
+loop12      516.2M loop  /snap/gnome-42-2204/226
+loop13       53.3M loop  /snap/go/10971
+loop14       53.3M loop  /snap/go/10984
+loop15       91.7M loop  /snap/gtk-common-themes/1535
+loop16      958.7M loop  /snap/pycharm-community/534
+loop17      970.2M loop  /snap/pycharm-community/538
+loop18       10.5M loop  /snap/snap-store/1173
+loop19       12.2M loop  /snap/snap-store/1216
+loop20       50.8M loop  /snap/snapd/25202
+loop21       50.9M loop  /snap/snapd/25577
+loop22        568K loop  /snap/snapd-desktop-integration/253
+loop23        576K loop  /snap/snapd-desktop-integration/315
+loop24       64.7M loop  /snap/sublime-text/209
+loop25       64.7M loop  /snap/sublime-text/217
+loop26        300M loop  
+└─yp_crypt    284M crypt /home/j/yp
+nvme0n1     476.9G disk  
+├─nvme0n1p1   200M part  /boot/efi
+├─nvme0n1p2   128M part  
+├─nvme0n1p3  80.1G part  
+├─nvme0n1p4   990M part  
+├─nvme0n1p5  21.1G part  
+├─nvme0n1p6   1.5G part  
+├─nvme0n1p7 358.3G part  /
+└─nvme0n1p8  14.6G part  [SWAP]
+
+=== Kernel & OS ===
+Linux 707b 6.5.0-44-generic #44-Ubuntu SMP PREEMPT_DYNAMIC Fri Jun  7 15:10:09 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux
+Distributor ID:	Ubuntu
+Description:	Ubuntu 23.10
+Release:	23.10
+Codename:	mantic

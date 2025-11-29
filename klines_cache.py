@@ -320,13 +320,13 @@ class KlinesCache:
         if not den:
             return getter(num)
 
-        out_df = getter(num)
-        den_df = getter(den)
+        _num_df = getter(num)
+        _den_df = getter(den)
 
-        if out_df.empty or den_df.empty:
-            return out_df
+        if _num_df.empty or _den_df.empty:
+            return _num_df
 
-        out_df, den_df = out_df.align(den_df, join="inner")
+        out_df, den_df = _num_df.align(_den_df, join="inner")
 
         if out_df.empty:
             return out_df

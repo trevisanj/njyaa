@@ -37,11 +37,16 @@ __all__ = [
     "float2str",
     "IND_STATES",
     "TooFewDataPoints",
+    "LatestPriceFail",
     "STATE_TS",
     "TICK_COUNT",
 ]
 
 class TooFewDataPoints(Exception):
+    pass
+
+class LatestPriceFail(RuntimeError):
+    """Raised when the latest price cannot be retrieved."""
     pass
 
 
