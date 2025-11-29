@@ -178,6 +178,8 @@ def render_chart_ind(eng: "BotEngine", thinker_id: int, position_id: int, indica
     if not dfs:
         raise ValueError("No indicator history rows")
 
+    if max_ts is None:
+        raise RuntimeError(f"Could not determine time bounds for the chart")
     price_df = eng.kc.pair_bars(num, den, timeframe, min_ts, max_ts or None)
     if price_df.empty:
         raise ValueError(f"No klines for {symbol} {timeframe}")

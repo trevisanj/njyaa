@@ -261,7 +261,7 @@ class KlinesCache:
     def range_by_open(self, symbol: str, timeframe: str, start_open_ts: Optional[int] = None,
                       end_open_ts: Optional[int] = None, columns: Optional[List[str]] = None,
                       include_live: bool = True, asc: bool = True, fmt: str = "columnar"):
-        """Get klines in [start_open_ts, end_open_ts) by open timestamp."""
+        """Get klines in [start_open_ts, end_open_ts] by open timestamp."""
         cols = columns or KLINE_COLS
         select_cols = ",".join(cols)
         where = ["symbol=?", "timeframe=?"]
@@ -270,7 +270,7 @@ class KlinesCache:
             where.append("open_ts>=?")
             args.append(start_open_ts)
         if end_open_ts is not None:
-            where.append("open_ts<?")
+            where.append("open_ts<=?")
             args.append(end_open_ts)
         if not include_live:
             where.append("finalized=1")
@@ -288,10 +288,10 @@ class KlinesCache:
     def range_by_close(self, symbol: str, timeframe: str, start_close_ts: int, end_close_ts: Optional[int] = None,
                        columns: Optional[List[str]] = None, include_live: bool = True, asc: bool = True,
                        fmt: str = "columnar"):
-        """Get klines whose close_ts falls in (start_close_ts, end_close_ts]."""
+        """Get klines whose close_ts falls in [start_close_ts, end_close_ts]."""
         cols = columns or KLINE_COLS
         select_cols = ",".join(cols)
-        where = ["symbol=?", "timeframe=?", "close_ts>?"]
+        where = ["symbol=?", "timeframe=?", "close_ts>=?"]
         args: list[Any] = [symbol, timeframe, start_close_ts]
         if end_close_ts is not None:
             where.append("close_ts<=?")

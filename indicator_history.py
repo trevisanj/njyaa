@@ -163,7 +163,7 @@ class IndicatorHistory:
             where.append("open_ts>=?")
         if end_open_ts is not None:
             params.append(int(end_open_ts))
-            where.append("open_ts<?")
+            where.append("open_ts<=?")
         order = "ASC" if asc else "DESC"
         where_clause = " AND ".join(where)
         query = f"""
