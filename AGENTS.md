@@ -56,6 +56,7 @@
 - No defensive coding!!!!!!!!!! **NO DEFENSIVE CODING***
 - Format function signatures with as many arguments on each line as possible up to ~120 chars; avoid one-arg-per-line wrapping.
 - I prefer looped operations as much as possible (rather than if's)
+- Use *_ms for epoch‑millisecond values and reserve *_ts only for human/ISO/datetime-ish timestamps (DB columns already named *_ts stay as-is; map at the edges).
 
 ## Testing Guidelines
 - No unit-test suite is maintained; rely on manual smoke checks instead of adding tests.

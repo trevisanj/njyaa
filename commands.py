@@ -1110,7 +1110,8 @@ def build_registry() -> CommandRegistry:
                 wanted = [n.strip() for n in names_raw.split(",") if n.strip()]
                 missing = [n for n in wanted if n not in (names or [])]
                 if missing:
-                    return _err(f"indicator(s) {', '.join(missing)} not found for thinker {tid}, position {pid}")
+                    return _err(f"indicator(s) {', '.join(missing)} not found for thinker {tid}, position {pid}. "
+                                f"Wanted: {', '.join(wanted)}")
                 names = wanted
             else:
                 names = list(names or [])

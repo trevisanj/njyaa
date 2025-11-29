@@ -161,10 +161,10 @@ def render_chart_ind(eng: "BotEngine", thinker_id: int, position_id: int, indica
     assert end_bound is None or start_bound is None or start_bound <= end_bound, "start_ts must be before end_ts"
 
     num, den = parse_pair_or_single(eng, symbol)
-    # fetch all indicator dfs and collect bounds
+    # --- fetch all indicator dfs and collect bounds
     dfs = []
-    min_ts = start_bound
-    max_ts = end_bound
+    # ts bounds for the klines will be defined by indicator data retrieved
+    min_ts, max_ts = None, None
     for name in indicator_names:
         df = eng.ih.window(thinker_id, position_id, name, start_ts=start_bound, end_ts=end_bound,
                            fmt="dataframe", n=n)
