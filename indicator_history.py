@@ -130,27 +130,28 @@ class IndicatorHistory:
 
     # ---------- reads ----------
     def last_n(self, thinker_id: int, position_id: int, name: str, n: int = 200, columns: Optional[List[str]] = None,
-               asc: bool = True, fmt: str = "columnar"):
+               fmt: str = "columnar"):
         """Return last N rows for (thinker,position,name)."""
         assert fmt in ("columnar", "dataframe")
         cols = columns or DEFAULT_COLUMNS
-        order = "ASC" if asc else "DESC"
         select_cols = ",".join(cols)
         with self._lock:
-            rows = self.con.execute(
-                f"""
+            inner_q = f"""
                 SELECT {select_cols}
                 FROM indicator_history
                 WHERE thinker_id=? AND position_id=? AND name=?
-                ORDER BY open_ts {order}
+                ORDER BY open_ts DESC
                 LIMIT ?
-                """,
+            """
+            outer_q = f"""SELECT {select_cols} FROM ({inner_q}) ORDER BY open_ts ASC"""
+            rows = self.con.execute(
+                outer_q,
                 (int(thinker_id), int(position_id), name, int(n)),
             ).fetchall()
         return self._format_rows(rows, cols, fmt)
 
     def range_by_ts(self, thinker_id: int, position_id: int, name: str, start_open_ts: Optional[int] = None,
-                    end_open_ts: Optional[int] = None, columns: Optional[List[str]] = None, asc: bool = True,
+                    end_open_ts: Optional[int] = None, columns: Optional[List[str]] = None,
                     limit: int = 5000, fmt: str = "columnar"):
         """Return rows within optional [start_ts, end_ts] bounds."""
         assert fmt in ("columnar", "dataframe")
@@ -164,13 +165,12 @@ class IndicatorHistory:
         if end_open_ts is not None:
             params.append(int(end_open_ts))
             where.append("open_ts<=?")
-        order = "ASC" if asc else "DESC"
         where_clause = " AND ".join(where)
         query = f"""
             SELECT {select_cols}
             FROM indicator_history
             WHERE {where_clause}
-            ORDER BY open_ts {order}
+            ORDER BY open_ts ASC
             LIMIT ?
         """
         params.append(int(limit))
@@ -179,15 +179,15 @@ class IndicatorHistory:
         return self._format_rows(rows, cols, fmt)
 
     def window(self, thinker_id: int, position_id: int, name: str, start_ts: Optional[int] = None,
-               end_ts: Optional[int] = None, columns: Optional[List[str]] = None, asc: bool = True,
+               end_ts: Optional[int] = None, columns: Optional[List[str]] = None,
                limit: int = 5000, fmt: str = "columnar", n: Optional[int] = None):
         """
         Return indicator history either bounded by timestamps or, when n is provided, the latest n rows.
         """
         if n is None:
             return self.range_by_ts(thinker_id, position_id, name, start_open_ts=start_ts,
-                                    end_open_ts=end_ts, columns=columns, asc=asc, limit=limit, fmt=fmt)
-        return self.last_n(thinker_id, position_id, name, n=n, columns=columns, asc=asc, fmt=fmt)
+                                    end_open_ts=end_ts, columns=columns, limit=limit, fmt=fmt)
+        return self.last_n(thinker_id, position_id, name, n=n, columns=columns, fmt=fmt)
 
     def list_indicators(self, thinker_id: Optional[int] = None, position_id: Optional[int] = None, fmt: str = "columnar"):
         """Distinct indicator names grouped by thinker/position."""

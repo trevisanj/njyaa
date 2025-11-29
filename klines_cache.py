@@ -222,7 +222,7 @@ class KlinesCache:
         return int(r["open_ts"]) if r else None
 
     def last_n(self, symbol: str, timeframe: str, n: int, columns: Optional[List[str]] = None,
-               include_live: bool = True, asc: bool = True, fmt: str = "columnar"):
+               include_live: bool = True, fmt: str = "columnar"):
         """
         Fetch the last N klines for (symbol,timeframe).
 
@@ -235,12 +235,14 @@ class KlinesCache:
             SELECT {select_cols}
             FROM klines
             WHERE symbol=? AND timeframe=? {live_clause}
-            ORDER BY open_ts {'ASC' if asc else 'DESC'}
+            ORDER BY open_ts DESC
             LIMIT ?
         """
-        rows = self.con.execute(q, (symbol, timeframe, n)).fetchall()
-        if not asc:
-            rows = list(reversed(rows))
+        outer_q = f"""
+            SELECT {select_cols} FROM ({q})
+            ORDER BY open_ts ASC
+        """
+        rows = self.con.execute(outer_q, (symbol, timeframe, n)).fetchall()
         if fmt == "dataframe":
             return rows_to_generic_df(rows, columns=cols)
         if fmt == "ohlcv":
@@ -249,18 +251,18 @@ class KlinesCache:
 
     def window(self, symbol: str, timeframe: str, start_open_ts: Optional[int] = None,
                end_open_ts: Optional[int] = None, columns: Optional[List[str]] = None,
-               include_live: bool = True, asc: bool = True, fmt: str = "columnar", n: Optional[int] = None):
+               include_live: bool = True, fmt: str = "columnar", n: Optional[int] = None):
         """
         Return klines either bounded by timestamps (open) or, when n is provided, the latest n rows.
         """
         if n is None:
             return self.range_by_open(symbol, timeframe, start_open_ts, end_open_ts, columns=columns,
-                                      include_live=include_live, asc=asc, fmt=fmt)
-        return self.last_n(symbol, timeframe, n, columns=columns, include_live=include_live, asc=asc, fmt=fmt)
+                                      include_live=include_live, fmt=fmt)
+        return self.last_n(symbol, timeframe, n, columns=columns, include_live=include_live, fmt=fmt)
 
     def range_by_open(self, symbol: str, timeframe: str, start_open_ts: Optional[int] = None,
                       end_open_ts: Optional[int] = None, columns: Optional[List[str]] = None,
-                      include_live: bool = True, asc: bool = True, fmt: str = "columnar"):
+                      include_live: bool = True, fmt: str = "columnar"):
         """Get klines in [start_open_ts, end_open_ts] by open timestamp."""
         cols = columns or KLINE_COLS
         select_cols = ",".join(cols)
@@ -277,7 +279,7 @@ class KlinesCache:
         q = f"""SELECT {select_cols}
                 FROM klines
                 WHERE {' AND '.join(where)}
-                ORDER BY open_ts {'ASC' if asc else 'DESC'}"""
+                ORDER BY open_ts ASC"""
         rows = self.con.execute(q, args).fetchall()
         if fmt == "dataframe":
             return rows_to_generic_df(rows, columns=cols)
@@ -286,8 +288,7 @@ class KlinesCache:
         return rows_to_columnar(rows, cols)
 
     def range_by_close(self, symbol: str, timeframe: str, start_close_ts: int, end_close_ts: Optional[int] = None,
-                       columns: Optional[List[str]] = None, include_live: bool = True, asc: bool = True,
-                       fmt: str = "columnar"):
+                       columns: Optional[List[str]] = None, include_live: bool = True, fmt: str = "columnar"):
         """Get klines whose close_ts falls in [start_close_ts, end_close_ts]."""
         cols = columns or KLINE_COLS
         select_cols = ",".join(cols)
@@ -301,7 +302,7 @@ class KlinesCache:
         q = f"""SELECT {select_cols}
                 FROM klines
                 WHERE {' AND '.join(where)}
-                ORDER BY open_ts {'ASC' if asc else 'DESC'}"""
+                ORDER BY open_ts ASC"""
         rows = self.con.execute(q, args).fetchall()
         if fmt == "dataframe":
             return rows_to_generic_df(rows, columns=cols)

@@ -81,9 +81,9 @@ def _clean_series(ts_seq: List[int], val_seq: List[Any]) -> List[tuple[int, floa
 
 
 def _history_stats(eng, thinker_id: int, position_id: int, window_n: Optional[int]) -> dict:
-    vals = eng.ih.last_n(thinker_id, position_id, "stopper-value", n=window_n, asc=True) if window_n \
+    vals = eng.ih.last_n(thinker_id, position_id, "stopper-value", n=window_n) if window_n \
         else eng.ih.range_by_ts(thinker_id, position_id, "stopper-value", fmt="columnar")
-    flags = eng.ih.last_n(thinker_id, position_id, "stopper-flag", n=window_n, asc=True) if window_n \
+    flags = eng.ih.last_n(thinker_id, position_id, "stopper-flag", n=window_n) if window_n \
         else eng.ih.range_by_ts(thinker_id, position_id, "stopper-flag", fmt="columnar")
 
     clean_vals = _clean_series(vals["open_ts"], vals["value"]) if vals else []

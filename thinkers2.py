@@ -79,7 +79,7 @@ def _mark_close_now(eng: BotEngine, symbol: str) -> Optional[float]:
 
 
 def _minute_klines(eng: BotEngine, symbol: str, mins: int) -> Dict[str, List[Any]]:
-    return eng.kc.last_n(symbol, "1m", mins, include_live=True, asc=True)
+    return eng.kc.last_n(symbol, "1m", mins, include_live=True)
 
 
 class RiskThinker(ThinkerBase):
