@@ -348,7 +348,7 @@ class OCTable(OC):
                 lines = []
                 for row in self.rows:
                     parts = [f"`{h}`: **{v}**" for h, v in zip(self.headers, row)]
-                    line = (EMOJI_TABLE_ROW + " | ".join(parts)) if parts else "(empty row)"
+                    line = (EMOJI_TABLE_ROW+" " + " | ".join(parts)) if parts else "(empty row)"
                     lines.append(line)
                 body = "\n".join(lines)
 
