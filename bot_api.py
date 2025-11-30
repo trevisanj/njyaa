@@ -458,7 +458,8 @@ class BotEngine:
                 if not exc:
                     return
                 err_s = str_exc(exc)
-                log().exc(exc, "telegram.send.failed.retry.failed", err=err_s)
+                log().error("telegram.send.retry.failed", err=err_s)
+                log().exc(exc)
 
             err_s = str_exc(exc)
             log().error("telegram.send.failed", err=err_s)
@@ -475,7 +476,7 @@ class BotEngine:
                     fut = asyncio.run_coroutine_threadsafe(coro_plain, loop)
                 fut.add_done_callback(_on_done_2)
             except Exception as e:
-                log().exc(e, where="telegram.send.retry_plain")
+                log().exc(e, where="telegram.send.retry")
         fut.add_done_callback(_on_done)
 
     # ---------- interface ----------
