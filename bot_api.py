@@ -451,6 +451,15 @@ class BotEngine:
             exc = f.exception()
             if not exc:
                 return
+
+            def _on_done_2(f):
+                """Another result handler that does not retry: retry may fail and we want to know why"""
+                exc = f.exception()
+                if not exc:
+                    return
+                err_s = str_exc(exc)
+                log().exc(exc, "telegram.send.failed.retry.failed", err=err_s)
+
             err_s = str_exc(exc)
             log().error("telegram.send.failed", err=err_s)
             try:
@@ -458,12 +467,13 @@ class BotEngine:
                     alt = commands._err("There was a message here but it was too long for Telegram.")
                     coro_alt = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID),
                                                           text=alt, parse_mode=ParseMode.MARKDOWN)
-                    asyncio.run_coroutine_threadsafe(coro_alt, loop)
+                    fut = asyncio.run_coroutine_threadsafe(coro_alt, loop)
                 else:
                     # Assumes it was a Markdown parse error
                     coro_plain = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body,
                                                             parse_mode=None)
-                    asyncio.run_coroutine_threadsafe(coro_plain, loop)
+                    fut = asyncio.run_coroutine_threadsafe(coro_plain, loop)
+                fut.add_done_callback(_on_done_2)
             except Exception as e:
                 log().exc(e, where="telegram.send.retry_plain")
         fut.add_done_callback(_on_done)
