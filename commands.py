@@ -42,6 +42,9 @@ BANG_KEY = "!"
 
 EMOJI_WEIRD = "🌀"
 EMOJI_TABLE_ROW = "🪱"
+EMOJI_ERR = "👾"
+EMOJI_RETMSG = "🤖"
+EMOJI_PUZZLED = "🧩"
 
 def _weird(s):
     return f"{EMOJI_WEIRD} {s}"
@@ -355,7 +358,7 @@ class OCTable(OC):
 
                 if RENDER_STYLE == 1:
                     # separate header
-                    lines.append(_row(self.headers))
+                    lines.append(_row(f"**{x}**" for x in self.headers))
                     for row in self.rows:
                         lines.append(_row(str(x) for x in row))
                 else:
@@ -596,7 +599,7 @@ class CommandRegistry:
         line = f"`{pre}{name}`" + (f" {pos}" if pos else "") + opt
         line = re.sub(r"\s{2,}", " ", line).strip()
         if reason:
-            return f"🧩 **{reason}** 🧩 {line}"
+            return f"{EMOJI_PUZZLED} **{reason}** {EMOJI_PUZZLED} {line}"
         return line
 
     def _help_text(self, detail: int = 1, command: Optional[str] = None) -> CO:
@@ -690,7 +693,15 @@ def _txt(text: str) -> CO:
     return CO(OCText(text))
 
 def _err(text: str) -> CO:
-    body = f"👾 **{text.strip()}**"
+    body = f"{EMOJI_ERR} **{text.strip()}**"
+    return CO(OCMarkDown(body))
+
+def _bad_usage(text: str) -> CO:
+    body = f"{EMOJI_PUZZLED} **{text.strip()}**"
+    return CO(OCMarkDown(body))
+
+def _retmsg(text: str) -> CO:
+    body = f"{EMOJI_RETMSG} **{text.strip()}**"
     return CO(OCMarkDown(body))
 
 def _tbl(headers: List[str], rows: List[Sequence[Any]], intro: str | None = None) -> CO:
@@ -808,7 +819,7 @@ def build_registry() -> CommandRegistry:
         try:
             fields = _coerce_config_fields(provided)
         except Exception as e:
-            return _txt(f"Error: {e}")
+            return _err(f"Error: {e}")
 
         n = eng.store.update_config(fields)
         if n <= 0:
@@ -2036,7 +2047,7 @@ def build_registry() -> CommandRegistry:
             return _txt(f"Position {pid} updated: {changed}")
         except Exception as e:
             log().exc(e, where="cmd.position-set")
-            return _txt(f"Error updating position {pid}: {e}")
+            return _err(f"Error updating position {pid}: {e}")
 
     # ======================= LEG EDIT =======================
     @R.bang("leg-set",
@@ -2081,7 +2092,7 @@ def build_registry() -> CommandRegistry:
         except Exception as e:
             # Likely UNIQUE(position_id,symbol) or FK violations, surface cleanly.
             log().exc(e, where="cmd.leg-set")
-            return _txt(f"Error updating leg {lid}: {e}")
+            return _err(f"Error updating leg {lid}: {e}")
 
     # ----------------------- LEG BACKFILL PRICE -----------------------
     @R.bang("leg-set-ebyp", argspec=["leg_id", "price"], options=["lookback_days"])
@@ -2104,7 +2115,7 @@ def build_registry() -> CommandRegistry:
             leg_id = int(args["leg_id"])
             price = float(args["price"])
         except Exception:
-            return _txt("Usage: !leg-backfill-price <leg_id> <price> [lookback_d:7] [path:1d,1h,1m]")
+            return _bad_usage("Usage: !leg-backfill-price <leg_id> <price> [lookback_d:7] [path:1d,1h,1m]")
 
         lookback_days = int(args.get("lookback_d", "365"))
         path = ["1d", "1h", "1m"]
