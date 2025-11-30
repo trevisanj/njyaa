@@ -362,7 +362,7 @@ class OCTable(OC):
                     # header repeated for each row
                     for row in self.rows:
                         parts = [f"`{h}`: **{v}**" for h, v in zip(self.headers, row)]
-                        lines.append(_row(parts))
+                        lines.append(_row(str(x) for x in parts))
                 body = "\n".join(lines)
 
                 print("--------------------------------")
