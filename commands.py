@@ -1260,6 +1260,7 @@ def build_registry() -> CommandRegistry:
                 pid,
                 pair_str,
                 pnl_str,
+                pnl_pct,
             ])
 
             # detail 3 rows
@@ -1346,7 +1347,7 @@ def build_registry() -> CommandRegistry:
             return _md("\n".join(md_lines + [""] + summary_lines))
 
         if detail == 2:
-            headers = ["id", "pair", "pnl$"]
+            headers = ["id", "pair", "pnl$", "pnl%"]
             return CO([
                 OCMarkDown("\n".join(md_lines + [""] + summary_lines)),
                 OCTable(headers=headers, rows=rows_tbl_d2),
