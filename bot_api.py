@@ -450,10 +450,16 @@ class BotEngine:
             exc = f.exception()
             if not exc:
                 return
-            log().error("telegram.send.failed", err=str(exc))
+            err_s = str_exc(exc)
+            log().error("telegram.send.failed", err=err_s)
             try:
-                coro_plain = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body, parse_mode=None)
-                asyncio.run_coroutine_threadsafe(coro_plain, loop)
+                if "Message is too long" in err_s:
+                    alt = "There was a message here but it was too long for Telegram."
+                    coro_alt = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=alt, parse_mode=None)
+                    asyncio.run_coroutine_threadsafe(coro_alt, loop)
+                else:
+                    coro_plain = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body, parse_mode=None)
+                    asyncio.run_coroutine_threadsafe(coro_plain, loop)
             except Exception as e:
                 log().exc(e, where="telegram.send.retry_plain")
         fut.add_done_callback(_on_done)
