@@ -429,7 +429,8 @@ class CO:
                     raise TypeError(f"Output item must be OC (output component) subclass or str, not {name}")
                 else:
                     cc.append(aargh)
-
+    def __getitem__(self, item):
+        return self.components[item]
 
     def __iter__(self):
         return self.components.__iter__()

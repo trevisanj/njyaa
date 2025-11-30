@@ -465,7 +465,7 @@ class BotEngine:
             log().error("telegram.send.failed", err=err_s)
             try:
                 if "Message is too long" in err_s:
-                    alt = commands._err("There was a message here but it was too long for Telegram.")
+                    alt = commands._err("There was a message here but it was too long for Telegram.")[0].text
                     coro_alt = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID),
                                                           text=alt, parse_mode=ParseMode.MARKDOWN)
                     fut = asyncio.run_coroutine_threadsafe(coro_alt, loop)
