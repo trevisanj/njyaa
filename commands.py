@@ -497,7 +497,7 @@ class CommandRegistry:
         parts = s.split(None, 1)
         if not parts:
             log().debug("dispatch.exit", reason="empty-after-prefix")
-            return "Empty command."
+            return _bad_usage("Empty command.")
 
         head = parts[0][1:].lower()
         tail = parts[1].strip() if len(parts) > 1 else ""
@@ -506,13 +506,13 @@ class CommandRegistry:
 
         if not handler:
             log().warn("dispatch.unknown", prefix=prefix, head=head)
-            return f"Unknown {prefix}{head}. Try {AT_KEY}help."
+            return _bad_usage(f"Unknown {prefix}{head}. Try {AT_KEY}help.")
 
         # Parse args according to argspec/options
         args, errors = self._parse_args(tail, meta)
         if errors:
             usage = self._usage_line(meta, reason="; ".join(errors))
-            return CO(OCMarkDown(usage))
+            return _bad_usage(usage)
         argspec_in_meta = list(meta["argspec"])
         nreq = meta.get("nreq", len(argspec_in_meta))
         # Required positionals: first nreq argspec entries
@@ -520,7 +520,7 @@ class CommandRegistry:
         missing = [a for a in required_names if a not in args]
         if missing:
             usage = self._usage_line(meta, reason=f"Missing: {', '.join(missing)}")
-            return CO(OCMarkDown(usage))
+            return _bad_usage(usage)
 
         log().debug("dispatch.call", cmd=head, prefix=prefix, args=args)
         try:
