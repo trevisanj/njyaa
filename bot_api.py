@@ -15,8 +15,8 @@ import subprocess
 from pathlib import Path
 from queue import Queue, Empty
 from typing import Callable, List, Optional, Dict, TYPE_CHECKING
-
 from common import *  # Clock, log, AppConfig, tf_ms, etc.
+import common
 from storage import Storage
 from binance_um import BinanceUM
 from klines_cache import KlinesCache
@@ -24,7 +24,7 @@ from indicator_history import IndicatorHistory
 from engclasses import *  # MarketCatalog, PriceOracle, PositionBook, Worker, Reporter, ThinkerManager, etc.
 import tabulate
 import asyncio
-
+from telegram.constants import ParseMode
 from rich.console import Console
 from console_ui import ConsoleUI  #, CONSOLE_THEME
 
@@ -454,11 +454,14 @@ class BotEngine:
             log().error("telegram.send.failed", err=err_s)
             try:
                 if "Message is too long" in err_s:
-                    alt = "There was a message here but it was too long for Telegram."
-                    coro_alt = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=alt, parse_mode=None)
+                    alt = common._err("There was a message here but it was too long for Telegram.")
+                    coro_alt = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID),
+                                                          text=alt, parse_mode=ParseMode.MARKDOWN)
                     asyncio.run_coroutine_threadsafe(coro_alt, loop)
                 else:
-                    coro_plain = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body, parse_mode=None)
+                    # Assumes it was a Markdown parse error
+                    coro_plain = self._app.bot.send_message(chat_id=int(self.cfg.TELEGRAM_CHAT_ID), text=body,
+                                                            parse_mode=None)
                     asyncio.run_coroutine_threadsafe(coro_plain, loop)
             except Exception as e:
                 log().exc(e, where="telegram.send.retry_plain")
