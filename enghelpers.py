@@ -400,22 +400,23 @@ def open_position(eng: BotEngine, num_tok: str, den_tok: Optional[str],
     """
     num = eng.mc.normalize(num_tok)
     den = eng.mc.normalize(den_tok) if den_tok else None
-    dir_sign = 1 if usd_notional >= 0 else -1
-    target = abs(float(usd_notional))
+    target = float(usd_notional)
     cfg = eng.store.get_config()
     risk_val = cfg["default_risk"] if risk is None else float(risk)
     if risk_val <= 0:
         raise ValueError("risk must be > 0")
+    if target == 0:
+        raise ValueError("target_usd must be non-zero")
 
-    pid = eng.store.create_position(num, den, dir_sign, target, risk_val, user_ts, status="OPEN", note=note)
+    pid = eng.store.create_position(num, den, target, risk_val, user_ts, status="OPEN", note=note)
 
-    eng.store.ensure_leg_stub(pid, num)
+    eng.store.create_leg_stub(pid, num, target)
     if den:
-        eng.store.ensure_leg_stub(pid, den)
+        eng.store.create_leg_stub(pid, den, -target)
 
     eng.store.enqueue_job(f"price:{pid}", "FETCH_ENTRY_PRICES",
                           {"position_id": pid, "user_ts": user_ts}, position_id=pid)
 
     log().info("Position opened (queued price backfill)", position_id=pid, num=num, den=den,
-               dir=("LONG" if dir_sign > 0 else "SHORT"), usd=target, risk=risk_val)
+               dir=("LONG" if target > 0 else "SHORT"), usd=abs(target), risk=risk_val)
     return pid

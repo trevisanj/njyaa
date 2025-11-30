@@ -314,8 +314,9 @@ class TrailingStopThinker(ThinkerBase):
             now = now_ms
             cooldown_ms = int(self._cfg["alert_cooldown_ms"])
 
-            if _stop_improved(pos.dir_sign, prev_stop_val, latest_stop, min_move_bp):
-                msg = f"🟢 [trail] {stamp()} stop -> {float2str(latest_stop)} ({'LONG' if pos.dir_sign>0 else 'SHORT'})"
+            side = pos.side
+            if _stop_improved(side, prev_stop_val, latest_stop, min_move_bp):
+                msg = f"🟢 [trail] {stamp()} stop -> {float2str(latest_stop)} ({'LONG' if side>0 else 'SHORT'})"
                 self.notify("INFO", msg, send=True,
                             num_den=num_den, stop=latest_stop, prev=prev_stop_val, price=price)
                 last_move_alert_ts = now

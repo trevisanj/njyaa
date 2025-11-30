@@ -31,8 +31,7 @@ class Position:
     position_id: int
     num: str
     den: Optional[str]
-    dir_sign: int
-    target_usd: float
+    target_usd: float  # signed
     risk: float
     user_ts: Optional[int]
     status: str
@@ -46,7 +45,6 @@ class Position:
             position_id=row["position_id"],
             num=row["num"],
             den=row["den"],
-            dir_sign=row["dir_sign"],
             target_usd=row["target_usd"],
             risk=row["risk"],
             user_ts=row["user_ts"],
@@ -61,7 +59,8 @@ class Position:
 
     @property
     def side(self) -> int:
-        return self.dir_sign
+        assert self.target_usd != 0
+        return 1 if self.target_usd > 0 else -1
 
     def get_pair(self, printer_friendly: bool = True) -> str:
         return fmt_pair(self.num, self.den, printer_friendly=printer_friendly)
@@ -272,7 +271,7 @@ class Worker:
             try:
                 payload = json.loads(job["payload"] or "{}")
                 if task == "FETCH_ENTRY_PRICES":
-                    self._do_price_backfill(jid, payload)
+                    self._do_price_backfill_position(jid, payload)
                     self.store.finish_job(jid, ok=True)
                 else:
                     raise ValueError(f"Unknown task {task}")
@@ -281,42 +280,37 @@ class Worker:
                 log().exc(e, job_id=jid, task=task)
                 self.store.finish_job(jid, ok=False, error=str(e))
 
-    def _do_price_backfill(self, job_id: str, payload: dict):
-        pid = int(payload["position_id"])
-        user_ts = int(payload["user_ts"])
-        position = self.store.get_position(pid)
-        if not position:
-            raise ValueError(f"position #{pid} not found")
-
-        intended_usd = float(position["target_usd"])
-        num_sym = position["num"]
-        den_raw = position["den"]  # may be None
-        dir_sign = int(position["dir_sign"])
-
-        den_is_none = (den_raw is None)
-        den_str = "" if den_is_none else str(den_raw).strip().upper()
-        single_leg = den_is_none or den_str in ("", "1", "UNIT")
-
-        # price for NUM
-        pp_num = self.oracle.price_at(num_sym, user_ts)
-
-        def _signed_qty(symbol: str, usd: float, px: float, sign: int) -> float:
-            q_abs = self.mc.step_round_qty(symbol, abs(usd) / px)
-            return sign * q_abs
-
-        if single_leg:
-            q_num = _signed_qty(num_sym, intended_usd, pp_num.price, +1 if dir_sign > 0 else -1)
-            self.store.fulfill_leg(pid, num_sym, q_num, pp_num.price, pp_num.price_ts, pp_num.method)
-            log().info("Backfill complete (single-leg)", position_id=pid, q_num=q_num)
+    def _do_price_backfill_leg(self, job_id: str, payload: dict):
+        leg_id = payload["leg_id"]
+        user_ts = payload["user_ts"]
+        leg = self.store.con.execute("SELECT * FROM legs WHERE leg_id=?", (leg_id,)).fetchone()
+        if not leg:
+            raise ValueError(f"leg #{leg_id} not found")
+        if int(leg["need_backfill"]) == 0:
+            log().info("Backfill skip (already filled)", leg_id=leg_id, position_id=leg["position_id"])
             return
+        pid = leg["position_id"]
+        target_usd = leg["target_usd"]
+        if target_usd == 0:
+            raise ValueError(f"leg #{leg_id} has zero target_usd")
+        sym = leg["symbol"]
+        pp = self.oracle.price_at(sym, user_ts)
 
-        # pair
-        den_sym = den_str
-        pp_den = self.oracle.price_at(den_sym, user_ts)
+        def _signed_qty(symbol: str, usd: float, px: float) -> float:
+            q_abs = self.mc.step_round_qty(symbol, abs(usd) / px)
+            return (1 if usd > 0 else -1) * q_abs
 
-        q_num = _signed_qty(num_sym, intended_usd, pp_num.price, +1 if dir_sign > 0 else -1)
-        q_den = _signed_qty(den_sym, intended_usd, pp_den.price, -1 if dir_sign > 0 else +1)
+        qty = _signed_qty(sym, target_usd, pp.price)
+        self.store.fulfill_leg(leg_id, qty, pp.price, pp.price_ts, pp.method)
+        log().info("Backfill complete (leg)", leg_id=leg_id, position_id=pid, symbol=sym, qty=qty)
 
-        self.store.fulfill_leg(pid, num_sym, q_num, pp_num.price, pp_num.price_ts, pp_num.method)
-        self.store.fulfill_leg(pid, den_sym, q_den, pp_den.price, pp_den.price_ts, pp_den.method)
-        log().info("Backfill complete (pair)", position_id=pid, q_num=q_num, q_den=q_den)
+    def _do_price_backfill_position(self, job_id: str, payload: dict):
+        pid = payload["position_id"]
+        user_ts = payload["user_ts"]
+        legs = self.store.legs_needing_backfill(pid)
+        if not legs:
+            log().info("Backfill skipped (no pending legs)", position_id=pid)
+            return
+        for lg in legs:
+            lid = int(lg["leg_id"])
+            self._do_price_backfill_leg(job_id, {"leg_id": lid, "user_ts": user_ts})

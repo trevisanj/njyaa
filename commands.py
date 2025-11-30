@@ -1413,6 +1413,33 @@ def build_registry() -> CommandRegistry:
             f"risk={_fmt_pct(risk_val)} (queued price backfill)."
         )
 
+    @R.bang("leg", argspec=["position_id", "when", "symbol", "usd"], options=["note"])
+    def _bang_leg(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """
+        Add a single-symbol leg to an existing position (signed USD).
+
+        Usage:
+          !leg <position_id> <ISO|epoch_ms> <SYMBOL> <±usd> [note:...]
+        """
+        pid = int(args["position_id"])
+        ts_ms = parse_when(args["when"])
+        sym = eng.mc.normalize(args["symbol"])
+        usd = float(args["usd"])
+        if usd == 0:
+            return _bad_usage("usd must be non-zero")
+
+        row = eng.store.get_position(pid, fmt="row")
+        if row is None:
+            return _err(f"Position {pid} not found.")
+        if str(row["status"]).upper() == "CLOSED":
+            return _err(f"Position {pid} is CLOSED; cannot add legs.")
+
+        note = args.get("note")
+        lid = eng.store.create_leg_stub(pid, sym, usd, note)
+        eng.store.enqueue_job(f"price:{pid}", "FETCH_ENTRY_PRICES",
+                              {"position_id": pid, "user_ts": ts_ms}, position_id=pid)
+        return _retmsg(f"Leg {lid} added to position {pid} {sym} target=${abs(usd):.0f} (backfill queued).")
+
     # ----------------------- THINKERS LIST -----------------------
     @R.at("thinkers", argspec=["thinker_id"], options=["detail"], nreq=0)
     def _at_thinkers(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -2018,13 +2045,13 @@ def build_registry() -> CommandRegistry:
     # ======================= POSITION EDIT =======================
     @R.bang("position-set",
             argspec=["position_id"],
-            options=["num", "den", "dir_sign", "target_usd", "risk", "user_ts", "closed_ts", "status", "note", "created_ts"])
+            options=["num", "den", "target_usd", "risk", "user_ts", "closed_ts", "status", "note", "created_ts"])
     def _bang_position_set(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Update fields in a position row (by position_id).
 
         Usage:
-          !position-set <position_id> [num:ETHUSDT] [den:STRKUSDT|-] [dir_sign:-1|+1]
+          !position-set <position_id> [num:ETHUSDT] [den:STRKUSDT|-]
                           [target_usd:5000] [risk:0.02] [user_ts:<when>] [closed_ts:<when>]
                           [status:OPEN|CLOSED]
                           [note:...] [created_ts:<when>]
@@ -2040,11 +2067,11 @@ def build_registry() -> CommandRegistry:
 
         # capture only provided (recognized) option keys
         provided = {k: v for k, v in args.items()
-                    if k in {"num", "den", "dir_sign", "target_usd", "risk", "user_ts", "closed_ts", "status", "note",
+                    if k in {"num", "den", "target_usd", "risk", "user_ts", "closed_ts", "status", "note",
                              "created_ts"} and v is not None}
 
         if not provided:
-            return _bad_usage("Nothing to update. Allowed keys: num den dir_sign target_usd user_ts status note created_ts")
+            return _bad_usage("Nothing to update. Allowed keys: num den target_usd user_ts status note created_ts")
 
         try:
             fields = _coerce_position_fields(provided)
@@ -2293,10 +2320,7 @@ def _fmt_qty(x: Any) -> str:
         return "?"
 
 def _position_signed_target(row) -> float:
-    # Correct sign: dir_sign * target_usd
-    ds = row["dir_sign"]
-    tgt = row["target_usd"]
-    return ds * tgt
+    return row["target_usd"]
 
 
 # ===== helpers for field coercion / updates (local to build_registry) ====
@@ -2324,17 +2348,16 @@ def _coerce_position_fields(raw: dict) -> dict:
     if "den" in raw:
         v = _blank_to_none(raw["den"])
         out["den"] = None if v is None else str(v).upper().strip()
-    if "dir_sign" in raw:
-        ds = int(raw["dir_sign"])
-        if ds not in (-1, 1):
-            raise ValueError("dir_sign must be -1 or +1")
-        out["dir_sign"] = ds
     if "risk" in raw:
         rv = float(raw["risk"])
         if rv <= 0:
             raise ValueError("risk must be > 0")
         out["risk"] = rv
-    if "target_usd" in raw: out["target_usd"] = float(raw["target_usd"])
+    if "target_usd" in raw:
+        tgt = float(raw["target_usd"])
+        if tgt == 0:
+            raise ValueError("target_usd must be non-zero")
+        out["target_usd"] = tgt
     if "user_ts" in raw: out["user_ts"] = parse_when(str(raw["user_ts"]))
     if "closed_ts" in raw: out["closed_ts"] = parse_when(str(raw["closed_ts"]))
     if "created_ts" in raw: out["created_ts"] = parse_when(str(raw["created_ts"]))

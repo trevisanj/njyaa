@@ -36,6 +36,8 @@ class Storage:
         self._indicator_history = None  # optional hook to external history store
         self._init_db()
         self._configure_pragmas()
+        self._migrate_positions_signed_target()
+        self._migrate_legs_target_usd()
 
     def _configure_pragmas(self):
         # Pragmas applied once per connection
@@ -54,8 +56,7 @@ class Storage:
           position_id   INTEGER PRIMARY KEY AUTOINCREMENT,
           num           TEXT    NOT NULL,
           den           TEXT,                    -- NULL => single-leg
-          dir_sign      INTEGER NOT NULL,        -- +1 long, -1 short (meaning for single-leg)
-          target_usd    REAL    NOT NULL,
+          target_usd    REAL    NOT NULL,        -- signed: + long, - short
           risk          REAL    NOT NULL DEFAULT 0.02,
           user_ts       INTEGER NOT NULL,        -- user-declared timestamp (ms)
           closed_ts     INTEGER,                 -- when status transitions to CLOSED (ms)
@@ -65,7 +66,7 @@ class Storage:
         );
         -- Uniqueness of a conceptual “position”
         CREATE UNIQUE INDEX IF NOT EXISTS ux_positions_signature
-          ON positions(num, den, dir_sign, target_usd, user_ts);
+          ON positions(num, den, target_usd, user_ts);
 
         -- ============ legs ============
         CREATE TABLE IF NOT EXISTS legs (
@@ -73,6 +74,7 @@ class Storage:
           position_id     INTEGER NOT NULL,
           symbol          TEXT    NOT NULL,
           qty             REAL,                  -- signed; NULL until backfilled
+          target_usd      REAL,                  -- optional signed notional for the leg
           entry_price     REAL,                  -- NULL until backfilled
           entry_price_ts  INTEGER,               -- NULL until backfilled
           price_method    TEXT,
@@ -212,6 +214,67 @@ class Storage:
         except Exception as e:
             log().exc(e, where="storage.drop_legacy_indicator_history")
 
+    def _migrate_positions_signed_target(self):
+        """
+        Drop dir_sign column and store signed target_usd instead.
+        Rebuilds positions table if the legacy dir_sign column is present.
+        """
+        try:
+            cols = [r[1] for r in self.con.execute("PRAGMA table_info(positions);").fetchall()]
+            if "dir_sign" not in cols:
+                return
+            log().info("migrate.positions.signed_target.start")
+            self.con.execute("PRAGMA foreign_keys=OFF;")
+            try:
+                with self.txn(write=True) as cur:
+                    cur.execute("""
+                        CREATE TABLE positions_tmp (
+                          position_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                          num           TEXT    NOT NULL,
+                          den           TEXT,
+                          target_usd    REAL    NOT NULL,
+                          risk          REAL    NOT NULL DEFAULT 0.02,
+                          user_ts       INTEGER NOT NULL,
+                          closed_ts     INTEGER,
+                          status        TEXT    NOT NULL DEFAULT 'OPEN',
+                          note          TEXT,
+                          created_ts    INTEGER NOT NULL
+                        );
+                    """)
+                    cur.execute("""
+                        INSERT INTO positions_tmp(position_id,num,den,target_usd,risk,user_ts,closed_ts,status,note,created_ts)
+                        SELECT position_id, num, den, dir_sign * target_usd, risk, user_ts, closed_ts, status, note, created_ts
+                        FROM positions;
+                    """)
+                    cur.execute("DROP TABLE positions;")
+                    cur.execute("ALTER TABLE positions_tmp RENAME TO positions;")
+                    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_positions_signature ON positions(num, den, target_usd, user_ts);")
+                log().info("migrate.positions.signed_target.ok")
+            finally:
+                self.con.execute("PRAGMA foreign_keys=ON;")
+        except Exception as e:
+            log().exc(e, where="storage.migrate_positions_signed_target")
+            raise
+
+    def _migrate_legs_target_usd(self):
+        """Add target_usd to legs if missing and backfill from positions."""
+        self._ensure_column("legs", "target_usd", "REAL")
+        try:
+            with self.txn(write=True) as cur:
+                cur.execute("""
+                    UPDATE legs
+                    SET target_usd = CASE
+                        WHEN p.den IS NULL OR p.den IN ('', '1', 'UNIT') THEN p.target_usd
+                        WHEN legs.symbol = p.num THEN p.target_usd
+                        ELSE -p.target_usd
+                    END
+                    FROM positions p
+                    WHERE legs.position_id = p.position_id AND legs.target_usd IS NULL
+                """)
+        except Exception as e:
+            log().exc(e, where="storage.migrate_legs_target_usd")
+            raise
+
     def get_config(self) -> dict:
         """Return singleton config (expects row to exist)."""
         row = self.con.execute(
@@ -253,15 +316,15 @@ class Storage:
             return 0
 
     # --- positions (auto-increment, unique signature) ---
-    def create_position(self, num: str, den: Optional[str], dir_sign: int,
+    def create_position(self, num: str, den: Optional[str],
                         target_usd: float, risk: float, user_ts: int,
                         status: str = "OPEN", note: Optional[str] = None) -> int:
         ts = Clock.now_utc_ms()
         with self.txn(write=True) as cur:
             cur.execute("""
-                INSERT INTO positions (num,den,dir_sign,target_usd,risk,user_ts,status,note,created_ts)
-                VALUES (?,?,?,?,?,?,?,?,?)
-            """, (num, den, int(dir_sign), float(target_usd), float(risk), int(user_ts), status, note, ts))
+                INSERT INTO positions (num,den,target_usd,risk,user_ts,status,note,created_ts)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (num, den, target_usd, risk, user_ts, status, note, ts))
             return int(cur.lastrowid)
 
     def get_position(self, position_id: int, fmt: str = "obj") -> Optional[Any]:
@@ -289,35 +352,38 @@ class Storage:
         self._indicator_history = ih
 
     # --- legs (stubs + fulfill) ---
-    def ensure_leg_stub(self, position_id: int, symbol: str):
-        """Create the leg if absent, marked as needing backfill."""
+    def create_leg_stub(self, position_id: int, symbol: str, target_usd: float, note: str | None = None) -> int:
+        """Create a leg stub marked as needing backfill. Returns leg_id."""
+        if float(target_usd) == 0:
+            raise ValueError("target_usd must be non-zero")
         with self.txn(write=True) as cur:
             cur.execute("""
-                INSERT OR IGNORE INTO legs(position_id, symbol, need_backfill)
-                VALUES (?, ?, 1)
-            """, (int(position_id), symbol))
+                INSERT INTO legs(position_id, symbol, target_usd, need_backfill, note)
+                VALUES (?, ?, ?, 1, ?)
+            """, (position_id, symbol, target_usd, note))
+            return int(cur.lastrowid)
 
-    def fulfill_leg(self, position_id: int, symbol: str, qty: float, price: float, price_ts: int, method: str):
+    def fulfill_leg(self, leg_id: int, qty: float, price: float, price_ts: int, method: str):
         """Fill qty/price and clear backfill flag."""
         with self.txn(write=True) as cur:
             cur.execute("""
                 UPDATE legs
                 SET qty = ?, entry_price = ?, entry_price_ts = ?, price_method = ?, need_backfill = 0
-                WHERE position_id = ? AND symbol = ?
-            """, (float(qty), float(price), int(price_ts), method, int(position_id), symbol))
+                WHERE leg_id = ?
+            """, (qty, price, price_ts, method, leg_id))
 
     def legs_needing_backfill(self, position_id: int):
         return self.con.execute("""
             SELECT * FROM legs WHERE position_id=? AND need_backfill=1
-        """, (int(position_id),)).fetchall()
+        """, (position_id,)).fetchall()
 
     # --- positions upsert (kept) ---
     def upsert_position(self, row: dict):
-        q = """INSERT OR IGNORE INTO positions(position_id,num,den,dir_sign,target_usd,risk,user_ts,status,note,created_ts)
-               VALUES(:position_id,:num,:den,:dir_sign,:target_usd,:risk,:user_ts,:status,:note,:created_ts)"""
+        q = """INSERT OR IGNORE INTO positions(position_id,num,den,target_usd,risk,user_ts,status,note,created_ts)
+               VALUES(:position_id,:num,:den,:target_usd,:risk,:user_ts,:status,:note,:created_ts)"""
         if "closed_ts" in row:
-            q = """INSERT OR IGNORE INTO positions(position_id,num,den,dir_sign,target_usd,risk,user_ts,closed_ts,status,note,created_ts)
-                   VALUES(:position_id,:num,:den,:dir_sign,:target_usd,:risk,:user_ts,:closed_ts,:status,:note,:created_ts)"""
+            q = """INSERT OR IGNORE INTO positions(position_id,num,den,target_usd,risk,user_ts,closed_ts,status,note,created_ts)
+                   VALUES(:position_id,:num,:den,:target_usd,:risk,:user_ts,:closed_ts,:status,:note,:created_ts)"""
         with self.txn(write=True) as cur:
             cur.execute(q, row)
 
