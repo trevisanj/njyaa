@@ -800,7 +800,7 @@ def build_registry() -> CommandRegistry:
     def _at_banner(eng: BotEngine, args: Dict[str, str]) -> CO:
         """Show engine start banner (host/git/start time)."""
         banner = eng.start_banner()
-        return _txt(banner)
+        return _retmsg(banner)
 
     # ----------------------- CONFIG SET -----------------------
     # TODO !config-set leverage:5  -->  Error: cannot access local variable 'rb' where it is not associated with a value
@@ -815,7 +815,7 @@ def build_registry() -> CommandRegistry:
         provided = {k: v for k, v in args.items()
                     if k in {"reference_balance", "leverage", "default_risk", "updated_by"} and v is not None}
         if not provided:
-            return _txt("Usage: !config-set reference_balance:<usd> leverage:<mult> default_risk:<0-1> [updated_by:you]")
+            return _bad_usage("Usage: !config-set reference_balance:<usd> leverage:<mult> default_risk:<0-1> [updated_by:you]")
         try:
             fields = _coerce_config_fields(provided)
         except Exception as e:
@@ -823,14 +823,14 @@ def build_registry() -> CommandRegistry:
 
         n = eng.store.update_config(fields)
         if n <= 0:
-            return _txt("No config fields updated.")
+            return _retmsg("No config fields updated.")
         changed = ", ".join(f"{k}={fields[k]}" for k in sorted(fields.keys()))
         cfg = eng.store.get_config()
         summary = (f"Config updated ({n} field(s)). "
                    f"balance=${_fmt_num(cfg['reference_balance'],2)} "
                    f"leverage={_fmt_num(cfg['leverage'],2)} "
                    f"default_risk={_fmt_pct(cfg['default_risk'])}")
-        return _txt(f"{summary} ({changed})")
+        return _retmsg(f"{summary} ({changed})")
 
     # ----------------------- TRAILING / STOP ATTACHMENTS -----------------------
     @R.bang("stop-attach", argspec=["thinker_id", "position_id", "sstrat_kind"],
@@ -902,7 +902,7 @@ def build_registry() -> CommandRegistry:
                 msg_target = f"position {pid}"
         inst.save_runtime()
         eng.tm.reload(thinker_id)
-        return _txt(f"Attached stop watcher to {msg_target} via thinker {thinker_id} ({sstrat_kind}) at {ts_human(at_ms)}")
+        return _retmsg(f"Attached stop watcher to {msg_target} via thinker {thinker_id} ({sstrat_kind}) at {ts_human(at_ms)}")
 
     @R.at("stop-list", argspec=["thinker_id"], nreq=1)
     def _at_stop_list(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -915,7 +915,7 @@ def build_registry() -> CommandRegistry:
         rt = inst.runtime()
         pp_ctx = rt.get(PP_CTX) or {}
         if not pp_ctx:
-            return _txt("No attachments.")
+            return _retmsg("No attachments.")
         tbl_rows = []
         for pid_str, ctx in pp_ctx.items():
             tbl_rows.append([
@@ -953,8 +953,8 @@ def build_registry() -> CommandRegistry:
         inst.save_runtime()
         eng.tm.reload(tid)
         if all_positions:
-            return _txt(f"Detached stop policies from all positions for thinker {tid}" + ("" if removed else " (none existed)"))
-        return _txt(f"Detached stop policies from position {pid}" + ("" if removed else " (none existed)"))
+            return _retmsg(f"Detached stop policies from all positions for thinker {tid}" + ("" if removed else " (none existed)"))
+        return _retmsg(f"Detached stop policies from position {pid}" + ("" if removed else " (none existed)"))
 
     # TODO gotta think carefully about detaching vs resetting: attaching must delete indicator history as well, i guess etc.
     @R.bang("stop-reset", argspec=["thinker_id", "position_id"], nreq=2)
@@ -984,8 +984,8 @@ def build_registry() -> CommandRegistry:
                 resets.append(pid_key)
         inst.save_runtime()
         if all_positions:
-            return _txt(f"Requested reset of trailing context for ALL positions on thinker {tid}; will rebuild on next tick")
-        return _txt(f"Requested reset of trailing context for position {pid}; will rebuild on next tick")
+            return _retmsg(f"Requested reset of trailing context for ALL positions on thinker {tid}; will rebuild on next tick")
+        return _retmsg(f"Requested reset of trailing context for position {pid}; will rebuild on next tick")
 
     @R.at("stop-state", argspec=["thinker_id", "position_id"], nreq=2)
     def _at_stop_state(eng: BotEngine, args: Dict[str, str]) -> CO:
@@ -999,7 +999,7 @@ def build_registry() -> CommandRegistry:
         rt = inst.runtime()
         ctx = (rt.get(PP_CTX) or {}).get(str(pid))
         if not ctx:
-            return _txt("No trailing state.")
+            return _retmsg("No trailing state.")
         trailing = ctx.get("trailing") or {}
         table_rows = []
         for name, meta in sorted(trailing.items()):
@@ -1079,7 +1079,7 @@ def build_registry() -> CommandRegistry:
                 """
             ).fetchall()
         if not rows:
-            return _txt("No indicator history.")
+            return _retmsg("No indicator history.")
         tbl_rows = [[r["thinker_id"], r["position_id"], r["name"], r["count"]] for r in rows]
         return _tbl(["thinker_id", "position_id", "name", "count"], tbl_rows, intro="Indicator history stats")
 
@@ -1092,7 +1092,7 @@ def build_registry() -> CommandRegistry:
         pid_i = int(pid) if pid is not None else None
         rows = eng.ih.list_indicators(tid_i, pid_i, fmt="columnar")
         if not rows or not rows.get("name"):
-            return _txt("No indicators recorded.")
+            return _retmsg("No indicators recorded.")
         tbl_rows = list(zip(rows["thinker_id"], rows["position_id"], rows["name"]))
         return _tbl(["thinker_id", "position_id", "name"], tbl_rows, intro="Indicator history keys")
 
@@ -1141,7 +1141,7 @@ def build_registry() -> CommandRegistry:
             else:
                 names = list(names or [])
             if not names:
-                return _txt("No indicators recorded.")
+                return _retmsg("No indicators recorded.")
 
             open_ms = int(pos["user_ts"] or pos["created_ts"])
             close_ms = int(pos["closed_ts"] or Clock.now_utc_ms())
@@ -1155,7 +1155,7 @@ def build_registry() -> CommandRegistry:
     def _at_open(eng: BotEngine, args: Dict[str, str]) -> CO:
         """List open RV positions (summary). Alias for: @positions status:open detail:2"""
         res = R.dispatch(eng, f"{AT_KEY}positions status:open detail:2")
-        return res if isinstance(res, CO) else _txt(str(res))
+        return res
 
     # ----------------------- POSITIONS (detail levels) -----------------------
     @R.at("positions", options=["status", "detail", "sort", "limit", "position_id", "pair"])
@@ -1404,10 +1404,10 @@ def build_registry() -> CommandRegistry:
         if risk_raw is not None:
             risk_val = float(risk_raw)
         if risk_val <= 0:
-            return _txt("risk must be > 0 (fraction, e.g., 0.02)")
+            return _bad_usage("risk must be > 0 (fraction, e.g., 0.02)")
 
         pid = eng.positionbook.open_position(num, den, usd, ts_ms, note=note, risk=risk_val)
-        return _txt(
+        return _retmsg(
             f"Opened pair {pid}: {num}/{den} target=${abs(usd):.0f} "
             f"risk={_fmt_pct(risk_val)} (queued price backfill)."
         )
@@ -1423,7 +1423,7 @@ def build_registry() -> CommandRegistry:
             rows = [r for r in rows if int(r["id"]) == int(tid_opt)]
             detail = 2  # force full view when targeting one
         if not rows:
-            return _txt("No thinkers.")
+            return _retmsg("No thinkers.")
 
         def _pretty_json(raw: str | None, indent: int = 2, compact: bool = False) -> str:
             try:
@@ -1471,7 +1471,7 @@ def build_registry() -> CommandRegistry:
             items = sorted(tm._instances.items(), key=lambda kv: kv[0])
             reload_pending = set(tm._reload_pending)
         if not items:
-            return _txt("No live thinkers.")
+            return _retmsg("No live thinkers.")
 
         if detail <= 1:
             lines = ["# Thinkers (live)", ""]
@@ -1519,14 +1519,14 @@ def build_registry() -> CommandRegistry:
         Usage:: !thinker-enable <id>"""
         tid = args["id"].strip()
         if not tid.isdigit():
-            return _txt("Usage: !thinker-enable <id>")
+            return _bad_usage("Usage: !thinker-enable <id>")
         tid_i = int(tid)
         row = eng.store.get_thinker(tid_i)
         if row is None:
             return _err(f"Thinker #{tid_i} not found.")
         eng.store.update_thinker_enabled(tid_i, True)
         eng.tm.reload(tid_i)
-        return _txt(f"Thinker #{tid} enabled.")
+        return _retmsg(f"Thinker #{tid} enabled.")
 
     # ----------------------- THINKER DISABLE -----------------------
     @R.bang("thinker-disable", argspec=["id"])
@@ -1538,21 +1538,21 @@ def build_registry() -> CommandRegistry:
         if tid_raw.lower() == "all":
             rows = eng.store.list_thinkers()
             if not rows:
-                return _txt("No thinkers.")
+                return _retmsg("No thinkers.")
             for row in rows:
                 tid = int(row["id"])
                 eng.store.update_thinker_enabled(tid, False)
                 eng.tm.disable(tid)
-            return _txt(f"Disabled all thinkers ({len(rows)}).")
+            return _retmsg(f"Disabled all thinkers ({len(rows)}).")
         if not tid_raw.isdigit():
-            return _txt("Usage: !thinker-disable <id|all>")
+            return _bad_usage("Usage: !thinker-disable <id|all>")
         tid_i = int(tid_raw)
         row = eng.store.get_thinker(tid_i)
         if row is None:
             return _err(f"Thinker #{tid_i} not found.")
         eng.store.update_thinker_enabled(tid_i, False)
         eng.tm.disable(tid_i)
-        return _txt(f"Thinker #{tid_raw} disabled.")
+        return _retmsg(f"Thinker #{tid_raw} disabled.")
 
     # ----------------------- THINKER REMOVE -----------------------
     @R.bang("thinker-rm", argspec=["id"])
@@ -1563,7 +1563,7 @@ def build_registry() -> CommandRegistry:
         Usage: !thinker-rm <id>"""
         tid_raw = args["id"].strip()
         if not tid_raw.isdigit():
-            return _txt("Usage: !thinker-rm <id>")
+            return _bad_usage("Usage: !thinker-rm <id>")
         tid = int(tid_raw)
         row = eng.store.get_thinker(tid)
         if row is None:
@@ -1572,7 +1572,7 @@ def build_registry() -> CommandRegistry:
             return _err(f"Thinker #{tid} must be disabled before deletion.")
         deleted_ih = eng.ih.delete_by_thinker(tid)
         eng.store.delete_thinker(tid)
-        return _txt(f"Thinker #{tid} deleted (indicator_history rows removed: {deleted_ih}).")
+        return _retmsg(f"Thinker #{tid} deleted (indicator_history rows removed: {deleted_ih}).")
 
     # ----------------------- THINKER SET -----------------------
     @R.bang("thinker-set", argspec=["id"], freeform=True)
@@ -1585,16 +1585,16 @@ def build_registry() -> CommandRegistry:
         """
         tid_raw = args["id"].strip()
         if not tid_raw.isdigit():
-            return _txt("Usage: !thinker-set <id> <key>=<val> ...")
+            return _bad_usage("Usage: !thinker-set <id> <key>=<val> ...")
         tid = int(tid_raw)
 
         updates = args["__freeform__"]
         if not updates:
-            return _txt("Provide at least one key=val")
+            return _bad_usage("Provide at least one key=val")
 
         row = eng.store.get_thinker(tid)
         if row is None:
-            return _txt(f"Thinker #{tid} not found.")
+            return _err(f"Thinker #{tid} not found.")
 
         cfg_cls = eng.tm.factory.cls_for(row["kind"]).Config
         allowed_keys = {f.name for f in fields(cfg_cls)}
@@ -1607,7 +1607,7 @@ def build_registry() -> CommandRegistry:
         cfg = json.loads(row["config_json"] or "{}")
         for k, v in updates.items():
             if not k:
-                return _txt("Empty config key not allowed.")
+                return _bad_usage("Empty config key not allowed.")
             cfg[k] = _coerce_cfg_val(v)
 
         # Validate by instantiating the thinker with proposed config
@@ -1647,12 +1647,12 @@ def build_registry() -> CommandRegistry:
         if kind_arg.isdigit():
             idx = int(kind_arg)
             if idx < 0 or idx >= len(kinds):
-                return _txt(f"Kind index out of range (0-{len(kinds)-1}).")
+                return _bad_usage(f"Kind index out of range (0-{len(kinds)-1}).")
             kind = kinds[idx]
         else:
             kind = kind_arg.upper()
             if kind not in kinds:
-                return _txt(f"Unknown thinker kind '{kind}'. Use ?thinker-kinds for a list.")
+                return _bad_usage(f"Unknown thinker kind '{kind}'. Use ?thinker-kinds for a list.")
 
         enabled_opt = args.get("enabled")
         enabled_val = 0
@@ -1683,7 +1683,7 @@ def build_registry() -> CommandRegistry:
         tid = eng.store.insert_thinker(kind, config=default_cfg)
         if not enabled_val:
             eng.store.update_thinker_enabled(tid, False)
-        return _txt(
+        return _retmsg(
             f"Thinker #{tid} created (kind={kind}, enabled={bool(enabled_val)}). "
             f"Config: {json.dumps(default_cfg, ensure_ascii=False)}"
         )
@@ -1701,18 +1701,18 @@ def build_registry() -> CommandRegistry:
         op = args["op"]
         pr = args["price"]
         if op not in (">=", "<="):
-            return _txt("Op must be >= or <=")
+            return _bad_usage("Op must be >= or <=")
 
         try:
             price = float(pr)
         except:
-            return _txt("Bad price.")
+            return _bad_usage("Bad price.")
 
         direction = "ABOVE" if op == ">=" else "BELOW"
         msg = args.get("msg", "")
         cfg = {"symbol": sym, "direction": direction, "price": price, "message": msg}
         tid = eng.store.insert_thinker("THRESHOLD_ALERT", cfg)
-        return _txt(f"Thinker #{tid} THRESHOLD_ALERT set for {sym} {direction} {price}")
+        return _retmsg(f"Thinker #{tid} THRESHOLD_ALERT set for {sym} {direction} {price}")
 
     # ----------------------- PSAR -----------------------
     @R.bang("psar", argspec=["position_id", "symbol", "direction"], options=["af", "max", "max_af", "win", "window", "window_min"])
@@ -1727,7 +1727,7 @@ def build_registry() -> CommandRegistry:
         sym = args["symbol"].upper()
         d = args["direction"].upper()
         if d not in ("LONG", "SHORT"):
-            return _txt("Direction must be LONG|SHORT")
+            return _bad_usage("Direction must be LONG|SHORT")
 
         kv = {"af": 0.02, "max_af": 0.2, "window_min": 200}
         # Allow multiple option spellings
@@ -1740,7 +1740,7 @@ def build_registry() -> CommandRegistry:
 
         cfg = {"position_id": pid, "symbol": sym, "direction": d, **kv}
         tid = eng.store.insert_thinker("PSAR_STOP", cfg)
-        return _txt(f"Thinker #{tid} PSAR_STOP set for {pid}/{sym} dir={d} af={kv['af']} max={kv['max_af']} win={kv['window_min']}")
+        return _retmsg(f"Thinker #{tid} PSAR_STOP set for {pid}/{sym} dir={d} af={kv['af']} max={kv['max_af']} win={kv['window_min']}")
 
     # ----------------------- JOBS -----------------------
     @R.at("jobs", options=["state", "limit"])
@@ -1756,7 +1756,7 @@ def build_registry() -> CommandRegistry:
 
         rows = eng.store.list_jobs(state=state, limit=limit)
         if not rows:
-            return _txt("No jobs.")
+            return _retmsg("No jobs.")
 
         def _fmt_ts(ms: int) -> str:
             return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat(timespec="seconds")
@@ -1793,11 +1793,11 @@ def build_registry() -> CommandRegistry:
         jid = args.get("id")
         if jid:
             ok = eng.store.retry_job(jid)
-            return _txt(f"{'Retried' if ok else 'Not found'}: {jid}")
+            return _retmsg(f"{'Retried' if ok else 'Not found'}: {jid}")
 
         limit = args.get("limit")
         n = eng.store.retry_failed_jobs(limit=int(limit) if limit else None)
-        return _txt(f"Retried {n} failed job(s).")
+        return _retmsg(f"Retried {n} failed job(s).")
 
     # ----------------------- CHART -----------------------
     @R.at("chart-candle", argspec=["symbol", "timeframe", "n"], nreq=2)
@@ -1989,7 +1989,7 @@ def build_registry() -> CommandRegistry:
         """
         rows = eh.klines_cache_summary(eng)
         if not rows:
-            return _txt("No klines cached.")
+            return _retmsg("No klines cached.")
         table_rows = [(r["symbol"], r["timeframe"], r["n"]) for r in rows]
         return _tbl(["symbol", "timeframe", "n"], table_rows, intro="# Klines cache")
 
@@ -1998,13 +1998,13 @@ def build_registry() -> CommandRegistry:
     def _bang_position_rm(eng: BotEngine, args: Dict[str, str]) -> CO:
         pid_s = args["position_id"].strip()
         if not pid_s.isdigit():
-            return _txt("Usage: !position-rm <position_id>")
+            return _bad_usage("Usage: !position-rm <position_id>")
         pid = int(pid_s)
         row = eng.store.get_position(pid, fmt="row")
         if row is None:
             return _err(f"Position {pid} not found.")
         deleted = eng.store.delete_position_completely(pid)
-        return _txt(f"Deleted position {pid} ({deleted} row(s)).")
+        return _retmsg(f"Deleted position {pid} ({deleted} row(s)).")
 
     # ======================= POSITION EDIT =======================
     @R.bang("position-set",
@@ -2026,7 +2026,7 @@ def build_registry() -> CommandRegistry:
         """
         pid_s = args.get("position_id", "")
         if not pid_s.isdigit():
-            return _txt("Usage: !position-set <position_id> …options…")
+            return _bad_usage("Usage: !position-set <position_id> …options…")
         pid = int(pid_s)
 
         # capture only provided (recognized) option keys
@@ -2035,16 +2035,16 @@ def build_registry() -> CommandRegistry:
                              "created_ts"} and v is not None}
 
         if not provided:
-            return _txt("Nothing to update. Allowed keys: num den dir_sign target_usd user_ts status note created_ts")
+            return _bad_usage("Nothing to update. Allowed keys: num den dir_sign target_usd user_ts status note created_ts")
 
         try:
             fields = _coerce_position_fields(provided)
             n = eng.store.sql_update("positions", "position_id", pid, fields)
             if n == 0:
-                return _txt(f"Position {pid} not found or unchanged.")
+                return _retmsg(f"Position {pid} not found or unchanged.")
             # brief echo of what changed
             changed = ", ".join(f"{k}={fields[k]!r}" for k in sorted(fields.keys()))
-            return _txt(f"Position {pid} updated: {changed}")
+            return _retmsg(f"Position {pid} updated: {changed}")
         except Exception as e:
             log().exc(e, where="cmd.position-set")
             return _err(f"Error updating position {pid}: {e}")
@@ -2070,7 +2070,7 @@ def build_registry() -> CommandRegistry:
         """
         lid_s = args.get("leg_id", "")
         if not lid_s.isdigit():
-            return _txt("Usage: !leg-set <leg_id> …options…")
+            return _bad_usage("Usage: !leg-set <leg_id> …options…")
         lid = int(lid_s)
 
         provided = {k: v for k, v in args.items()
@@ -2080,15 +2080,15 @@ def build_registry() -> CommandRegistry:
                           "note"} and v is not None}
 
         if not provided:
-            return _txt("Nothing to update. Allowed keys: position_id symbol qty entry_price entry_price_ts price_method need_backfill note")
+            return _bad_usage("Nothing to update. Allowed keys: position_id symbol qty entry_price entry_price_ts price_method need_backfill note")
 
         try:
             fields = _coerce_leg_fields(provided)
             n = eng.store.sql_update("legs", "leg_id", lid, fields)
             if n == 0:
-                return _txt(f"Leg {lid} not found or unchanged.")
+                return _retmsg(f"Leg {lid} not found or unchanged.")
             changed = ", ".join(f"{k}={fields[k]!r}" for k in sorted(fields.keys()))
-            return _txt(f"Leg {lid} updated: {changed}")
+            return _retmsg(f"Leg {lid} updated: {changed}")
         except Exception as e:
             # Likely UNIQUE(position_id,symbol) or FK violations, surface cleanly.
             log().exc(e, where="cmd.leg-set")
@@ -2122,12 +2122,12 @@ def build_registry() -> CommandRegistry:
 
         leg = eng.store.con.execute("SELECT * FROM legs WHERE leg_id=?", (leg_id,)).fetchone()
         if not leg:
-            return _txt(f"Leg #{leg_id} not found.")
+            return _err(f"Leg #{leg_id} not found.")
         symbol = leg["symbol"]
 
         ts = _find_price_touch_ts(eng.api, symbol, price, lookback_days=lookback_days, path=path)
         if ts is None:
-            return _txt(f"No {path[0]} candle for {symbol} contained {price} within ~{lookback_days}d.")
+            return _retmsg(f"No {path[0]} candle for {symbol} contained {price} within ~{lookback_days}d.")
 
         eng.store.sql_update(
             table="legs",
@@ -2140,7 +2140,7 @@ def build_registry() -> CommandRegistry:
             },
         )
 
-        return _txt(
+        return _retmsg(
             f"Leg #{leg_id} ({symbol}) updated: entry_price={price} "
             f"at {ts_human(ts)} (path={','.join(path)}, manual_touch)."
         )
@@ -2163,7 +2163,7 @@ def build_registry() -> CommandRegistry:
         status_opt = (args.get("status") or "all").strip().lower()
         valid_status = {"open", "closed", "all"}
         if status_opt not in valid_status:
-            return _txt("status must be one of: open|closed|all")
+            return _bad_usage("status must be one of: open|closed|all")
 
         # --- fetch legs joined with positions.status ---
         q = """
@@ -2179,7 +2179,7 @@ def build_registry() -> CommandRegistry:
 
         rows = eng.store.con.execute(q, params).fetchall()
         if not rows:
-            return _txt("No legs match.")
+            return _retmsg("No legs match.")
 
         # --- gather marks per symbol ---
         symbols = sorted({r["symbol"] for r in rows if r["symbol"]})
