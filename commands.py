@@ -357,12 +357,12 @@ class OCTable(OC):
                     # separate header
                     lines.append(_row(self.headers))
                     for row in self.rows:
-                        lines.append(_row(row))
+                        lines.append(_row(str(x) for x in row))
                 else:
                     # header repeated for each row
                     for row in self.rows:
                         parts = [f"`{h}`: **{v}**" for h, v in zip(self.headers, row)]
-                        lines.append(_row(str(x) for x in parts))
+                        lines.append(_row(parts))
                 body = "\n".join(lines)
 
                 print("--------------------------------")
