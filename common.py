@@ -394,6 +394,10 @@ def tf_ms(tf: str) -> int:
     return _TF_MS[tf]
 
 
+def str_exc(e: Exception) -> str:
+    return f"{e.__class__.__name__}: {e}"
+
+
 def float2str(
     x: float,
     *,
@@ -403,13 +407,10 @@ def float2str(
 ) -> str:
     """
     Pragmatic float formatter:
+
       - if |x| >= 1: show all digits before dot, cap fractional digits so total digits ~ max_total
       - if 0.1 <= |x| < 1: up to max_frac_lt1 fractional digits
       - if |x| < 0.1: show sig_small significant digits after leading zeros
-
-
-def str_exc(e: Exception) -> str:
-    return f"{e.__class__.__name__}: {e}"
     """
     if x == 0 or not isinstance(x, (int, float)):
         return str(x)
