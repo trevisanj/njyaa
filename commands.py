@@ -24,6 +24,7 @@ from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when, tf_ms
 from risk_report import build_risk_report, RiskThresholds, RiskReport, format_risk_report
 import stop_report
 import risk_report
+from engclasses import Position
 
 # TODO _fmt_rocket(<oneliner command result>)
 
@@ -345,11 +346,23 @@ class OCTable(OC):
             if not self.rows:
                 body = _weird("(empty table)")
             else:
+                RENDER_STYLE = 1
                 lines = []
-                for row in self.rows:
-                    parts = [f"`{h}`: **{v}**" for h, v in zip(self.headers, row)]
-                    line = (EMOJI_TABLE_ROW+" " + " | ".join(parts)) if parts else "(empty row)"
-                    lines.append(line)
+
+                def _row(parts):
+                    ret = (EMOJI_TABLE_ROW+" " + "  |  ".join(parts))
+                    return ret
+
+                if RENDER_STYLE == 1:
+                    # separate header
+                    lines.append(_row(self.headers))
+                    for row in self.rows:
+                        lines.append(_row(row))
+                else:
+                    # header repeated for each row
+                    for row in self.rows:
+                        parts = [f"`{h}`: **{v}**" for h, v in zip(self.headers, row)]
+                        lines.append(_row(parts))
                 body = "\n".join(lines)
 
                 print("--------------------------------")
@@ -1142,14 +1155,15 @@ def build_registry() -> CommandRegistry:
         status: open/closed/all
 
         detail: 1 = summary
-                2 = summary + per-position overview (with opened datetime & signed target)
-                3 = per-symbol leg summary (agg qty, WAP, last price, PnL)
-                4 = list every leg (timestamp, entry, last, qty, PnL)
+                2 = summary + minimal table (id, pair, pnl)
+                3 = summary + per-position overview (with opened datetime & signed target)
+                4 = per-symbol leg summary (agg qty, WAP, last price, PnL)
+                5 = list every leg (timestamp, entry, last, qty, PnL)
 
         Examples:
           ?positions detail:1
-          ?positions status:closed detail:2
-          ?positions pair:STRK/ETH detail:3 limit:20
+          ?positions status:closed detail:3
+          ?positions pair:STRK/ETH detail:4 limit:20
         """
         store = eng.store
         cfg = eng.store.get_config()
@@ -1186,18 +1200,22 @@ def build_registry() -> CommandRegistry:
                 return (r["num"].startswith(num) and r["den"].startswith(den))
             rows = [r for r in rows if _match(r)]
 
+        positions = [Position.from_row(r) for r in rows]
+
         # Precompute last cached prices for all involved symbols
         involved_syms = set()
-        for r in rows:
-            for lg in store.get_legs(r["position_id"]):
-                if lg["symbol"]:
-                    involved_syms.add(lg["symbol"])
-            marks: Dict[str, Optional[float]] = {s: eng.kc.last_cached_price(s) for s in involved_syms}
+        for pos in positions:
+            for lg in store.get_legs(pos.position_id):
+                sym = lg["symbol"]
+                if sym:
+                    involved_syms.add(sym)
+        marks = {s: eng.kc.last_cached_price(s) for s in involved_syms}
 
         # Shared accumulators
         md_lines: List[str] = [f"# Positions ({status})"]
         summary_lines: List[str] = []
         rows_tbl_d2: List[Sequence[Any]] = []
+        rows_tbl_d3: List[Sequence[Any]] = []
         detail3_lines: List[str] = []
         detail4_lines: List[str] = []
 
@@ -1206,13 +1224,14 @@ def build_registry() -> CommandRegistry:
         pnl_missing_count = 0
 
         count = 0
-        for r in rows:
+        for pos in positions:
             if count >= limit:
                 break
-            pid = r["position_id"]
-            opened_ms = r["user_ts"] or r["created_ts"]
+            pid = pos.position_id
+            pair_str = pos.get_pair()
+            opened_ms = pos.user_ts
             opened_str = ts_human(opened_ms)
-            signed_target = _position_signed_target(r)
+            signed_target = _position_signed_target(pos)
 
             # per-position aggregates
             pos_pnl = 0.0
@@ -1232,15 +1251,22 @@ def build_registry() -> CommandRegistry:
             else:
                 total_pnl += pos_pnl
 
-            risk_pct = _fmt_pct(r["risk"], show_sign=False)
+            risk_pct = _fmt_pct(pos.risk, show_sign=False)
             pnl_pct = _fmt_pct(pct_of(pos_pnl, ref_balance), show_sign=True)
             pnl_str = f"${_fmt_num(pos_pnl, 2)}" + (" (incomplete)" if any_missing else "")
 
             # detail 2 rows
             rows_tbl_d2.append([
                 pid,
-                f"{r['num']} / {r['den'] or '-'}",
-                r["status"],
+                pair_str,
+                pnl_str,
+            ])
+
+            # detail 3 rows
+            rows_tbl_d3.append([
+                pid,
+                pair_str,
+                pos.status,
                 opened_str,
                 f"${_fmt_num(signed_target, 2)}",
                 risk_pct,
@@ -1271,7 +1297,7 @@ def build_registry() -> CommandRegistry:
                     else:
                         by_sym[s]["pnl"] += pnl_sym
 
-                detail3_lines.append(f"## Position {pid}: {r['num']} / {r['den'] or '-'}")
+                detail3_lines.append(f"## Position {pid}: {pair_str}")
                 for s, acc in by_sym.items():
                     wap = (acc["wap_num"] / acc["wap_den"]) if acc["wap_den"] > 0 else None
                     last = marks.get(s)
@@ -1288,7 +1314,7 @@ def build_registry() -> CommandRegistry:
 
             # detail 4: list every leg
             if detail == 4:
-                detail4_lines.append(f"## Position {pid}: {r['num']} / {r['den'] or '-'}")
+                detail4_lines.append(f"## Position {pid}: {pair_str}")
                 for lg in legs:
                     ts = lg["entry_price_ts"]
                     ts_h = ts_human(ts)
@@ -1311,7 +1337,7 @@ def build_registry() -> CommandRegistry:
         total_pnl_pct = _fmt_pct(pct_of(total_pnl, ref_balance), show_sign=True)
         bal_str = _fmt_num(ref_balance, 2)
         summary_lines.append(
-            f"Positions: {len(rows)} | Target ≈ ${_fmt_num(total_target, 2)} | "
+            f"Positions: {len(positions)} | Target ≈ ${_fmt_num(total_target, 2)} | "
             f"PNL ≈ ${_fmt_num(total_pnl, 2)} ({total_pnl_pct} of balance ${bal_str})"
             + (f" (PnL incomplete for {pnl_missing_count} position(s))" if pnl_missing_count else "")
         )
@@ -1320,13 +1346,20 @@ def build_registry() -> CommandRegistry:
             return _md("\n".join(md_lines + [""] + summary_lines))
 
         if detail == 2:
-            headers = ["id", "pair", "status", "opened", "target$", "risk%", "pnl$", "pnl%"]
+            headers = ["id", "pair", "pnl$"]
             return CO([
                 OCMarkDown("\n".join(md_lines + [""] + summary_lines)),
                 OCTable(headers=headers, rows=rows_tbl_d2),
             ])
 
-        extra_lines = detail3_lines if detail == 3 else detail4_lines
+        if detail == 3:
+            headers = ["id", "pair", "status", "opened", "target$", "risk%", "pnl$", "pnl%"]
+            return CO([
+                OCMarkDown("\n".join(md_lines + [""] + summary_lines)),
+                OCTable(headers=headers, rows=rows_tbl_d3),
+            ])
+
+        extra_lines = detail3_lines if detail == 4 else detail4_lines
         body = "\n".join(md_lines + [""] + summary_lines + [""] + extra_lines)
         return _md(body)
 
