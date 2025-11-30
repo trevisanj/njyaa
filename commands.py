@@ -1287,8 +1287,8 @@ def build_registry() -> CommandRegistry:
                 pnl_pct,
             ])
 
-            # detail 3: per-symbol leg summary
-            if detail == 3:
+            # detail 4: per-symbol leg summary
+            if detail == 4:
                 by_sym: Dict[str, Dict[str, float]] = {}
                 missing_map: Dict[str, bool] = {}
                 for lg in legs:
@@ -1325,8 +1325,8 @@ def build_registry() -> CommandRegistry:
                         f"pnl=${pnl_s} pnl%={pnl_pct_leg} risk={risk_pct}"
                     )
 
-            # detail 4: list every leg
-            if detail == 4:
+            # detail 5: list every leg
+            if detail == 5:
                 detail4_lines.append(f"## Position {pid}: {pair_str}")
                 for lg in legs:
                     ts = lg["entry_price_ts"]
@@ -1372,7 +1372,7 @@ def build_registry() -> CommandRegistry:
                 OCTable(headers=headers, rows=rows_tbl_d3),
             ])
 
-        extra_lines = detail3_lines if detail == 4 else detail4_lines
+        extra_lines = detail3_lines if detail == 4 else detail4_lines if detail == 5 else []
         body = "\n".join(md_lines + [""] + summary_lines + [""] + extra_lines)
         return _md(body)
 
