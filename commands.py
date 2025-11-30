@@ -600,7 +600,7 @@ class CommandRegistry:
         line = f"`{pre}{name}`" + (f" {pos}" if pos else "") + opt
         line = re.sub(r"\s{2,}", " ", line).strip()
         if reason:
-            return f"{EMOJI_PUZZLED} **{reason}** {EMOJI_PUZZLED} {line}"
+            return f"**{reason}** {EMOJI_PUZZLED} {line}"
         return line
 
     def _help_text(self, detail: int = 1, command: Optional[str] = None) -> CO:
@@ -2074,7 +2074,6 @@ def build_registry() -> CommandRegistry:
 
         Notes:
           - entry_price_ts accepts ISO or epoch via parse_when().
-          - Changing position_id/symbol must respect UNIQUE(position_id,symbol).
         """
         lid_s = args.get("leg_id", "")
         if not lid_s.isdigit():
@@ -2098,7 +2097,6 @@ def build_registry() -> CommandRegistry:
             changed = ", ".join(f"{k}={fields[k]!r}" for k in sorted(fields.keys()))
             return _retmsg(f"Leg {lid} updated: {changed}")
         except Exception as e:
-            # Likely UNIQUE(position_id,symbol) or FK violations, surface cleanly.
             log().exc(e, where="cmd.leg-set")
             return _err(f"Error updating leg {lid}: {e}")
 
@@ -2519,6 +2517,8 @@ def _remove_indent(docstring: str) -> List:
         return ln[common:] if ln.startswith(" " * common) else ln
 
     stripped = [strip_prefix(ln) for ln in lines]
+    while stripped and not stripped[0].strip():
+        stripped.pop(0)
     return stripped
 
 

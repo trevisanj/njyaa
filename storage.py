@@ -36,6 +36,7 @@ class Storage:
         self._indicator_history = None  # optional hook to external history store
         self._init_db()
         self._configure_pragmas()
+        self._migrate_drop_legs_unique()
 
     def _configure_pragmas(self):
         # Pragmas applied once per connection
@@ -78,7 +79,6 @@ class Storage:
           price_method    TEXT,
           need_backfill   INTEGER NOT NULL DEFAULT 1,  -- 1 => needs qty/price fill
           note            TEXT,
-          UNIQUE(position_id, symbol),
           FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_legs_pos ON legs(position_id);
@@ -212,6 +212,48 @@ class Storage:
                 cur.execute("DROP TABLE IF EXISTS indicator_history")
         except Exception as e:
             log().exc(e, where="storage.drop_legacy_indicator_history")
+
+    def _migrate_drop_legs_unique(self):
+        """
+        Drop UNIQUE(position_id,symbol) from legs to allow multiple legs per symbol/position.
+        Rebuilds the table in-place while preserving data and the position_id index.
+        """
+        try:
+            idx_rows = self.con.execute("PRAGMA index_list('legs');").fetchall()
+            has_unique = any(r["origin"] == "u" for r in idx_rows)
+            if not has_unique:
+                return
+            log().info("migrate.legs.drop_unique.start")
+            self.con.execute("PRAGMA foreign_keys=OFF;")
+            try:
+                with self.txn(write=True) as cur:
+                    cur.execute("""
+                        CREATE TABLE legs_tmp (
+                          leg_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                          position_id     INTEGER NOT NULL,
+                          symbol          TEXT    NOT NULL,
+                          qty             REAL,
+                          entry_price     REAL,
+                          entry_price_ts  INTEGER,
+                          price_method    TEXT,
+                          need_backfill   INTEGER NOT NULL DEFAULT 1,
+                          note            TEXT,
+                          FOREIGN KEY(position_id) REFERENCES positions(position_id) ON DELETE CASCADE
+                        );
+                    """)
+                    cur.execute("""
+                        INSERT INTO legs_tmp(leg_id, position_id, symbol, qty, entry_price, entry_price_ts, price_method, need_backfill, note)
+                        SELECT leg_id, position_id, symbol, qty, entry_price, entry_price_ts, price_method, need_backfill, note FROM legs;
+                    """)
+                    cur.execute("DROP TABLE legs;")
+                    cur.execute("ALTER TABLE legs_tmp RENAME TO legs;")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_legs_pos ON legs(position_id);")
+                log().info("migrate.legs.drop_unique.ok")
+            finally:
+                self.con.execute("PRAGMA foreign_keys=ON;")
+        except Exception as e:
+            log().exc(e, where="storage.migrate_drop_legs_unique")
+            raise
 
     def get_config(self) -> dict:
         """Return singleton config (expects row to exist)."""

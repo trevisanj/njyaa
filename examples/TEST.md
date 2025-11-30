@@ -11,7 +11,7 @@ Usage:
           !config-set reference_balance:12000 leverage:2.0 default_risk:0.015
 
 **!leg-set** <leg_id> [entry_price:…] [entry_price_ts:…] [need_backfill:…] [note:…] [position_id:…] [price_method:…] [qty:…] [symbol:…]
-*Update fields in a leg row (by leg_id). Usage: !leg-set <leg_id> [position_id:123] [symbol:ETHUSDT] [qty:-0.75] [entry_price:3521.4] [entry_price_ts:<when>] [price_method:aggTrade|kline|mark_kline] [need_backfill:0|1] [note:...] Notes: - entry_price_ts accepts ISO or epoch via parse_when(). - Changing position_id/symbol must respect UNIQUE(position_id,symbol).*
+*Update fields in a leg row (by leg_id). Usage: !leg-set <leg_id> [position_id:123] [symbol:ETHUSDT] [qty:-0.75] [entry_price:3521.4] [entry_price_ts:<when>] [price_method:aggTrade|kline|mark_kline] [need_backfill:0|1] [note:...] Notes: - entry_price_ts accepts ISO or epoch via parse_when().*
 
 **!leg-set-ebyp** <leg_id> <price> [lookback_days:…]
 *Entry-by-price: set a leg's entry_price and entry_price_ts by locating the most recent candle whose [low, high] contains the given price, using a configurable coarse→fine path.*
