@@ -20,7 +20,7 @@ from rich.text import Text
 from rich.rule import Rule
 from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
-from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when, tf_ms
+from common import Clock, coerce_to_type, pct_of, leg_pnl, parse_when, tf_ms, thanksgod
 from risk_report import build_risk_report, RiskThresholds, RiskReport, format_risk_report
 import stop_report
 import risk_report
@@ -1849,15 +1849,21 @@ def build_registry() -> CommandRegistry:
             return CO(f"Error: {e}")
 
     # ----------------------- CHART PNL -----------------------
-    @R.at("chart-pnl", argspec=["which", "timeframe", "from", "to"], options=["pct"], nreq=1)
+    @R.at("chart-pnl", argspec=["position_id", "timeframe", "from", "to"], options=["pct"], nreq=0)
     def _at_chart_pnl(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Plot PnL over time for one position or all open positions.
 
         Usage:
           @chart-pnl <position_id|all> [<timeframe=1d>] [from:] [to:]
+
+        Examples:
+          @chart-pnl              # all open positions, 1d
+          @chart-pnl 12 4h        # position 12, 4h candles
+          @chart-pnl all 1h from:-7d to:-1d pct:true
         """
-        which = args["which"].strip().lower()
+        which_raw = args.get("position_id", "all")
+        which = str(which_raw).strip().lower()
         tf = args.get("timeframe", "1d")
         frm_raw = args.get("from")
         to_raw = args.get("to")
@@ -1966,6 +1972,7 @@ def build_registry() -> CommandRegistry:
         ax.set_ylabel("PnL (% of ref balance)" if pct_mode else "PnL (quote)")
         ax.grid(True, linestyle="--", alpha=0.35)
         ax.legend()
+        thanksgod()
         fig.tight_layout()
         out_path = os.path.join("/tmp", f"chart_pnl_{which}_{tf}.png")
         fig.savefig(out_path, bbox_inches="tight")

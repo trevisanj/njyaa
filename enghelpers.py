@@ -229,7 +229,7 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
     close_bounds: list[int] = []
     for p in positions:
         pid = int(p["position_id"])
-        closed_raw = p["closed_ts"] if "closed_ts" in p.keys() else None
+        closed_raw = p.closed_ts
         closed_ms = int(closed_raw) if closed_raw is not None else None
         open_bounds.append(p.user_ts)
         close_bounds.append(closed_ms or now_ms)
@@ -240,7 +240,7 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
             "den": p.den,
             "open_ms": p.user_ts,
             "closed_ms": closed_ms,
-            "status": p["status"],
+            "status": p.status,
         }
 
     # window based on union of position lifetimes unless explicitly overridden

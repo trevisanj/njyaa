@@ -41,6 +41,7 @@ __all__ = [
     "LatestPriceFail",
     "STATE_TS",
     "TICK_COUNT",
+    "thanksgod",
 ]
 
 class TooFewDataPoints(Exception):
@@ -499,3 +500,16 @@ def parse_when(s: str) -> int:
         pass
 
     raise ValueError(f"Unrecognized timestamp format: {s}")
+
+
+def thanksgod():
+    """Thanks God with capital "G" for this decent date/datetime/time x-labels."""
+
+    import matplotlib.pyplot as plt
+    from matplotlib import dates as mdates
+
+    axis = plt.gca()
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=7)
+    formatter = mdates.ConciseDateFormatter(locator)
+    axis.xaxis.set_major_locator(locator)
+    axis.xaxis.set_major_formatter(formatter)
