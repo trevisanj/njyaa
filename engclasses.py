@@ -19,8 +19,7 @@ from dataclasses import dataclass
 if False:
     from commands import CommandRegistry
 
-__all__ = ["MarketCatalog", "PricePoint", "PriceOracle", "PositionBook", "Reconciler", "Reporter", "Worker", "Position",
-]
+__all__ = ["MarketCatalog", "PricePoint", "PriceOracle", "Worker", "Position"]
 
 # =======================
 # == SYMBOL META/CATALOG
@@ -245,138 +244,6 @@ class PriceOracle:
 
 
 # =======================
-# ====== PAIR BOOK ======
-# =======================
-
-# FULL CLASS REPLACEMENT for PositionBook
-
-class PositionBook:
-    def __init__(self, store: Storage, mc: MarketCatalog, oracle: PriceOracle):
-        self.store, self.mc, self.oracle = store, mc, oracle
-
-    def open_position(self, num_tok: str, den_tok: Optional[str],
-                      usd_notional: int, user_ts: int, note: str = "",
-                      risk: Optional[float] = None) -> int:
-        num = self.mc.normalize(num_tok)
-        den = self.mc.normalize(den_tok) if den_tok else None
-        dir_sign = 1 if usd_notional >= 0 else -1
-        target = abs(float(usd_notional))
-        cfg = self.store.get_config()
-        risk_val = cfg["default_risk"] if risk is None else float(risk)
-        if risk_val <= 0:
-            raise ValueError("risk must be > 0")
-
-        # 1) get/create position (auto-increment id)
-        pid = self.store.get_or_create_position(
-            num, den, dir_sign, target, risk_val, user_ts, status="OPEN", note=note
-        )
-
-        # 2) create leg stubs (single or pair) — qty/price will be filled by backfill job
-        self.store.ensure_leg_stub(pid, num)
-        if den:
-            self.store.ensure_leg_stub(pid, den)
-
-        # 3) enqueue backfill job (will compute qty from USD + price)
-        self.store.enqueue_job(f"price:{pid}", "FETCH_ENTRY_PRICES",
-                               {"position_id": pid, "user_ts": user_ts}, position_id=pid)
-
-        log().info("Position opened (queued price backfill)", position_id=pid, num=num, den=den,
-                 dir=("LONG" if dir_sign > 0 else "SHORT"), usd=target, risk=risk_val)
-        return pid
-
-    def size_leg_from_price(self, symbol:str, usd:float, price:float) -> float:
-        qty = usd / price
-        return self.mc.step_round_qty(symbol, qty)
-
-    def pnl_position(self, pid: str, prices: Dict[str, float]) -> Dict[str, Any]:
-        legs = self.store.get_legs(pid)
-        if not legs: return {"position_id": pid, "pnl_usd": None, "ok": False}
-        pnl = 0.0
-        ok = True
-        for leg in legs:
-            mk = prices.get(leg["symbol"])
-            if mk is None: continue
-            q = leg["qty"]
-            ep = leg["entry_price"]
-            if q is None or ep is None:
-                pnl = None
-                ok = False
-                break
-            pnl += (mk - ep) * q
-        return {"position_id": pid, "pnl_usd": pnl, "ok": ok}
-
-
-# =======================
-# ====== RECONCILER =====
-# =======================
-
-class Reconciler:
-    def __init__(self, store: Storage, api: BinanceUM, cfg: AppConfig):
-        self.store, self.api, self.cfg = store, api, cfg
-
-    def pull_income_today(self):
-        tz = self.cfg.TZ_LOCAL
-        nowl = datetime.now(tz)
-        midnight = datetime(nowl.year, nowl.month, nowl.day, tzinfo=tz).astimezone(timezone.utc)
-        start_ms = int(midnight.timestamp() * 1000)
-        end_ms = Clock.now_utc_ms()
-        rows = self.api.income(start_ms, end_ms)
-        if isinstance(rows, list) and rows:
-            self.store.insert_income(rows)
-            log().info("Income rows inserted", n=len(rows))
-        else:
-            log().info("Income (none)")
-
-# =======================
-# ===== REPORTER =========
-# =======================
-
-class Reporter:
-    @staticmethod
-    def fmt_positions_summary(store, positionbook, rows, prices) -> str:
-        total_target = sum(float(r["target_usd"]) for r in rows)
-        total_pnl = 0.0
-        for r in rows:
-            print("BEFORE SHIT")
-            res = positionbook.pnl_position(r["position_id"], prices)
-            print("AFTER SHIT")
-            total_pnl += (res["pnl_usd"] if res["ok"] else 0.0)
-        return f"Positions: {len(rows)} | Target ≈ ${total_target:.2f} | PNL ≈ ${total_pnl:.2f}"
-
-    @staticmethod
-    def fmt_r_num_den(r):
-        return f"{r['num']} / {r['den'] or '-'}"
-
-    @staticmethod
-    def fmt_positions_full(store, positionbook, rows, marks, limit:int=100) -> str:
-        lines=[]; count=0
-        for r in rows:
-            if count>=limit: break
-            pid=r["position_id"]
-            res=positionbook.pnl_position(pid, marks)
-            pnl=res["pnl_usd"] if res["ok"] else 0.0
-            lines.append(f"{pid} {Reporter.fmt_r_num_den(r)} status={r['status']} target=${r['target_usd']:.2f} PNL=${pnl:.2f}")
-            count+=1
-        return "\n".join(lines) if lines else "No positions match."
-
-    @staticmethod
-    def fmt_positions_legs(store, positionbook, rows, marks, limit:int=100) -> str:
-        lines=[]; count=0
-        for r in rows:
-            if count>=limit: break
-            pid=r["position_id"]
-            res=positionbook.pnl_position(pid, marks)
-            pnl=res["pnl_usd"] if res["ok"] else 0.0
-            lines.append(f"{pid} {Reporter.fmt_r_num_den(r)} status={r['status']} target=${r['target_usd']:.2f} PNL=${pnl:.2f}")
-            for lg in store.get_legs(pid):
-                mk = marks.get(lg["symbol"])
-                lines.append(f"  - {lg['symbol']} qty={lg['qty']} entry={lg['entry_price']} (method={lg['price_method']}) mark={mk}")
-            count+=1
-        return "\n".join(lines) if lines else "No positions match."
-
-
-
-# =======================
 # ===== JOB QUEUE/WORKER
 # =======================
 
@@ -406,10 +273,6 @@ class Worker:
                 payload = json.loads(job["payload"] or "{}")
                 if task == "FETCH_ENTRY_PRICES":
                     self._do_price_backfill(jid, payload)
-                    self.store.finish_job(jid, ok=True)
-                elif task == "PULL_INCOME":
-                    rec = Reconciler(self.store, self.api, self.cfg)
-                    rec.pull_income_today()
                     self.store.finish_job(jid, ok=True)
                 else:
                     raise ValueError(f"Unknown task {task}")

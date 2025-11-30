@@ -5,7 +5,7 @@ from __future__ import annotations
 import json, math, sqlite3, time, threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Iterable, Tuple, Union, TYPE_CHECKING, get_type_hints, Literal
-from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle, PositionBook
+from bot_api import Storage, BinanceUM, MarketCatalog, PriceOracle
 from klines_cache import KlinesCache
 from common import log, Clock, AppConfig, coerce_to_type
 from abc import ABC, abstractmethod

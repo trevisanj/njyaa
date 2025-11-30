@@ -1383,7 +1383,7 @@ def build_registry() -> CommandRegistry:
         report = build_risk_report(eng)
         return format_risk_report(report)
     # ----------------------- !OPEN POSITION -----------------------
-    @R.bang("open", argspec=["pair", "ts", "usd"], options=["note", "risk"])
+    @R.bang("open", argspec=["pair", "when", "usd"], options=["note", "risk"])
     def _bang_open(eng: BotEngine, args: Dict[str, str]) -> CO:
         """
         Open/add an RV position.
@@ -1395,7 +1395,7 @@ def build_registry() -> CommandRegistry:
           !open STRK/ETH 2025-11-10T13:44:05  -5000 note:rv test
           !open ETHUSDT  2025-11-10T13:44:05 +3000
         """
-        ts_ms = parse_when(args["ts"])
+        ts_ms = parse_when(args["when"])
         num, den = eh.parse_pair_or_single(eng, args["pair"])
         usd = int(float(args["usd"]))
         note = args.get("note", "")
@@ -1407,7 +1407,7 @@ def build_registry() -> CommandRegistry:
         if risk_val <= 0:
             return _bad_usage("risk must be > 0 (fraction, e.g., 0.02)")
 
-        pid = eng.positionbook.open_position(num, den, usd, ts_ms, note=note, risk=risk_val)
+        pid = eh.open_position(eng, num, den, usd, ts_ms, note=note, risk=risk_val)
         return _retmsg(
             f"Opened pair {pid}: {num}/{den} target=${abs(usd):.0f} "
             f"risk={_fmt_pct(risk_val)} (queued price backfill)."
@@ -2004,6 +2004,7 @@ def build_registry() -> CommandRegistry:
 
     @R.bang("position-rm", argspec=["position_id"])
     def _bang_position_rm(eng: BotEngine, args: Dict[str, str]) -> CO:
+        """Delete a position and its legs."""
         pid_s = args["position_id"].strip()
         if not pid_s.isdigit():
             return _bad_usage("Usage: !position-rm <position_id>")

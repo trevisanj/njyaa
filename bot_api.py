@@ -21,7 +21,7 @@ from storage import Storage
 from binance_um import BinanceUM
 from klines_cache import KlinesCache
 from indicator_history import IndicatorHistory
-from engclasses import *  # MarketCatalog, PriceOracle, PositionBook, Worker, Reporter, ThinkerManager, etc.
+from engclasses import *  # MarketCatalog, PriceOracle, Worker, ThinkerManager, etc.
 import tabulate
 import asyncio
 from telegram.constants import ParseMode
@@ -218,8 +218,6 @@ class BotEngine:
         self.store: Optional[Storage] = None
         self.mc: Optional[MarketCatalog] = None
         self.oracle: Optional[PriceOracle] = None
-        self.positionbook: Optional[PositionBook] = None
-        self.reporter: Optional[Reporter] = None
         self.worker: Optional[Worker] = None
         self.scheduler: Optional[InternalScheduler] = None
         self.tgbot: Optional[TelegramBot] = None
@@ -318,8 +316,6 @@ class BotEngine:
         self.store = Storage(self.cfg.DB_PATH)
         self.mc = MarketCatalog(self.api)
         self.oracle = PriceOracle(self.cfg, self.api)
-        self.positionbook = PositionBook(self.store, self.mc, self.oracle)
-        self.reporter = Reporter()
         self.worker = Worker(self.cfg, self.store, self.api, self.mc, self.oracle)
         self.scheduler = InternalScheduler()
         self.kc = KlinesCache(self)

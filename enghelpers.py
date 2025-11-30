@@ -208,7 +208,7 @@ def pnl_time_series(eng: "BotEngine", position_ids: list[int], timeframe: str,
       report: dict with missing/issue details
     meta: dict with time bounds used
     """
-    assert eng.store and eng.kc and eng.positionbook
+    assert eng.store and eng.kc
     tfm = tf_ms(timeframe)
     now_ms = Clock.now_utc_ms()
 
@@ -388,3 +388,34 @@ def parse_pair_or_single(eng: BotEngine, raw: str) -> Tuple[str, Optional[str]]:
         raise ValueError(f"Unknown/unsupported denominator: {right}") from e
 
     return num, den
+
+
+def open_position(eng: BotEngine, num_tok: str, den_tok: Optional[str],
+                  usd_notional: int, user_ts: int, note: str = "",
+                  risk: Optional[float] = None) -> int:
+    """
+    Open/add an RV position.
+
+    Normalizes symbols, creates the position row, seeds leg stubs, and enqueues price backfill.
+    """
+    num = eng.mc.normalize(num_tok)
+    den = eng.mc.normalize(den_tok) if den_tok else None
+    dir_sign = 1 if usd_notional >= 0 else -1
+    target = abs(float(usd_notional))
+    cfg = eng.store.get_config()
+    risk_val = cfg["default_risk"] if risk is None else float(risk)
+    if risk_val <= 0:
+        raise ValueError("risk must be > 0")
+
+    pid = eng.store.create_position(num, den, dir_sign, target, risk_val, user_ts, status="OPEN", note=note)
+
+    eng.store.ensure_leg_stub(pid, num)
+    if den:
+        eng.store.ensure_leg_stub(pid, den)
+
+    eng.store.enqueue_job(f"price:{pid}", "FETCH_ENTRY_PRICES",
+                          {"position_id": pid, "user_ts": user_ts}, position_id=pid)
+
+    log().info("Position opened (queued price backfill)", position_id=pid, num=num, den=den,
+               dir=("LONG" if dir_sign > 0 else "SHORT"), usd=target, risk=risk_val)
+    return pid
